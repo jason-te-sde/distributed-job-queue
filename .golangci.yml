@@ -1,5 +1,13 @@
 version: "2"
 
+run:
+  # Analyze the files behind every build tag the repository uses. The pg tests
+  # need JOBQUEUE_TEST_DSN to run, but not to be analyzed.
+  build-tags:
+    - pg
+    - chaos
+    - e2e
+
 linters:
   default: standard
   enable:

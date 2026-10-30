@@ -21,14 +21,23 @@ BIN := $(CURDIR)/bin
 test:
 	$(GO) test -race ./...
 
-# Tests that need a live PostgreSQL, selected by the pg build tag.
+# Tests that need a live PostgreSQL, selected by the pg build tag. The run is
+# recorded as JSON in pg.json and then counted: a test that silently stops
+# running leaves the build green, so the count must not fall below
+# scripts/pg-min-tests.txt. -count=1 keeps go test from replaying a cached
+# result, which would count passes without touching PostgreSQL. The count
+# check runs even when go test failed, so that it can print what the failing
+# tests wrote, which the JSON hides.
 test-pg:
 	@if [ -z "$$JOBQUEUE_TEST_DSN" ]; then \
 		echo "test-pg: JOBQUEUE_TEST_DSN is empty; point it at a PostgreSQL database, for example" >&2; \
 		echo "  JOBQUEUE_TEST_DSN='postgres://localhost:5432/postgres?sslmode=disable' make test-pg" >&2; \
 		exit 1; \
 	fi
-	$(GO) test -race -tags pg ./...
+	@status=0; \
+	$(GO) test -race -count=1 -tags pg -json ./... >pg.json || status=$$?; \
+	scripts/check-pg-count.sh pg.json || status=$$?; \
+	exit $$status
 
 lint: check-buf
 	@golangci-lint version 2>/dev/null | grep -qF '$(GOLANGCI_LINT_SERIES)' || { \
@@ -75,6 +84,7 @@ hygiene:
 # Tests for the scripts themselves.
 test-scripts:
 	bash scripts/tests/hygiene_test.sh
+	bash scripts/tests/pg_count_test.sh
 
 preflight:
 	scripts/preflight.sh

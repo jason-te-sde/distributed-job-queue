@@ -33,6 +33,11 @@ make hygiene
 make test-scripts
 make test
 
+# The pg job of CI vets the Postgres tests first. Vetting needs no database, so
+# this runs even when JOBQUEUE_TEST_DSN is unset and the pg tests are skipped
+# below: the files behind the tag still have to compile.
+go vet -tags pg ./...
+
 if [ -n "${JOBQUEUE_TEST_DSN:-}" ]; then
   make test-pg
 else
