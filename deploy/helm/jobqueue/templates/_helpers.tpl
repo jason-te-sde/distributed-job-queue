@@ -7,13 +7,15 @@ Chart name, truncated to the 63 characters a DNS label allows.
 
 {{/*
 Fully qualified name: the release name, with the chart name appended unless the
-release name already contains it.
+release name already contains it. It is cut to 48 characters so that the
+longest suffix the templates add ("-example-worker", 15 characters) still fits
+in the 63 characters of a DNS label.
 */}}
 {{- define "jobqueue.fullname" -}}
 {{- if contains .Chart.Name .Release.Name -}}
-{{- .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- .Release.Name | trunc 48 | trimSuffix "-" -}}
 {{- else -}}
-{{- printf "%s-%s" .Release.Name .Chart.Name | trunc 63 | trimSuffix "-" -}}
+{{- printf "%s-%s" .Release.Name .Chart.Name | trunc 48 | trimSuffix "-" -}}
 {{- end -}}
 {{- end -}}
 
@@ -38,6 +40,15 @@ app.kubernetes.io/managed-by: {{ .ctx.Release.Service }}
 helm.sh/chart: {{ printf "%s-%s" .ctx.Chart.Name .ctx.Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{- end -}}
 
+{{/* Selector and common labels of the broker pods, shared by every object that selects or describes them. */}}
+{{- define "jobqueue.brokerSelectorLabels" -}}
+{{ include "jobqueue.selectorLabels" (dict "ctx" . "component" "broker") }}
+{{- end -}}
+
+{{- define "jobqueue.brokerLabels" -}}
+{{ include "jobqueue.labels" (dict "ctx" . "component" "broker") }}
+{{- end -}}
+
 {{/* Container image: the repository with the tag, or the appVersion when the tag is empty. */}}
 {{- define "jobqueue.image" -}}
 {{- printf "%s:%s" .Values.image.repository (.Values.image.tag | default .Chart.AppVersion) -}}
@@ -46,6 +57,13 @@ helm.sh/chart: {{ printf "%s-%s" .ctx.Chart.Name .ctx.Chart.Version | replace "+
 {{/* Container ports. They match the flags in deployment.yaml and the image's EXPOSE. */}}
 {{- define "jobqueue.grpcPort" -}}7070{{- end -}}
 {{- define "jobqueue.httpPort" -}}7071{{- end -}}
+
+{{/*
+Seconds the broker spends draining after SIGTERM: the default of its
+--shutdown-grace flag. The chart does not pass that flag, so this must follow the
+broker's default.
+*/}}
+{{- define "jobqueue.shutdownGraceSeconds" -}}25{{- end -}}
 
 {{/* The database URL, read from the Secret. */}}
 {{- define "jobqueue.databaseEnv" -}}

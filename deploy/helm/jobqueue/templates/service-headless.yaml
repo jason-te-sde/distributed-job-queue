@@ -6,11 +6,11 @@ kind: Service
 metadata:
   name: {{ include "jobqueue.fullname" . }}-grpc
   labels:
-    {{- include "jobqueue.labels" (dict "ctx" . "component" "broker") | nindent 4 }}
+    {{- include "jobqueue.brokerLabels" . | nindent 4 }}
 spec:
   clusterIP: None
   selector:
-    {{- include "jobqueue.selectorLabels" (dict "ctx" . "component" "broker") | nindent 4 }}
+    {{- include "jobqueue.brokerSelectorLabels" . | nindent 4 }}
   ports:
     - name: grpc
       port: {{ include "jobqueue.grpcPort" . }}

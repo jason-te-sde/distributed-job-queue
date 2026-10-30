@@ -9,8 +9,8 @@
 # The chart is linted with helm lint --strict twice: with the default values,
 # and with the example worker and KEDA enabled. It is then rendered with
 # helm template under several value sets, and each assertion greps the
-# rendering. Comment lines are removed first, so a comment can never satisfy an
-# assertion. Every failed assertion prints what was expected and the check
+# rendering or compares one block of it. Comment lines are removed first, so a
+# comment can never satisfy an assertion. Every failed assertion prints what was expected and the check
 # carries on, so one run reports every problem.
 #
 # Output: "helm: ok", or one "FAIL" line per failed expectation.
@@ -28,11 +28,22 @@ die() {
 command -v helm >/dev/null 2>&1 || die "helm is not installed"
 [ -f "$chart/Chart.yaml" ] || die "not a chart directory: $chart"
 
-release=jq
+default_release=jq
+release="$default_release"
 namespace=jobqueue
 # The Deployment is named <release>-<chart> when the release name does not
 # already contain the chart name.
-fullname="$release-jobqueue"
+fullname="$default_release-jobqueue"
+
+# The labels that select the broker pods, and those that select the example
+# worker pods. Selectors never carry the version or chart labels: a Deployment
+# selector cannot change once it exists.
+broker_selector="app.kubernetes.io/name: jobqueue
+app.kubernetes.io/instance: $release
+app.kubernetes.io/component: broker"
+worker_selector="app.kubernetes.io/name: jobqueue
+app.kubernetes.io/instance: $release
+app.kubernetes.io/component: example-worker"
 
 failures=0
 fail() {
@@ -89,6 +100,59 @@ expect_no_text() {
     fail "[$context] expected $1, but a line contains '$2'"
   fi
   return 0
+}
+
+# under <key>...: print the lines nested under the first line whose text,
+# ignoring leading spaces, is the first key; with more keys, repeat inside the
+# lines found. Reads $rendered.
+under() {
+  local text="$rendered" key
+  for key in "$@"; do
+    text="$(awk -v key="$key" '
+      function indent(s) { match(s, /^ */); return RLENGTH }
+      found && NF && indent($0) <= base { exit }
+      found { print; next }
+      { t = $0; sub(/^ +/, "", t); if (t == key) { found = 1; base = indent($0) } }
+    ' <<<"$text")"
+  done
+  printf '%s\n' "$text"
+}
+
+# expect_block <what> <expected lines> <key>...: the lines under the keys, with
+# their indentation removed, are exactly the expected lines.
+expect_block() {
+  local what="$1" want="$2" got
+  shift 2
+  got="$(under "$@" | sed 's/^ *//')"
+  if [ "$got" != "$want" ]; then
+    fail "[$context] expected $what: the lines under '$*' should be
+$want
+but are
+$got"
+  fi
+  return 0
+}
+
+# expect_block_has <what> <expected lines> <key>...: every expected line is one
+# of the lines under the keys.
+expect_block_has() {
+  local what="$1" want="$2" got line
+  shift 2
+  got="$(under "$@" | sed 's/^ *//')"
+  while IFS= read -r line; do
+    grep -Fxq -- "$line" <<<"$got" ||
+      fail "[$context] expected $what: no line under '$*' is '$line'"
+  done <<<"$want"
+  return 0
+}
+
+# names: print the metadata.name of every object in $rendered.
+names() {
+  awk '
+    /^---/ { inmeta = 0 }
+    /^metadata:/ { inmeta = 1; next }
+    inmeta && /^  name: / { print $2; inmeta = 0 }
+  ' <<<"$rendered"
 }
 
 # expect_render_error <label> <message> [helm template argument]...
@@ -173,6 +237,85 @@ expect_render_error "KEDA without the example worker" "example.keda.enabled requ
   --set example.keda.enabled=true
 expect_render_error "KEDA without the scaler" "example.keda.enabled requires scaler.enabled" \
   --set example.enabled=true,example.keda.enabled=true,scaler.enabled=false
+
+# Everything that selects the broker pods must select exactly them: no other
+# pods, and none of the broker pods missed.
+for entry in "service:the HTTP" "service-headless:the gRPC" "service-scaler:the scaler"; do
+  template="${entry%%:*}"
+  if render "selector of $template" --show-only "templates/$template.yaml"; then
+    expect_block "${entry#*:} Service to select exactly the broker pods" "$broker_selector" selector:
+  fi
+done
+if render "selector of the PDB" --show-only templates/pdb.yaml; then
+  expect_block "the PodDisruptionBudget to select exactly the broker pods" "matchLabels:
+$broker_selector" selector:
+fi
+if render "selector of the NetworkPolicy" --show-only templates/networkpolicy.yaml; then
+  expect_block "the NetworkPolicy to select exactly the broker pods" "matchLabels:
+$broker_selector" podSelector:
+fi
+
+if render "broker Deployment" --show-only templates/deployment.yaml; then
+  expect_block "the broker Deployment to select exactly the broker pods" "matchLabels:
+$broker_selector" selector:
+  expect_block_has "the broker pod template to carry the selector labels" "$broker_selector" template: labels:
+  expect_block "the readiness probe to request /readyz on the http port" "path: /readyz
+port: http" readinessProbe: httpGet:
+  expect_block "the liveness probe to request /healthz on the http port" "path: /healthz
+port: http" livenessProbe: httpGet:
+  expect_block "the preStop hook to run the jobqueuectl sleep subcommand" 'command: ["/jobqueuectl", "sleep", "5s"]' lifecycle: preStop: exec:
+fi
+
+if render "preStopSleepSeconds=7" --set preStopSleepSeconds=7 --show-only templates/deployment.yaml; then
+  expect_block "the preStop hook to sleep for preStopSleepSeconds" 'command: ["/jobqueuectl", "sleep", "7s"]' lifecycle: preStop: exec:
+fi
+
+# The pod is killed when terminationGracePeriodSeconds runs out, so the preStop
+# sleep plus the broker's 25 second drain must be strictly smaller. 14 + 25 is
+# 39, which fits in 40; 15 + 25 is 40, which does not.
+render "preStopSleepSeconds=14, the largest value that fits" --set preStopSleepSeconds=14 >/dev/null || true
+expect_render_error "preStopSleepSeconds=15, no room left to drain" \
+  "must be less than terminationGracePeriodSeconds" --set preStopSleepSeconds=15
+expect_render_error "terminationGracePeriodSeconds=30" \
+  "must be less than terminationGracePeriodSeconds" --set terminationGracePeriodSeconds=30
+
+if render "migration Job" --show-only templates/migrate-job.yaml; then
+  expect_text "the migration Job to run jobqueuectl" 'command: ["/jobqueuectl"]'
+  expect_text "the migration Job to run the migrate subcommand" 'args: ["migrate"]'
+  expect_text "the migration Job to fail rather than restart in place" "restartPolicy: Never"
+fi
+
+# The ScaledObject must scale the Deployment the chart renders for the example
+# worker, and that Deployment must select its own pods only.
+if render "example worker Deployment" --set example.enabled=true,example.keda.enabled=true --show-only templates/example-worker.yaml; then
+  worker_name="$(under metadata: | sed -n 's/^ *name: //p')"
+  expect_block "the example worker Deployment to select exactly the example worker pods" "matchLabels:
+$worker_selector" selector:
+  if [ "$worker_name" != "$fullname-example-worker" ]; then
+    fail "[$context] expected the example worker Deployment to be named $fullname-example-worker, got '$worker_name'"
+  fi
+  if render "ScaledObject target" --set example.enabled=true,example.keda.enabled=true --show-only templates/scaledobject.yaml; then
+    expect_block "the ScaledObject to target the example worker Deployment" "name: $worker_name" scaleTargetRef:
+  fi
+fi
+
+# Services, Jobs and the rest are DNS labels of at most 63 characters, and the
+# templates add suffixes to the release name. Helm allows 53 characters in a
+# release name, so check the longest one.
+release="$(printf '%053d' 0 | tr 0 r)"
+if render "a 53-character release name" --set example.enabled=true,example.keda.enabled=true; then
+  object_count=0
+  while IFS= read -r name; do
+    object_count=$((object_count + 1))
+    if [ "${#name}" -gt 63 ]; then
+      fail "[$context] expected every metadata.name to be at most 63 characters: '$name' has ${#name}"
+    fi
+  done < <(names)
+  if [ "$object_count" -lt 9 ]; then
+    fail "[$context] expected at least 9 named objects in the rendering, found $object_count"
+  fi
+fi
+release="$default_release"
 
 if [ "$failures" -gt 0 ]; then
   printf 'helm: %d check(s) failed\n' "$failures" >&2

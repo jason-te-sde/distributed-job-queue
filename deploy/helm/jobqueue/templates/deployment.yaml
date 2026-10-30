@@ -1,18 +1,25 @@
+{{- /*
+The pod is killed when terminationGracePeriodSeconds runs out, so the preStop
+sleep and the broker's drain must both fit inside it.
+*/ -}}
+{{- if ge (add (int .Values.preStopSleepSeconds) (int (include "jobqueue.shutdownGraceSeconds" .))) (int .Values.terminationGracePeriodSeconds) }}
+{{- fail (printf "preStopSleepSeconds (%v) plus the broker shutdown grace (%s) must be less than terminationGracePeriodSeconds (%v)" .Values.preStopSleepSeconds (include "jobqueue.shutdownGraceSeconds" .) .Values.terminationGracePeriodSeconds) }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "jobqueue.fullname" . }}
   labels:
-    {{- include "jobqueue.labels" (dict "ctx" . "component" "broker") | nindent 4 }}
+    {{- include "jobqueue.brokerLabels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicas }}
   selector:
     matchLabels:
-      {{- include "jobqueue.selectorLabels" (dict "ctx" . "component" "broker") | nindent 6 }}
+      {{- include "jobqueue.brokerSelectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "jobqueue.labels" (dict "ctx" . "component" "broker") | nindent 8 }}
+        {{- include "jobqueue.brokerLabels" . | nindent 8 }}
     spec:
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       securityContext:

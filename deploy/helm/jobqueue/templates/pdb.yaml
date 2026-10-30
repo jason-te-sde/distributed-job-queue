@@ -3,9 +3,9 @@ kind: PodDisruptionBudget
 metadata:
   name: {{ include "jobqueue.fullname" . }}
   labels:
-    {{- include "jobqueue.labels" (dict "ctx" . "component" "broker") | nindent 4 }}
+    {{- include "jobqueue.brokerLabels" . | nindent 4 }}
 spec:
   minAvailable: {{ .Values.pdb.minAvailable }}
   selector:
     matchLabels:
-      {{- include "jobqueue.selectorLabels" (dict "ctx" . "component" "broker") | nindent 6 }}
+      {{- include "jobqueue.brokerSelectorLabels" . | nindent 6 }}

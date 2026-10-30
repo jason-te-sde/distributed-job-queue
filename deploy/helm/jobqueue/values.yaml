@@ -49,8 +49,8 @@ scaler:
 pdb:
   minAvailable: 1
 
-# preStop sleep plus the broker shutdown grace (25s) must fit inside the
-# termination grace period.
+# The preStop sleep plus the broker shutdown grace (25s) must be less than the
+# termination grace period; the chart refuses to render otherwise.
 terminationGracePeriodSeconds: 40
 preStopSleepSeconds: 5
 

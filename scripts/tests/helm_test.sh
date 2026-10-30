@@ -122,3 +122,46 @@ broken_case network-policy-blocks-grpc-fails "port 7070" \
 # (m) The scaler flag must follow scaler.enabled.
 broken_case scaler-flag-ignores-disabled-fails "--scaler-addr" \
   sub templates/deployment.yaml 's/{{- if .Values.scaler.enabled }}$/{{- if true }}/'
+
+# (n) A Service, PodDisruptionBudget or NetworkPolicy whose selector does not
+# match the broker pods fails. The headless Service, the PDB and the policy
+# each take their selector from the same helper, so each is broken on its own.
+broker_selector='{{- include "jobqueue.brokerSelectorLabels" . | nindent'
+broken_case headless-service-selector-fails "the gRPC Service to select exactly the broker pods" \
+  sub templates/service-headless.yaml "s#$broker_selector 4 }}#app.kubernetes.io/component: other#"
+broken_case pdb-selector-fails "the PodDisruptionBudget to select exactly the broker pods" \
+  sub templates/pdb.yaml "s#$broker_selector 6 }}#app.kubernetes.io/component: other#"
+broken_case network-policy-selector-fails "the NetworkPolicy to select exactly the broker pods" \
+  sub templates/networkpolicy.yaml "s#$broker_selector 6 }}#app.kubernetes.io/component: other#"
+
+# (o) A preStop command that is not the jobqueuectl sleep subcommand fails.
+broken_case wrong-prestop-command-fails "the preStop hook to run the jobqueuectl sleep subcommand" \
+  sub templates/deployment.yaml 's/"sleep"/"sleeep"/'
+
+# (p) Swapped probe paths fail: each assertion names the probe it checks.
+broken_case swapped-probe-paths-fails "the readiness probe to request /readyz on the http port" \
+  sub templates/deployment.yaml 's#/readyz#/TMP#; s#/healthz#/readyz#; s#/TMP#/healthz#'
+
+# (q) A migration Job that runs another command, other arguments or restarts
+# the pod in place fails.
+broken_case wrong-migrate-command-fails 'command: ["/jobqueuectl"]' \
+  sub templates/migrate-job.yaml 's#command: \["/jobqueuectl"\]#command: ["/jobqueue-server"]#'
+broken_case wrong-migrate-args-fails 'args: ["migrate"]' \
+  sub templates/migrate-job.yaml 's#args: \["migrate"\]#args: ["migrat"]#'
+broken_case wrong-migrate-restart-policy-fails "restartPolicy: Never" \
+  sub templates/migrate-job.yaml 's/restartPolicy: Never/restartPolicy: OnFailure/'
+
+# (r) A ScaledObject that targets something other than the example worker
+# Deployment fails.
+broken_case scaledobject-wrong-target-fails "the ScaledObject to target the example worker Deployment" \
+  sub templates/scaledobject.yaml 's/^    name: .*/    name: other/'
+
+# (s) A pre-stop sleep that leaves no room for the broker's shutdown grace must
+# not render. The guard compares with ge, so a guard that lets the boundary
+# value through (15 + 25 == 40) is caught.
+broken_case prestop-guard-off-by-one-fails "preStopSleepSeconds" \
+  sub templates/deployment.yaml 's/{{- if ge /{{- if gt /'
+
+# (t) Resource names that outgrow the 63 characters of a DNS label fail.
+broken_case long-names-not-truncated-fails "at most 63 characters" \
+  sub templates/_helpers.tpl 's/trunc 48/trunc 63/'
