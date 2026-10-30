@@ -36,7 +36,7 @@ type Violation struct {
 	// concerns the package as a whole, such as an import.
 	File string
 	// Rule is the rule's name: core-imports, core-concurrency, core-calls,
-	// layering or dependencies.
+	// sim-determinism, layering or dependencies.
 	Rule string
 	// Detail says what was found.
 	Detail string
@@ -59,6 +59,7 @@ func Check(module string, pkgs []Package) []Violation {
 	out = append(out, coreImports(module, pkgs)...)
 	out = append(out, coreConcurrency(module, pkgs)...)
 	out = append(out, coreCalls(module, pkgs)...)
+	out = append(out, simDeterminism(module, pkgs)...)
 	out = append(out, layering(module, pkgs)...)
 	out = append(out, dependencies(module, pkgs)...)
 	return out
@@ -79,6 +80,8 @@ func isStdlib(path string) bool {
 
 func isCore(module, path string) bool { return under(path, module+"/internal/core") }
 
+func isSim(module, path string) bool { return under(path, module+"/internal/sim") }
+
 // bannedInCore reports whether a standard library package performs effects
 // that internal/core must leave to its callers.
 func bannedInCore(path string) bool {
@@ -90,15 +93,27 @@ func bannedInCore(path string) bool {
 	return under(path, "net")
 }
 
-// bannedCoreCall reports whether a fully qualified function must not be
-// called from internal/core: the clock, and the generator that math/rand/v2
-// keeps in global state. New, NewPCG and NewChaCha8 build explicitly seeded
-// generators and stay allowed.
-func bannedCoreCall(call string) bool {
+// bannedTimeCall reports whether a fully qualified function reads the wall
+// clock or waits on it.
+func bannedTimeCall(call string) bool {
 	switch call {
 	case "time.Now", "time.Since", "time.Until", "time.After", "time.AfterFunc",
 		"time.Sleep", "time.Tick", "time.NewTimer", "time.NewTicker":
 		return true
+	}
+	return false
+}
+
+// bannedAmbientCall reports whether a fully qualified function reads state
+// that lies outside the program's inputs: the clock, and the generator that
+// math/rand/v2 keeps in global state. New, NewPCG and NewChaCha8 build
+// explicitly seeded generators and stay allowed. internal/core and
+// internal/sim both ban these calls.
+func bannedAmbientCall(call string) bool {
+	if bannedTimeCall(call) {
+		return true
+	}
+	switch call {
 	case "math/rand/v2.New", "math/rand/v2.NewPCG", "math/rand/v2.NewChaCha8":
 		return false
 	}
@@ -155,9 +170,39 @@ func coreCalls(module string, pkgs []Package) []Violation {
 		}
 		for _, f := range p.Files {
 			for _, call := range f.Calls {
-				if bannedCoreCall(call) {
+				if bannedAmbientCall(call) {
 					out = append(out, Violation{Package: p.Path, File: f.Name, Rule: "core-calls",
 						Detail: "calls " + call + ", which core must not call"})
+				}
+			}
+		}
+	}
+	return out
+}
+
+// simDeterminism checks internal/sim/...: the simulator runs on a single
+// goroutine, takes its time from the World and draws its randomness from the
+// World's Rand, so a go statement, a read of the wall clock or a draw from
+// the global generator would make a run depend on the host.
+func simDeterminism(module string, pkgs []Package) []Violation {
+	var out []Violation
+	for _, p := range pkgs {
+		if !isSim(module, p.Path) {
+			continue
+		}
+		for _, f := range p.Files {
+			if f.HasGo {
+				out = append(out, Violation{Package: p.Path, File: f.Name, Rule: "sim-determinism",
+					Detail: "contains a go statement, but the simulator runs on a single goroutine"})
+			}
+			for _, call := range f.Calls {
+				switch {
+				case bannedTimeCall(call):
+					out = append(out, Violation{Package: p.Path, File: f.Name, Rule: "sim-determinism",
+						Detail: "calls " + call + ", which reads the wall clock; the simulator takes its time from the World"})
+				case bannedAmbientCall(call):
+					out = append(out, Violation{Package: p.Path, File: f.Name, Rule: "sim-determinism",
+						Detail: "calls " + call + ", which draws from the global math/rand/v2 generator; use the World's Rand"})
 				}
 			}
 		}

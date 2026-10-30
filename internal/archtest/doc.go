@@ -20,6 +20,11 @@
 //     only: a function value such as `var now = time.Now` is not a call of
 //     time.Now, so archtest misses it. forbidigo matches every use of the
 //     identifier and does catch it (see .golangci.yml).
+//   - sim-determinism: internal/sim/... has no go statement, never reads or
+//     waits on the wall clock and never uses the global math/rand/v2
+//     functions, so a simulated run depends on its seed alone. Like
+//     core-calls it sees direct call expressions only, and forbidigo covers
+//     the rest (see .golangci.yml).
 //   - layering: which internal packages may import which, and which helper
 //     packages only test files may import.
 //   - dependencies: the non-test code of the module imports only the
