@@ -5,3 +5,6 @@
 /coverage*
 .DS_Store
 /pg.json
+
+# Failure files that property tests write next to the package under test.
+**/testdata/rapid/

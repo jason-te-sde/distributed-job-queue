@@ -23,7 +23,6 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -32,6 +31,7 @@ import (
 	"time"
 
 	"github.com/jason-te-sde/distributed-job-queue/internal/core/job"
+	"github.com/jason-te-sde/distributed-job-queue/internal/flaw"
 	"github.com/jason-te-sde/distributed-job-queue/internal/store"
 )
 
@@ -141,9 +141,6 @@ var (
 	_ store.Snapshotter = (*Store)(nil)
 )
 
-// errNotImplemented stands in for the operations that a later change adds.
-var errNotImplemented = errors.New("memstore: not implemented")
-
 // New returns an empty Store. It panics if opts.Clock is nil.
 func New(opts Options) *Store {
 	if opts.Clock == nil {
@@ -177,6 +174,15 @@ func (s *Store) insert(op Op, j job.Job, now time.Time) {
 func (s *Store) update(op Op, token int64, before, after job.Job, now time.Time) {
 	s.jobs[after.ID] = after
 	s.emit(Change{Op: op, Token: token, Before: before, After: after, Now: now})
+}
+
+// remove deletes a row, and with it the claim of its idempotency key.
+func (s *Store) remove(op Op, j job.Job, now time.Time) {
+	delete(s.jobs, j.ID)
+	if j.IdempotencyKey != "" {
+		delete(s.dedup, dedupKey{j.Tenant, j.Queue, j.IdempotencyKey})
+	}
+	s.emit(Change{Op: op, Before: j, Deleted: true, Now: now})
 }
 
 // sortedIDs returns the ids of all rows in ascending order.
@@ -285,9 +291,18 @@ func (s *Store) Lease(_ context.Context, req store.LeaseRequest) ([]store.Grant,
 			if n == take.Limit {
 				break
 			}
-			leased, out := job.Lease(before, now, req.TTL, req.Worker)
+			cand := before
+			// Flaw F9 lets a job that is not yet due be leased.
+			if flaw.On(flaw.F9Mem) {
+				cand.RunAt = now
+			}
+			leased, out := job.Lease(cand, now, req.TTL, req.Worker)
 			if out != job.Applied {
 				continue
+			}
+			// Flaw F2 leaves the epoch, and so the fencing token, unchanged.
+			if flaw.On(flaw.F2Mem) {
+				leased.Epoch = before.Epoch
 			}
 			s.update(OpLease, 0, before, leased, now)
 			grants = append(grants, store.Grant{Job: leased.Clone(), Remaining: leased.LeaseExpiresAt.Sub(now)})
@@ -329,7 +344,12 @@ func (s *Store) Heartbeat(_ context.Context, refs []store.Ref, ttl time.Duration
 			out[i].Outcome = job.NotFound
 			continue
 		}
-		next, outcome := job.Heartbeat(j, ref.Token, now, ttl)
+		token := ref.Token
+		// Flaw F4 extends the lease whatever token the caller presents.
+		if flaw.On(flaw.F4Mem) {
+			token = j.Epoch
+		}
+		next, outcome := job.Heartbeat(j, token, now, ttl)
 		out[i].Outcome = outcome
 		if outcome == job.Applied {
 			s.update(OpHeartbeat, ref.Token, j, next, now)
@@ -362,7 +382,12 @@ func (s *Store) Complete(_ context.Context, reqs []store.CompleteRequest) ([]job
 			out[i] = job.NotFound
 			continue
 		}
-		next, outcome := job.Complete(j, r.Ref.Token, now, bytes.Clone(r.Result))
+		token := r.Ref.Token
+		// Flaw F1 completes the job whatever token the caller presents.
+		if flaw.On(flaw.F1Mem) {
+			token = j.Epoch
+		}
+		next, outcome := job.Complete(j, token, now, bytes.Clone(r.Result))
 		out[i] = outcome
 		if outcome == job.Applied {
 			s.update(OpComplete, r.Ref.Token, j, next, now)
@@ -429,6 +454,9 @@ func (s *Store) Release(_ context.Context, refs []store.Ref) ([]job.Outcome, err
 
 // Get implements store.Store.
 func (s *Store) Get(_ context.Context, id int64, tenant string) (job.Job, error) {
+	if err := validateTenantScope(tenant); err != nil {
+		return job.Job{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	j, ok := s.jobs[id]
@@ -449,42 +477,271 @@ func (s *Store) Snapshot(_ context.Context) ([]job.Job, error) {
 	return out, nil
 }
 
+// invalid builds the error for an argument that is out of range.
+func invalid(field, reason string) error { return &job.InvalidError{Field: field, Reason: reason} }
+
+// validateTenantScope checks the tenant argument of Get and Cancel, where an
+// empty tenant means any tenant.
+func validateTenantScope(tenant string) error {
+	if tenant == "" {
+		return nil
+	}
+	return job.ValidateName("tenant", tenant)
+}
+
+// validateLimit checks the limit of Reap, Prune and ListDead.
+func validateLimit(limit int) error {
+	if limit < 1 {
+		return invalid("limit", "must be at least 1, got "+strconv.Itoa(limit))
+	}
+	return nil
+}
+
+// validateRetention checks one retention period: not negative, and whole
+// microseconds like every duration that crosses the store boundary.
+func validateRetention(field string, d time.Duration) error {
+	if d < 0 || d%time.Microsecond != 0 {
+		return invalid(field, "must be a non-negative whole number of microseconds, got "+d.String())
+	}
+	return nil
+}
+
 // Cancel implements store.Store.
-func (s *Store) Cancel(context.Context, int64, string) (job.Outcome, error) {
-	return 0, errNotImplemented
+func (s *Store) Cancel(_ context.Context, id int64, tenant string) (job.Outcome, error) {
+	if err := validateTenantScope(tenant); err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	j, ok := s.jobs[id]
+	if !ok || tenant != "" && j.Tenant != tenant {
+		return job.NotFound, nil
+	}
+	next, outcome := job.Cancel(j, now)
+	if outcome == job.Applied {
+		s.update(OpCancel, 0, j, next, now)
+	}
+	return outcome, nil
 }
 
 // Requeue implements store.Store.
-func (s *Store) Requeue(context.Context, int64) (job.Outcome, error) {
-	return 0, errNotImplemented
+func (s *Store) Requeue(_ context.Context, id int64) (job.Outcome, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	j, ok := s.jobs[id]
+	if !ok {
+		return job.NotFound, nil
+	}
+	next, outcome := job.Requeue(j, now)
+	if outcome == job.Applied {
+		s.update(OpRequeue, 0, j, next, now)
+	}
+	return outcome, nil
 }
 
 // Reap implements store.Store.
-func (s *Store) Reap(context.Context, int, store.BackoffFunc) (int, error) {
-	return 0, errNotImplemented
+func (s *Store) Reap(_ context.Context, limit int, backoff store.BackoffFunc) (int, error) {
+	if err := validateLimit(limit); err != nil {
+		return 0, err
+	}
+	if backoff == nil {
+		return 0, invalid("backoff", "must not be nil")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+
+	// First choose the rows and ask for their delays, so that a delay that is
+	// not valid rejects the call before any row has changed. job.Reap says
+	// which leases have run out; the delay it is tried with does not matter.
+	type visit struct {
+		before job.Job
+		delay  time.Duration
+	}
+	var visits []visit
+	for _, id := range s.sortedIDs() {
+		if len(visits) == limit {
+			break
+		}
+		j := s.jobs[id]
+		if _, expired := job.Reap(j, now, 0); expired != job.Applied {
+			continue
+		}
+		delay := backoff(j.Attempts)
+		if err := job.ValidateDelay("backoff", delay); err != nil {
+			return 0, err
+		}
+		visits = append(visits, visit{j, delay})
+	}
+	for _, v := range visits {
+		in := v.before
+		// Flaw F3 reaps as if the job had an attempt left, then puts its
+		// real budget back.
+		if flaw.On(flaw.F3Mem) {
+			in.MaxAttempts = in.Attempts + 1
+		}
+		next, outcome := job.Reap(in, now, v.delay)
+		if flaw.On(flaw.F3Mem) {
+			next.MaxAttempts = v.before.MaxAttempts
+		}
+		if outcome != job.Applied {
+			return 0, &store.InternalError{ID: v.before.ID, State: v.before.State, Msg: "an expired lease was not reaped: " + outcome.String()}
+		}
+		s.update(OpReap, 0, v.before, next, now)
+	}
+	return len(visits), nil
 }
 
 // Prune implements store.Store.
-func (s *Store) Prune(context.Context, store.Retention, int) (int, error) {
-	return 0, errNotImplemented
+func (s *Store) Prune(_ context.Context, r store.Retention, limit int) (int, error) {
+	if err := validateLimit(limit); err != nil {
+		return 0, err
+	}
+	if err := validateRetention("retention.done", r.Done); err != nil {
+		return 0, err
+	}
+	if err := validateRetention("retention.dead", r.Dead); err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	n := 0
+	for _, id := range s.sortedIDs() {
+		if n == limit {
+			break
+		}
+		if j := s.jobs[id]; job.Prunable(j, now, r.Done, r.Dead) {
+			s.remove(OpPrune, j, now)
+			n++
+		}
+	}
+	return n, nil
 }
 
 // Purge implements store.Store.
-func (s *Store) Purge(context.Context, store.PurgeRequest) (int, error) {
-	return 0, errNotImplemented
+func (s *Store) Purge(_ context.Context, req store.PurgeRequest) (int, error) {
+	if err := job.ValidateName("queue", req.Queue); err != nil {
+		return 0, err
+	}
+	if !req.State.Terminal() {
+		return 0, invalid("state", "must be a terminal state, got "+req.State.String())
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	before := job.NormalizeTime(req.FinishedBefore)
+	n := 0
+	for _, id := range s.sortedIDs() {
+		if j := s.jobs[id]; j.Queue == req.Queue && j.State == req.State && j.FinishedAt.Before(before) {
+			s.remove(OpPurge, j, now)
+			n++
+		}
+	}
+	return n, nil
 }
 
 // ListDead implements store.Store.
-func (s *Store) ListDead(context.Context, string, int64, int) ([]job.Job, error) {
-	return nil, errNotImplemented
+func (s *Store) ListDead(_ context.Context, queue string, afterID int64, limit int) ([]job.Job, error) {
+	if err := job.ValidateName("queue", queue); err != nil {
+		return nil, err
+	}
+	if err := validateLimit(limit); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []job.Job
+	for _, id := range s.sortedIDs() {
+		if len(out) == limit {
+			break
+		}
+		if j := s.jobs[id]; id > afterID && j.Queue == queue && j.State == job.StateDead {
+			out = append(out, j.Clone())
+		}
+	}
+	return out, nil
 }
 
-// Stats implements store.Store.
-func (s *Store) Stats(context.Context, string) ([]store.TenantStats, error) {
-	return nil, errNotImplemented
+// Stats implements store.Store. A tenant is listed when one of its jobs in
+// the queue is ready (due or scheduled), leased or dead; a tenant whose jobs
+// have all succeeded or been cancelled is not.
+func (s *Store) Stats(_ context.Context, queue string) ([]store.TenantStats, error) {
+	if err := job.ValidateName("queue", queue); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	stats := map[string]*store.TenantStats{}
+	oldest := map[string]time.Time{} // the smallest run_at among a tenant's Ready jobs
+	of := func(tenant string) *store.TenantStats {
+		if stats[tenant] == nil {
+			stats[tenant] = &store.TenantStats{Tenant: tenant}
+		}
+		return stats[tenant]
+	}
+	for _, id := range s.sortedIDs() {
+		j := s.jobs[id]
+		if j.Queue != queue {
+			continue
+		}
+		switch j.State {
+		case job.StateReady:
+			if j.RunAt.After(now) {
+				of(j.Tenant).Scheduled++
+				break
+			}
+			of(j.Tenant).Ready++
+			if at, seen := oldest[j.Tenant]; !seen || j.RunAt.Before(at) {
+				oldest[j.Tenant] = j.RunAt
+			}
+		case job.StateLeased:
+			of(j.Tenant).Leased++
+		case job.StateDead:
+			of(j.Tenant).Dead++
+		case job.StateSucceeded, job.StateCancelled:
+		}
+	}
+	out := make([]store.TenantStats, 0, len(stats))
+	for _, tenant := range slices.Sorted(maps.Keys(stats)) {
+		st := *stats[tenant]
+		if at, ok := oldest[tenant]; ok {
+			st.OldestReadyAge = now.Sub(at)
+		}
+		out = append(out, st)
+	}
+	return out, nil
 }
 
 // Activity implements store.Store.
-func (s *Store) Activity(context.Context, string) (store.Activity, error) {
-	return store.Activity{}, errNotImplemented
+func (s *Store) Activity(_ context.Context, queue string) (store.Activity, error) {
+	if err := job.ValidateName("queue", queue); err != nil {
+		return store.Activity{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	due := map[string]bool{}
+	var next time.Time
+	hasNext := false
+	for _, id := range s.sortedIDs() {
+		j := s.jobs[id]
+		if j.Queue != queue || j.State != job.StateReady {
+			continue
+		}
+		switch {
+		case !j.RunAt.After(now):
+			due[j.Tenant] = true
+		case !hasNext || j.RunAt.Before(next):
+			next, hasNext = j.RunAt, true
+		}
+	}
+	act := store.Activity{Tenants: slices.Sorted(maps.Keys(due)), HasNextDue: hasNext}
+	if hasNext {
+		act.NextDueIn = next.Sub(now)
+	}
+	return act, nil
 }

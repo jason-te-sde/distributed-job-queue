@@ -39,13 +39,14 @@ type Harness interface {
 // subtest, with that subtest's t.
 type NewHarness func(t *testing.T) Harness
 
-// Run runs every group of the suite in order: RunEnqueue, RunLease and
-// RunAck. The groups are separate so that a store can adopt them one at a
-// time.
+// Run runs the four groups of the suite in order: RunEnqueue, RunLease,
+// RunAck and RunMaintenance. The groups are separate so that a store can
+// adopt them one at a time.
 func Run(t *testing.T, nh NewHarness) {
 	RunEnqueue(t, nh)
 	RunLease(t, nh)
 	RunAck(t, nh)
+	RunMaintenance(t, nh)
 }
 
 // subtest is the body of one named conformance check.

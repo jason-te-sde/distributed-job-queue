@@ -2,6 +2,8 @@ package memstore_test
 
 import (
 	"slices"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -271,5 +273,228 @@ func TestWriteCallsReadTheClockOnce(t *testing.T) {
 	}
 	if *reads != before {
 		t.Error("Get read the clock")
+	}
+}
+
+func TestObserverSeesMaintenanceMutations(t *testing.T) {
+	var changes []memstore.Change
+	h := newHarness(t, func(c memstore.Change) { changes = append(changes, c) })
+	s, ctx := h.s, t.Context()
+	noErr := func(call string, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s: %v", call, err)
+		}
+	}
+	lease := func(limit int) []store.Grant {
+		t.Helper()
+		g, err := s.Lease(ctx, store.LeaseRequest{Queue: "q1", Takes: []store.TenantTake{{Tenant: "t1", Limit: limit}}, TTL: 30 * time.Second, Worker: "w1"})
+		noErr("Lease", err)
+		return g
+	}
+	_, err := s.Enqueue(ctx, []job.Spec{spec("q1", "t1"), spec("q1", "t1"), spec("q1", "t1"), spec("q1", "t1")})
+	noErr("Enqueue", err)
+	grants := lease(3)
+	_, err = s.Cancel(ctx, 4, "")
+	noErr("Cancel", err)
+	h.Advance(31 * time.Second)
+	n, err := s.Reap(ctx, 2, func(int32) time.Duration { return 0 })
+	noErr("Reap", err)
+	if n != 2 {
+		t.Fatalf("Reap = %d, want 2", n)
+	}
+	_, err = s.Fail(ctx, []store.FailRequest{{Ref: store.Ref{ID: 3, Queue: "q1", Token: grants[2].Job.Epoch}, Permanent: true}})
+	noErr("Fail", err)
+	_, err = s.Requeue(ctx, 3)
+	noErr("Requeue", err)
+	h.Advance(25 * time.Hour)
+	n, err = s.Prune(ctx, store.Retention{Done: 24 * time.Hour, Dead: 336 * time.Hour}, 10)
+	noErr("Prune", err)
+	if n != 1 {
+		t.Fatalf("Prune = %d, want 1", n)
+	}
+	_, err = s.Cancel(ctx, 1, "t1")
+	noErr("Cancel", err)
+	n, err = s.Purge(ctx, store.PurgeRequest{Queue: "q1", State: job.StateCancelled, FinishedBefore: h.Now().Add(time.Hour)})
+	noErr("Purge", err)
+	if n != 1 {
+		t.Fatalf("Purge = %d, want 1 (job 4 was pruned)", n)
+	}
+
+	type step struct {
+		op      memstore.Op
+		id      int64
+		deleted bool
+	}
+	want := []step{
+		{memstore.OpEnqueue, 1, false}, {memstore.OpEnqueue, 2, false}, {memstore.OpEnqueue, 3, false}, {memstore.OpEnqueue, 4, false},
+		{memstore.OpLease, 1, false}, {memstore.OpLease, 2, false}, {memstore.OpLease, 3, false},
+		{memstore.OpCancel, 4, false},
+		{memstore.OpReap, 1, false}, {memstore.OpReap, 2, false},
+		{memstore.OpFail, 3, false}, {memstore.OpRequeue, 3, false},
+		{memstore.OpPrune, 4, true},
+		{memstore.OpCancel, 1, false},
+		{memstore.OpPurge, 1, true},
+	}
+	var got []step
+	for _, c := range changes {
+		id := c.After.ID
+		if c.Deleted {
+			id = c.Before.ID
+		}
+		got = append(got, step{c.Op, id, c.Deleted})
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("changes = %v, want %v", got, want)
+	}
+	for _, c := range changes {
+		switch {
+		case c.Op == memstore.OpFail && c.Token != grants[2].Job.Epoch:
+			t.Errorf("fail change carries token %d, want %d", c.Token, grants[2].Job.Epoch)
+		case c.Op != memstore.OpFail && c.Token != 0:
+			t.Errorf("%v change carries token %d, want 0", c.Op, c.Token)
+		case c.Deleted && (c.Inserted || c.After.ID != 0):
+			t.Errorf("%v change of a deleted row = %+v, want an empty After", c.Op, c)
+		}
+	}
+	if c := changes[11]; c.Before.State != job.StateDead || c.After.State != job.StateReady {
+		t.Errorf("requeue change goes %v to %v, want dead to ready", c.Before.State, c.After.State)
+	}
+}
+
+func TestMaintenanceCallsReadTheClockOnce(t *testing.T) {
+	clock, reads := tickingClock()
+	var changes []memstore.Change
+	s := memstore.New(memstore.Options{Clock: clock, Observer: func(c memstore.Change) { changes = append(changes, c) }})
+	ctx := t.Context()
+
+	// call runs fn and fails unless it read the clock the given number of
+	// times and stamped every row it changed with one instant. It returns the
+	// changes the call made.
+	call := func(name string, wantReads int, fn func() error) []memstore.Change {
+		t.Helper()
+		r0, c0 := *reads, len(changes)
+		if err := fn(); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := *reads - r0; got != wantReads {
+			t.Errorf("%s read the clock %d times, want %d", name, got, wantReads)
+		}
+		mine := changes[c0:]
+		for _, c := range mine {
+			if !c.Now.Equal(mine[0].Now) {
+				t.Errorf("%s stamped its rows with different times: %v and %v", name, mine[0].Now, c.Now)
+				break
+			}
+		}
+		return mine
+	}
+	lease := func(tenant string, limit int) {
+		t.Helper()
+		call("Lease", 1, func() error {
+			_, err := s.Lease(ctx, store.LeaseRequest{Queue: "q1", Takes: []store.TenantTake{{Tenant: tenant, Limit: limit}}, TTL: time.Second, Worker: "w1"})
+			return err
+		})
+	}
+	cancel := func(id int64) {
+		t.Helper()
+		call("Cancel", 1, func() error { _, err := s.Cancel(ctx, id, ""); return err })
+	}
+	rows := func(mine []memstore.Change, want int, name string) {
+		t.Helper()
+		if len(mine) != want {
+			t.Fatalf("%s changed %d rows, want %d", name, len(mine), want)
+		}
+	}
+
+	call("Enqueue", 1, func() error {
+		_, err := s.Enqueue(ctx, []job.Spec{spec("q1", "t1"), spec("q1", "t1"), spec("q1", "t1"), spec("q1", "t1"), spec("q1", "t2")})
+		return err
+	})
+	lease("t1", 4)
+	// The clock moves a second per reading, so a 1s lease has just run out at
+	// the next call.
+	reaped := call("Reap", 1, func() error {
+		n, err := s.Reap(ctx, 10, func(int32) time.Duration { return 0 })
+		if err == nil && n != 4 {
+			t.Fatalf("Reap = %d, want 4", n)
+		}
+		return err
+	})
+	rows(reaped, 4, "Reap")
+	cancel(1)
+	cancel(2)
+	pruned := call("Prune", 1, func() error {
+		n, err := s.Prune(ctx, store.Retention{}, 10)
+		if err == nil && n != 2 {
+			t.Fatalf("Prune = %d, want 2", n)
+		}
+		return err
+	})
+	rows(pruned, 2, "Prune")
+	cancel(3)
+	cancel(4)
+	purged := call("Purge", 1, func() error {
+		n, err := s.Purge(ctx, store.PurgeRequest{Queue: "q1", State: job.StateCancelled, FinishedBefore: start.Add(time.Hour)})
+		if err == nil && n != 2 {
+			t.Fatalf("Purge = %d, want 2", n)
+		}
+		return err
+	})
+	rows(purged, 2, "Purge")
+
+	lease("t2", 1)
+	call("Fail", 1, func() error {
+		_, err := s.Fail(ctx, []store.FailRequest{{Ref: store.Ref{ID: 5, Queue: "q1", Token: 1}, Permanent: true}})
+		return err
+	})
+	call("Requeue", 1, func() error { _, err := s.Requeue(ctx, 5); return err })
+	call("Stats", 1, func() error { _, err := s.Stats(ctx, "q1"); return err })
+	call("Activity", 1, func() error { _, err := s.Activity(ctx, "q1"); return err })
+	call("ListDead", 0, func() error { _, err := s.ListDead(ctx, "q1", 0, 10); return err })
+	call("Get", 0, func() error { _, err := s.Get(ctx, 5, ""); return err })
+}
+
+func TestConcurrentCallsAreSafe(t *testing.T) {
+	const workers, rounds = 8, 40
+	s := memstore.New(memstore.Options{Clock: func() time.Time { return start }})
+	ctx := t.Context()
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tenant := "t" + strconv.Itoa(w)
+			for range rounds {
+				if _, err := s.Enqueue(ctx, []job.Spec{spec("q1", tenant)}); err != nil {
+					t.Errorf("Enqueue: %v", err)
+					return
+				}
+				grants, err := s.Lease(ctx, store.LeaseRequest{Queue: "q1", Takes: []store.TenantTake{{Tenant: tenant, Limit: 1}}, TTL: time.Minute, Worker: "w"})
+				if err != nil || len(grants) != 1 {
+					t.Errorf("Lease = %v, %v; want the job just enqueued", grants, err)
+					return
+				}
+				ref := store.Ref{ID: grants[0].Job.ID, Queue: "q1", Token: grants[0].Job.Epoch}
+				if out, err := s.Complete(ctx, []store.CompleteRequest{{Ref: ref}}); err != nil || out[0] != job.Applied {
+					t.Errorf("Complete = %v, %v; want applied", out, err)
+					return
+				}
+				if _, err := s.Snapshot(ctx); err != nil {
+					t.Errorf("Snapshot: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	rows, err := s.Snapshot(ctx)
+	if err != nil || len(rows) != workers*rounds {
+		t.Fatalf("Snapshot = %d rows, %v; want %d", len(rows), err, workers*rounds)
+	}
+	for _, j := range rows {
+		if j.State != job.StateSucceeded {
+			t.Errorf("job %d is %v, want succeeded", j.ID, j.State)
+		}
 	}
 }

@@ -27,8 +27,14 @@
 //     take whose tenant is empty selects across all tenants in the same
 //     order. The grants come back in (run_at, id) order across the takes.
 //   - Reap visits expired leases in ascending id, at most limit of them, and
-//     calls the backoff function once per visited row, in that order.
-//   - Prune deletes prunable rows in ascending id, at most limit of them.
+//     calls the backoff function once per visited row, in that order. Prune
+//     deletes prunable rows in ascending id, at most limit of them. Their
+//     limits, and that of ListDead, are at least 1.
+//   - A backoff delay and a retention period are not negative and are whole
+//     microseconds, like every duration that crosses the boundary.
+//   - A queue or tenant name that is not a valid name is rejected, in the
+//     read and admin calls as well. The one exception is the empty tenant of
+//     Get and Cancel, which means any tenant.
 package store
 
 import (
@@ -212,7 +218,8 @@ type Store interface {
 	// ListDead returns up to limit dead jobs of a queue with an id above
 	// afterID, in ascending id.
 	ListDead(ctx context.Context, queue string, afterID int64, limit int) ([]job.Job, error)
-	// Stats counts a queue's jobs per tenant, in ascending tenant order.
+	// Stats counts a queue's jobs per tenant, in ascending tenant order. A
+	// tenant appears only while it has a ready, scheduled, leased or dead job.
 	Stats(ctx context.Context, queue string) ([]TenantStats, error)
 	// Activity says which tenants of a queue have due work and when the next
 	// scheduled job falls due.
