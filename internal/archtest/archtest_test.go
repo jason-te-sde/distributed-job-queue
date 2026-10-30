@@ -18,7 +18,12 @@ const mod = "github.com/jason-te-sde/distributed-job-queue"
 // mustExist lists the module-relative paths of packages that the repository
 // test must find. It guards the test against silently looking at nothing: a
 // package is added here in the task that creates it.
-var mustExist = []string{"internal/sim"}
+var mustExist = []string{
+	"internal/sim",
+	"internal/core/job",
+	"internal/core/fair",
+	"internal/store/memstore",
+}
 
 // wantRule fails unless exactly one violation has the given rule.
 func wantRule(t *testing.T, vs []Violation, rule string) {
