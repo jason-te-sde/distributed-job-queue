@@ -11,7 +11,9 @@
 // network for any time. The deadline is also a margin earlier than the
 // lease's expiry, so that the handler is cancelled before the lease can be
 // taken over. Heartbeats go out every quarter of the TTL, which lets two
-// consecutive heartbeats be lost while the lease still survives.
+// consecutive heartbeats be lost while the lease still survives. That holds
+// only if the TTL is greater than four margins: at exactly four, the third
+// heartbeat would fall at the very instant its lease's deadline cancels it.
 //
 // The tracker is pure. It holds no clock, no timer, no goroutine and no
 // connection. Every method takes the current monotonic instant and returns

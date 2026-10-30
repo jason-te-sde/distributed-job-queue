@@ -179,6 +179,14 @@ func (e *InvariantError) Error() string {
 // is the last effect. A list with Stopped has no Arm, because the tracker is
 // done.
 //
+// The tracker has no timeout of its own for the calls it sends. The shell
+// must eventually answer every RequestLeases, SendHeartbeat, SendAcks and
+// SendRelease with the matching Done or Failed method, which means giving
+// each RPC a timeout. A call that is never answered stalls the tracker: a
+// heartbeat in flight suppresses every later heartbeat, an ack batch in
+// flight holds back every later ack, a Lease request in flight holds back
+// every later request, and a release in flight keeps a drain from ending.
+//
 //sumtype:decl
 type Effect interface{ isEffect() }
 
@@ -265,7 +273,10 @@ type Arm struct {
 }
 
 // Stopped says the drain is complete: no handler is waited for, and nothing
-// is pending or in flight. The tracker returns no effects afterwards.
+// is pending or in flight. The tracker returns no effects afterwards, with one
+// exception: an answer to a Lease request that arrives late still has its
+// grants discarded and released, so that no lease is left to run out. That
+// answer's effects are Discard and SendRelease, and it has no Arm.
 type Stopped struct{}
 
 func (RequestLeases) isEffect()       {}

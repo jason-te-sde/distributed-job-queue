@@ -22,7 +22,10 @@ import (
 //     instant at which it served a request is drawn between the instant the
 //     request was sent (plus the wait a grant reports) and the instant its
 //     reply arrives, so a reply that took long was served early. That is
-//     exactly the gap in which an anchor at the arrival would overshoot.
+//     exactly the gap in which an anchor at the arrival would overshoot. A
+//     grant is sometimes the redelivery of a job whose last ack was sent but
+//     never answered: the server fences the old token and leases the job again
+//     under a new one, while the old lease is still acking at the tracker.
 //   - The single armed timer fires at the tracker's latest Arm, before any
 //     reply that falls at the same instant. A Tick may also come at random
 //     extra instants, because a shell is allowed to call it spuriously.
@@ -42,10 +45,11 @@ const (
 
 // event is one scheduled delivery, ordered by time and then by creation.
 type event struct {
-	at   Mono
-	ord  int
-	dead bool // dropped before delivery, as a cancelled RPC is
-	run  func()
+	at    Mono
+	ord   int
+	dead  bool // dropped before delivery, as a cancelled RPC is
+	lease bool // the reply of a Lease request
+	run   func()
 }
 
 // model holds the shell's and the server's state for one run.
@@ -69,6 +73,7 @@ type model struct {
 	cancels         map[Ref]int       // CancelHandler count per started handler
 	released        map[Ref]bool      // named by a SendRelease
 	acked           map[Ref]bool      // named by a SendAcks
+	ackSettled      map[Ref]bool      // an ack naming it was answered
 	handlerEvent    map[Ref]*event    // when the handler will return, if it ever does
 	running         int               // started handlers that have not returned
 	acksInFlight    int
@@ -79,9 +84,11 @@ type model struct {
 
 	// The server: the true expiry of each lease it granted, and the leases it
 	// revoked for a reason other than expiry.
-	expiry  map[Ref]Mono
-	revoked map[Ref]bool
-	nextID  int64
+	expiry    map[Ref]Mono
+	revoked   map[Ref]bool
+	latest    map[int64]Ref // the newest lease of each job
+	nextID    int64
+	nextToken int64
 }
 
 // delay draws a duration in [0, limit], in whole milliseconds.
@@ -137,10 +144,17 @@ func (m *model) do(effs []Effect, err error) {
 	if err != nil {
 		m.t.Fatalf("at %v: unexpected error: %v", m.now, err)
 	}
+	wasStopped := m.stopped
 	var discarded []Ref
 	var releasedNow []Ref
 	for i, e := range effs {
 		last := i == len(effs)-1
+		// After Stopped only the grants of a late answer are still handled.
+		_, isDiscard := e.(Discard)
+		_, isRelease := e.(SendRelease)
+		if wasStopped && !isDiscard && !isRelease {
+			m.t.Fatalf("at %v: effect %v after Stopped", m.now, e)
+		}
 		switch e := e.(type) {
 		case RequestLeases:
 			m.requestLeases(e)
@@ -213,7 +227,9 @@ func (m *model) requestLeases(e RequestLeases) {
 	if m.oneIn("lease reply stalls", 8) {
 		d += 25*time.Second + m.delay("lease stall", 10*time.Second)
 	}
-	m.requestEvent[e.Seq] = m.after(d, func() {
+	ev := m.after(d, func() {
+		// An answer is late when the tracker no longer waits for it.
+		late := m.stopped || m.draining || m.outstanding != e.Seq
 		if m.outstanding == e.Seq {
 			m.outstanding = 0
 		}
@@ -227,14 +243,55 @@ func (m *model) requestLeases(e RequestLeases) {
 		served := m.within("lease served at", sentAt+waited, m.now)
 		n := rapid.IntRange(0, e.Max).Draw(m.t, "grants")
 		out := make([]Grant, n)
+		used := map[int64]bool{}
 		for i := range out {
-			m.nextID++
-			ref := Ref{ID: m.nextID, Queue: "q", Token: m.nextID*10 + 1}
-			m.expiry[ref] = served + e.TTL
-			out[i] = Grant{Ref: ref, Attempt: 1, Remaining: e.TTL}
+			out[i] = m.newGrant(served, e.TTL, used)
 		}
-		m.do(m.tr.LeasesGranted(m.now, e.Seq, sentAt, waited, out))
+		effs, err := m.tr.LeasesGranted(m.now, e.Seq, sentAt, waited, out)
+		if late {
+			// Every grant of a late answer is discarded, even after Stopped,
+			// and none starts.
+			for _, g := range out {
+				if !slices.Contains(all[Discard](effs), Discard{Ref: g.Ref}) {
+					m.t.Fatalf("at %v: grant %+v of a late answer is not discarded", m.now, g.Ref)
+				}
+			}
+		}
+		m.do(effs, err)
 	})
+	ev.lease = true
+	m.requestEvent[e.Seq] = ev
+}
+
+// newGrant creates the server's lease for one grant served at instant served.
+// Sometimes it is the redelivery of a job whose last lease had its ack sent but
+// not answered: the broker applied that ack, for example a retry with a short
+// delay, and offers the job again under a new token, fencing the old one.
+// used holds the jobs already granted in the same response.
+func (m *model) newGrant(served Mono, ttl time.Duration, used map[int64]bool) Grant {
+	var again []int64
+	for id, ref := range m.latest {
+		if m.acked[ref] && !m.ackSettled[ref] && !used[id] {
+			again = append(again, id)
+		}
+	}
+	slices.Sort(again)
+	var id int64
+	attempt := int32(1)
+	if len(again) > 0 && m.oneIn("redeliver a job", 3) {
+		id = again[rapid.IntRange(0, len(again)-1).Draw(m.t, "which job")]
+		m.revoked[m.latest[id]] = true
+		attempt = 2
+	} else {
+		m.nextID++
+		id = m.nextID
+	}
+	m.nextToken++
+	ref := Ref{ID: id, Queue: "q", Token: m.nextToken}
+	m.latest[id] = ref
+	m.expiry[ref] = served + ttl
+	used[id] = true
+	return Grant{Ref: ref, Attempt: attempt, Remaining: ttl}
 }
 
 func (m *model) abandonLeaseRequest(e AbandonLeaseRequest) {
@@ -354,6 +411,7 @@ func (m *model) sendAcks(e SendAcks) {
 		statuses := make([]AckStatus, len(e.Acks))
 		for i := range statuses {
 			statuses[i] = rapid.SampledFrom([]AckStatus{AckAccepted, AckDuplicate, AckFenced}).Draw(m.t, "ack status")
+			m.ackSettled[e.Acks[i].Ref] = true
 		}
 		m.do(m.tr.AcksDone(m.now, e.Seq, statuses))
 	})
@@ -411,7 +469,8 @@ func (m *model) check() {
 		if h.Deadline > exp-m.cfg.Margin {
 			m.t.Fatalf("at %v: lease %+v has deadline %v but expires at %v (margin %v)", m.now, h.Ref, h.Deadline, exp, m.cfg.Margin)
 		}
-		if h.Deadline <= m.now || (i > 0 && held[i-1].Ref.ID >= h.Ref.ID) {
+		// Ascending by job id, and by token for the two leases of a job.
+		if h.Deadline <= m.now || (i > 0 && (held[i-1].Ref.ID > h.Ref.ID || (held[i-1].Ref.ID == h.Ref.ID && held[i-1].Ref.Token >= h.Ref.Token))) {
 			m.t.Fatalf("at %v: Held is not ascending and unexpired: %+v", m.now, held)
 		}
 	}
@@ -466,6 +525,14 @@ func (m *model) run(drainAfter int) {
 			m.check()
 		}
 	}
+	// A Lease request that was abandoned may still be answered after Stopped.
+	// Its grants must be released, and nothing else may happen.
+	for _, ev := range slices.Clone(m.events) {
+		if ev.lease && !ev.dead {
+			m.now = max(m.now, ev.at)
+			ev.run()
+		}
+	}
 }
 
 func TestTrackerProperties(t *testing.T) {
@@ -489,9 +556,11 @@ func TestTrackerProperties(t *testing.T) {
 			cancels:      map[Ref]int{},
 			released:     map[Ref]bool{},
 			acked:        map[Ref]bool{},
+			ackSettled:   map[Ref]bool{},
 			handlerEvent: map[Ref]*event{},
 			expiry:       map[Ref]Mono{},
 			revoked:      map[Ref]bool{},
+			latest:       map[int64]Ref{},
 		}
 		m.run(rapid.IntRange(0, 400).Draw(t, "events before drain"))
 	})

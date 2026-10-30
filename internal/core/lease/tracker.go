@@ -147,11 +147,15 @@ func (t *Tracker) Start(now Mono) []Effect {
 // handler must never run on a lease the tracker would cancel at once.
 //
 // A response with more grants than the request's Max, or with a grant whose
-// job is already held by a live lease, is an *InvariantError. The call then
-// changes nothing.
+// job still has a lease with a running handler, is an *InvariantError. The
+// call then changes nothing. A job whose old lease is acking, lost or released
+// is not a conflict: see holdsRunning.
+//
+// After Stopped an answer that arrives late still has its grants discarded and
+// released, so that no lease is left to run out. That list has no Arm.
 func (t *Tracker) LeasesGranted(now Mono, seq uint64, sentAt Mono, waited time.Duration, grants []Grant) ([]Effect, error) {
 	if t.stopped {
-		return nil, nil
+		return t.discard(grants), nil
 	}
 	if t.draining || t.reqSeq == 0 || seq != t.reqSeq {
 		return t.advance(now, t.discard(grants)), nil
@@ -206,23 +210,32 @@ func (t *Tracker) checkGrants(grants []Grant) error {
 			return &InvariantError{Ref: g.Ref, Msg: "job granted twice in one response"}
 		case t.leases[g.Ref] != nil:
 			return &InvariantError{Ref: g.Ref, Msg: "lease is already tracked"}
-		case t.holdsLive(g.Ref.ID):
-			return &InvariantError{Ref: g.Ref, Msg: "job is already held under a live lease"}
+		case t.holdsRunning(g.Ref.ID):
+			return &InvariantError{Ref: g.Ref, Msg: "job is already held by a lease with a running handler"}
 		}
 		seen[g.Ref.ID] = true
 	}
 	return nil
 }
 
-// holdsLive reports whether a live lease of job id exists. A lost or released
-// lease does not count: the broker may legitimately lease the job again while
-// the old handler is still winding down.
-func (t *Tracker) holdsLive(id int64) bool {
+// holdsRunning reports whether a lease of job id is running its handler. Only
+// that conflicts with a new grant of the job: it means the broker leased the
+// job again while this worker still held it, so the local deadline was wrong.
+// Any other old lease may legitimately sit next to the new one:
+//   - an acking lease has finished its handler and only waits for its ack. The
+//     broker may have applied that ack already, for example a retry with a short
+//     delay, and offered the job again while the ack's answer was lost or the
+//     resend is pending;
+//   - a lost or released lease may still have a handler winding down.
+//
+// The new lease is tracked under its own Ref. The old one gets Held=false at
+// its next heartbeat, or is forgotten when its ack settles.
+func (t *Tracker) holdsRunning(id int64) bool {
 	if t.byID[id] == 0 {
 		return false
 	}
 	for _, l := range t.leases {
-		if l.ref.ID == id && l.live() {
+		if l.ref.ID == id && l.state == stateRunning {
 			return true
 		}
 	}
@@ -443,13 +456,13 @@ func (t *Tracker) finishBatch() {
 // ReleaseDone handles the end of the release call seq, whether it worked or
 // not: release is best effort. A seq that is not in flight is ignored.
 func (t *Tracker) ReleaseDone(now Mono, seq uint64) []Effect {
-	if t.stopped {
-		return nil
-	}
 	if _, ok := t.releasing[seq]; !ok {
 		return nil
 	}
 	delete(t.releasing, seq)
+	if t.stopped {
+		return nil // the release of a late answer's grants
+	}
 	return t.advance(now, nil)
 }
 

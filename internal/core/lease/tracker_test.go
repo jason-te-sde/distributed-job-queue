@@ -83,12 +83,23 @@ func none[T Effect](t *testing.T, effs []Effect) {
 }
 
 // wantEffects fails unless got is exactly want. Effects are compared by their
-// printed form, which shows every field and the contents of every slice.
+// Go-syntax form, which shows the type name, every field and the contents of
+// every slice, so two effects of different types that print alike cannot
+// pass for each other.
 func wantEffects(t *testing.T, got []Effect, want ...Effect) {
 	t.Helper()
-	if fmt.Sprint(got) != fmt.Sprint(want) {
+	if goSyntax(got) != goSyntax(want) {
 		t.Fatalf("effects = %v, want %v", got, want)
 	}
+}
+
+// goSyntax prints effs in Go syntax, and an empty list the same way whether it
+// is nil or not.
+func goSyntax(effs []Effect) string {
+	if len(effs) == 0 {
+		return "[]"
+	}
+	return fmt.Sprintf("%#v", effs)
 }
 
 // armOf returns the instant of the Arm that ends effs and fails if effs does
@@ -1073,6 +1084,165 @@ func TestRedeliveredJobIsAcceptedWhileTheOldLeaseIsLost(t *testing.T) {
 	wantInvariant(t, err, Ref{ID: 1, Queue: "q", Token: 301})
 }
 
+func TestRedeliveredJobIsAcceptedWhileTheOldAckIsPending(t *testing.T) {
+	again := Grant{Ref: Ref{ID: 1, Queue: "q", Token: 201}, Attempt: 2, Remaining: 30 * sec}
+	oldRef := ref(1)
+
+	// finish returns the handler of job 1 with a retry that asks for 10ms.
+	finish := func(t *testing.T, tr *Tracker, at Mono) {
+		t.Helper()
+		out := Outcome{Kind: OutcomeRetry, Error: "boom", RetryAfter: 10 * ms}
+		if _, err := tr.HandlerDone(at, oldRef, out); err != nil {
+			t.Fatalf("HandlerDone: %v", err)
+		}
+	}
+	// redeliver answers the outstanding request 2 (sent at 100ms) with the
+	// same job under a new token and checks that it starts.
+	redeliver := func(t *testing.T, tr *Tracker, at Mono) []Effect {
+		t.Helper()
+		effs, err := tr.LeasesGranted(at, 2, 100*ms, 0, []Grant{again})
+		if err != nil {
+			t.Fatalf("LeasesGranted for a redelivered job: %v", err)
+		}
+		if sh := only[StartHandler](t, effs); sh.Grant != again {
+			t.Fatalf("StartHandler = %+v, want %+v", sh, again)
+		}
+		none[Discard](t, effs)
+		// The old handler returned, so only the new lease holds a slot, and
+		// the answered request is replaced by a new one.
+		if req := only[RequestLeases](t, effs); req.Max != 3 {
+			t.Fatalf("request Max = %d, want 3 free slots", req.Max)
+		}
+		return effs
+	}
+	heldRefs := func(tr *Tracker, now Mono) []Ref {
+		var refs []Ref
+		for _, h := range tr.Held(now) {
+			refs = append(refs, h.Ref)
+		}
+		return refs
+	}
+
+	t.Run("ack waits for a resend", func(t *testing.T) {
+		// The retry reached the broker, which applied it and offered the job
+		// again, but the ack's reply was lost: a resend is pending while the
+		// long poll hands the job back under token 201.
+		tr := newTracker(t)
+		startAndGrant(t, tr, 100*ms, 1)
+		finish(t, tr, sec)
+		sa := only[SendAcks](t, tr.Tick(sec+2*ms))
+		none[SendAcks](t, tr.AcksFailed(sec+10*ms, sa.Seq))
+		redeliver(t, tr, sec+50*ms)
+		if got := heldRefs(tr, sec+50*ms); !slices.Equal(got, []Ref{oldRef, again.Ref}) {
+			t.Fatalf("Held = %v, want the old lease and the new one", got)
+		}
+		// The resend settles the old lease and leaves the new one alone.
+		resend := only[SendAcks](t, tr.Tick(sec+110*ms))
+		if _, err := tr.AcksDone(sec+120*ms, resend.Seq, []AckStatus{AckDuplicate}); err != nil {
+			t.Fatalf("AcksDone: %v", err)
+		}
+		if got := heldRefs(tr, sec+120*ms); !slices.Equal(got, []Ref{again.Ref}) {
+			t.Fatalf("Held after the ack settled = %v, want only the new lease", got)
+		}
+		hb := only[SendHeartbeat](t, tr.Tick(7500*ms))
+		if !slices.Equal(hb.Refs, []Ref{again.Ref}) {
+			t.Fatalf("heartbeat refs = %v, want only the new lease", hb.Refs)
+		}
+	})
+
+	t.Run("old lease is denied by the next heartbeat", func(t *testing.T) {
+		tr := newTracker(t)
+		startAndGrant(t, tr, 100*ms, 1)
+		finish(t, tr, sec)
+		sa := only[SendAcks](t, tr.Tick(sec+2*ms))
+		none[SendAcks](t, tr.AcksFailed(sec+10*ms, sa.Seq))
+		redeliver(t, tr, sec+50*ms)
+		// Both leases are heartbeated. The broker fences the old token.
+		effs := tr.Tick(7500 * ms)
+		hb := only[SendHeartbeat](t, effs)
+		if !slices.Equal(hb.Refs, []Ref{oldRef, again.Ref}) {
+			t.Fatalf("heartbeat refs = %v, want both leases", hb.Refs)
+		}
+		statuses := []HeartbeatStatus{{Held: false}, {Held: true, Remaining: 30 * sec}}
+		done, err := tr.HeartbeatDone(7600*ms, hb.Seq, 7500*ms, statuses)
+		if err != nil {
+			t.Fatalf("HeartbeatDone: %v", err)
+		}
+		none[CancelHandler](t, done) // the old handler returned long ago
+		if got := heldRefs(tr, 7600*ms); !slices.Equal(got, []Ref{again.Ref}) {
+			t.Fatalf("Held = %v, want only the new lease", got)
+		}
+		// The old ack still goes out and settles by itself.
+		resend := only[SendAcks](t, effs)
+		if _, err := tr.AcksDone(7700*ms, resend.Seq, []AckStatus{AckFenced}); err != nil {
+			t.Fatalf("AcksDone: %v", err)
+		}
+		if got := heldRefs(tr, 7700*ms); !slices.Equal(got, []Ref{again.Ref}) {
+			t.Fatalf("Held after the ack settled = %v, want only the new lease", got)
+		}
+	})
+
+	t.Run("ack still in the pending list", func(t *testing.T) {
+		tr := newTracker(t)
+		startAndGrant(t, tr, 100*ms, 1)
+		finish(t, tr, sec)
+		redeliver(t, tr, sec+500*time.Microsecond) // inside the 2ms ack window
+		if got := heldRefs(tr, sec+ms); !slices.Equal(got, []Ref{oldRef, again.Ref}) {
+			t.Fatalf("Held = %v, want the old lease and the new one", got)
+		}
+	})
+}
+
+func TestGrantsAfterStoppedAreDiscardedAndReleased(t *testing.T) {
+	tr := newTracker(t)
+	tr.Start(0)
+	wantEffects(t, tr.Drain(sec), AbandonLeaseRequest{Seq: 1}, Stopped{})
+	// The abandoned request answers after all. No handler may start, and no
+	// lease may be left to run out: the answer's grants are released, with no
+	// Arm because the tracker is done.
+	effs, err := tr.LeasesGranted(2*sec, 1, 0, 0, grants(1, 2))
+	if err != nil {
+		t.Fatalf("LeasesGranted after Stopped: %v", err)
+	}
+	rel := only[SendRelease](t, effs)
+	wantEffects(t, effs, Discard{Ref: ref(1)}, Discard{Ref: ref(2)}, SendRelease{Seq: rel.Seq, Refs: []Ref{ref(1), ref(2)}})
+	if effs := tr.ReleaseDone(2*sec+10*ms, rel.Seq); len(effs) != 0 {
+		t.Fatalf("ReleaseDone after Stopped = %v, want nothing", effs)
+	}
+	// Everything else stays silent.
+	if effs := tr.Tick(3 * sec); len(effs) != 0 {
+		t.Fatalf("Tick after Stopped = %v, want nothing", effs)
+	}
+	if effs, err := tr.LeasesGranted(3*sec, 1, 0, 0, nil); len(effs) != 0 || err != nil {
+		t.Fatalf("an empty answer after Stopped = %v, %v, want nothing", effs, err)
+	}
+}
+
+func TestSmallestLegalTTLSurvivesTwoLostHeartbeats(t *testing.T) {
+	// TTL 12.001s is the shortest that is valid with a 3s margin. Its period
+	// is 3.00025s and the deadline is 12.001s - 3s = 9.001s, just after the
+	// third heartbeat at 9.00075s. A TTL of exactly four margins would put
+	// the third heartbeat at the very instant the sweep cancels the lease.
+	tr := newTracker(t, func(c *Config) { c.TTL = 12001 * ms })
+	first := only[RequestLeases](t, tr.Start(0))
+	g := Grant{Ref: ref(1), Attempt: 1, Remaining: 12001 * ms}
+	if _, err := tr.LeasesGranted(0, first.Seq, 0, 0, []Grant{g}); err != nil {
+		t.Fatalf("LeasesGranted: %v", err)
+	}
+	period := 12001 * ms / 4
+	for k := Mono(1); k <= 2; k++ {
+		hb := only[SendHeartbeat](t, tr.Tick(k*period))
+		retry := only[SendHeartbeat](t, tr.HeartbeatFailed(k*period, hb.Seq))
+		none[SendHeartbeat](t, tr.HeartbeatFailed(k*period, retry.Seq))
+	}
+	effs := tr.Tick(3 * period)
+	none[CancelHandler](t, effs)
+	hb := only[SendHeartbeat](t, effs)
+	if !slices.Equal(hb.Refs, []Ref{ref(1)}) {
+		t.Fatalf("third heartbeat refs = %v, want job 1 still held", hb.Refs)
+	}
+}
+
 func TestInvariantErrors(t *testing.T) {
 	tr := newTracker(t)
 	first := only[RequestLeases](t, tr.Start(0))
@@ -1194,8 +1364,10 @@ func TestConfigValidate(t *testing.T) {
 		field  string // empty means valid
 	}{
 		{"defaults", func(*Config) {}, ""},
-		{"ttl at four margins", func(c *Config) { c.TTL = 12 * sec }, ""},
+		{"ttl at exactly four margins", func(c *Config) { c.TTL = 12 * sec }, "ttl"},
+		{"ttl just above four margins", func(c *Config) { c.TTL = 12001 * ms }, ""},
 		{"ttl below four margins", func(c *Config) { c.TTL = 11 * sec }, "ttl"},
+		{"margin too large to multiply by four", func(c *Config) { c.Margin = 1 << 62 }, "ttl"},
 		{"ttl below the minimum", func(c *Config) { c.TTL = 500 * ms; c.Margin = 100 * ms }, "ttl"},
 		{"ttl above the maximum", func(c *Config) { c.TTL = 2 * time.Hour }, "ttl"},
 		{"ttl not in whole microseconds", func(c *Config) { c.TTL = 30*sec + 1 }, "ttl"},

@@ -22,7 +22,9 @@ type Config struct {
 	Concurrency int
 	// TTL is the lease length that the tracker asks for, and the period of
 	// heartbeats is a quarter of it. It must satisfy job.ValidateTTL and be
-	// at least four times Margin. The default is 30s.
+	// greater than four times Margin, so that the third heartbeat of a lease
+	// falls before its deadline and two lost heartbeats are survived. The
+	// default is 30s.
 	TTL time.Duration
 	// Margin is how long before a lease's expiry the tracker gives up on it
 	// locally. The default is 3s.
@@ -104,8 +106,10 @@ func (c Config) Validate() error {
 	if c.Margin < 0 {
 		return invalid("margin", "must not be negative, got "+c.Margin.String())
 	}
-	if c.TTL < 4*c.Margin {
-		return invalid("ttl", "must be at least four times the margin "+c.Margin.String()+", got "+c.TTL.String())
+	// TTL > 4*Margin, written as a comparison that cannot overflow. TTL is a
+	// whole number of microseconds, so TTL/4 is exact.
+	if c.Margin >= c.TTL/4 {
+		return invalid("ttl", "must be greater than four times the margin "+c.Margin.String()+", got "+c.TTL.String())
 	}
 	if c.LongPoll < 0 || c.LongPoll > maxLongPoll {
 		return invalid("long_poll", "must be between 0 and "+maxLongPoll.String()+", got "+c.LongPoll.String())
