@@ -1,7 +1,6 @@
 package job
 
 import (
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,14 +12,6 @@ var (
 	matrixToken     = int64(7)
 	matrixRetryWait = 5 * time.Second
 )
-
-// snapshot returns a copy of j that shares no memory with it, so that a
-// later write into j's byte slices shows up as a difference.
-func snapshot(j Job) Job {
-	j.Payload = slices.Clone(j.Payload)
-	j.Result = slices.Clone(j.Result)
-	return j
-}
 
 // wantShape fails unless j keeps the invariants that tie the lease and
 // finish fields to the state.
@@ -50,7 +41,7 @@ func matrixRows() []matrixRow {
 		RunAt: matrixNow, MaxAttempts: 25, Epoch: matrixToken, CreatedAt: matrixNow.Add(-time.Hour),
 	}
 	with := func(f func(*Job)) Job {
-		j := snapshot(base)
+		j := base.Clone()
 		f(&j)
 		return j
 	}
@@ -141,7 +132,7 @@ func TestTransitionMatrix(t *testing.T) {
 		}
 		for i, op := range ops {
 			t.Run(row.name+"/"+op.name, func(t *testing.T) {
-				out, outcome := op.run(snapshot(row.job))
+				out, outcome := op.run(row.job.Clone())
 				if outcome != want[i].outcome {
 					t.Fatalf("outcome = %v, want %v", outcome, want[i].outcome)
 				}
@@ -168,10 +159,15 @@ func TestNonAppliedReturnsInputUnchanged(t *testing.T) {
 			if matrixWant[row.name][i].outcome == Applied {
 				continue
 			}
-			in := snapshot(row.job)
+			// The call gets one copy, and the comparison is made against a
+			// second one taken before it: the output shares its byte slices
+			// with the argument, so comparing the two would not notice a
+			// write into them.
+			in := row.job.Clone()
+			before := in.Clone()
 			out, outcome := op.run(in)
-			if outcome == Applied || !Equal(out, in) {
-				t.Errorf("%s/%s: outcome %v, out %+v, want %+v unchanged", row.name, op.name, outcome, out, in)
+			if outcome == Applied || !Equal(out, before) || !Equal(in, before) {
+				t.Errorf("%s/%s: outcome %v, out %+v, in %+v, want %+v unchanged", row.name, op.name, outcome, out, in, before)
 			}
 			checked++
 		}
@@ -185,7 +181,7 @@ func TestTransitionsDoNotMutateInput(t *testing.T) {
 	for _, row := range matrixRows() {
 		for _, op := range matrixOps() {
 			in := row.job
-			before := snapshot(in)
+			before := in.Clone()
 			op.run(in)
 			if !Equal(in, before) {
 				t.Errorf("%s/%s changed its argument: %+v, was %+v", row.name, op.name, in, before)

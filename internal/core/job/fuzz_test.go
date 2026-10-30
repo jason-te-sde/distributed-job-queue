@@ -138,7 +138,7 @@ func FuzzTransitions(f *testing.F) {
 			if tok&0x80 != 0 {
 				token = cur.Epoch // often present the token that would match
 			}
-			before := snapshot(cur)
+			before := cur.Clone()
 			out, o, ok := applyFuzzOp(kind, cur, now, token, p)
 			if !Equal(cur, before) {
 				t.Fatalf("step %d: operation %d changed its argument: %+v, was %+v", step, kind%fuzzOps, cur, before)

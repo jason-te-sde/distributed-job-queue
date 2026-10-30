@@ -40,6 +40,14 @@ const (
 	MaxTTL = time.Hour
 	// MaxDelay is the longest enqueue delay.
 	MaxDelay = 365 * 24 * time.Hour
+	// MinRunAtYear is the first UTC year in which an enqueue may schedule a
+	// job with RunAt.
+	MinRunAtYear = 2000
+	// MaxRunAtYear is the first UTC year after the range, so a RunAt is
+	// valid in the years [MinRunAtYear, MaxRunAtYear). The range sits well
+	// inside PostgreSQL's timestamptz, and a RunAt outside it gets a clear
+	// error here instead of a database one.
+	MaxRunAtYear = 3000
 )
 
 // ErrInvalid is the error that every rejection of a caller's argument wraps.
@@ -90,8 +98,9 @@ func ValidateName(field, v string) error {
 }
 
 // ValidateSpec checks an enqueue request: both names, the payload size,
-// the delay, that Delay and RunAt are not combined, MaxAttempts being 0 or
-// in [1, MaxMaxAttempts], and the idempotency key.
+// the delay, that Delay and RunAt are not combined, that a RunAt lies in the
+// years [MinRunAtYear, MaxRunAtYear), MaxAttempts being 0 or in
+// [1, MaxMaxAttempts], and the idempotency key.
 func ValidateSpec(s Spec) error {
 	if err := ValidateName("queue", s.Queue); err != nil {
 		return err
@@ -107,6 +116,11 @@ func ValidateSpec(s Spec) error {
 	}
 	if s.Delay > 0 && !s.RunAt.IsZero() {
 		return invalid("run_at", "must not be combined with a positive delay")
+	}
+	if !s.RunAt.IsZero() {
+		if y := s.RunAt.UTC().Year(); y < MinRunAtYear || y >= MaxRunAtYear {
+			return invalid("run_at", "must fall in the years "+strconv.Itoa(MinRunAtYear)+" to "+strconv.Itoa(MaxRunAtYear-1)+" (UTC), got "+s.RunAt.UTC().Format(time.RFC3339Nano))
+		}
 	}
 	if s.MaxAttempts != 0 && (s.MaxAttempts < 1 || s.MaxAttempts > MaxMaxAttempts) {
 		return invalid("max_attempts", "must be 0 or between 1 and "+strconv.Itoa(int(MaxMaxAttempts))+", got "+strconv.Itoa(int(s.MaxAttempts)))

@@ -122,6 +122,40 @@ func TestValidateSpecDelayAndRunAtExclusive(t *testing.T) {
 	wantInvalid(t, ValidateSpec(s), "run_at")
 }
 
+func TestValidateSpecRunAtRange(t *testing.T) {
+	// The range is in UTC years, whatever zone the instant is written in.
+	plus5 := time.FixedZone("plus5", 5*60*60)
+	minus5 := time.FixedZone("minus5", -5*60*60)
+	for name, at := range map[string]time.Time{
+		"start of 2000":             time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC),
+		"2026":                      time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC),
+		"last nanosecond of 2999":   time.Date(2999, 12, 31, 23, 59, 59, 999999999, time.UTC),
+		"1999 locally, 2000 in UTC": time.Date(1999, 12, 31, 23, 0, 0, 0, minus5),
+		"3000 locally, 2999 in UTC": time.Date(3000, 1, 1, 4, 0, 0, 0, plus5),
+	} {
+		s := goodSpec()
+		s.RunAt = at
+		if err := ValidateSpec(s); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	for name, at := range map[string]time.Time{
+		"1999":                      time.Date(1999, 6, 1, 0, 0, 0, 0, time.UTC),
+		"last nanosecond of 1999":   time.Date(1999, 12, 31, 23, 59, 59, 999999999, time.UTC),
+		"start of 3000":             time.Date(3000, 1, 1, 0, 0, 0, 0, time.UTC),
+		"year 1":                    time.Date(1, 1, 2, 0, 0, 0, 0, time.UTC),
+		"the Unix epoch":            time.Unix(0, 1),
+		"2000 locally, 1999 in UTC": time.Date(2000, 1, 1, 0, 30, 0, 0, plus5),
+		"2999 locally, 3000 in UTC": time.Date(2999, 12, 31, 23, 0, 0, 0, minus5),
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := goodSpec()
+			s.RunAt = at
+			wantInvalid(t, ValidateSpec(s), "run_at")
+		})
+	}
+}
+
 func TestValidateSpecMaxAttempts(t *testing.T) {
 	for _, n := range []int32{0, 1, 100} {
 		s := goodSpec()
@@ -234,20 +268,32 @@ func TestTruncateError(t *testing.T) {
 }
 
 func TestTruncateErrorCutsOnARuneBoundary(t *testing.T) {
-	// 4096 is not a multiple of 3 or 4, so a 3- or 4-byte rune straddles the
-	// limit and the cut must back up to the start of that rune.
-	for _, r := range []string{"a", "é", "€", "😀"} {
-		in := strings.Repeat(r, 5000)
-		got := TruncateError(in)
-		if !utf8.ValidString(got) {
-			t.Errorf("%q: result is not valid UTF-8", r)
+	// A rune that straddles byte 4096 must be dropped whole. The padding
+	// shifts the runes so that the limit falls 0, 1, 2 or 3 bytes into one,
+	// which makes the cut back up by up to 3 bytes (a 4-byte rune after one
+	// byte of padding is the worst case).
+	for _, r := range []string{"é", "€", "😀"} {
+		for pad := 0; pad <= 3; pad++ {
+			in := strings.Repeat("a", pad) + strings.Repeat(r, 3000)
+			got := TruncateError(in)
+			if !utf8.ValidString(got) {
+				t.Errorf("%q after %d bytes of padding: result is not valid UTF-8", r, pad)
+			}
+			if len(got) > MaxErrorBytes || len(got) < MaxErrorBytes-3 {
+				t.Errorf("%q after %d bytes of padding: len = %d, want in [%d, %d]", r, pad, len(got), MaxErrorBytes-3, MaxErrorBytes)
+			}
+			if !strings.HasPrefix(in, got) {
+				t.Errorf("%q after %d bytes of padding: result is not a prefix of the input", r, pad)
+			}
+			// The longest prefix that ends on a rune boundary: no more is
+			// cut than the straddling rune.
+			if want := MaxErrorBytes - (MaxErrorBytes-pad)%len(r); len(got) != want {
+				t.Errorf("%q after %d bytes of padding: len = %d, want %d", r, pad, len(got), want)
+			}
 		}
-		if len(got) > MaxErrorBytes || len(got) <= MaxErrorBytes-len(r) {
-			t.Errorf("%q: len = %d, want in (%d, %d]", r, len(got), MaxErrorBytes-len(r), MaxErrorBytes)
-		}
-		if !strings.HasPrefix(in, got) {
-			t.Errorf("%q: result is not a prefix of the input", r)
-		}
+	}
+	if got := TruncateError(strings.Repeat("a", 5000)); len(got) != MaxErrorBytes {
+		t.Errorf("ASCII text: len = %d, want %d", len(got), MaxErrorBytes)
 	}
 }
 
@@ -285,6 +331,8 @@ func FuzzValidateSpec(f *testing.F) {
 	f.Add("q", "t", int32(1), int64(time.Second), int64(1), int32(0), "")
 	f.Add("q", "t", int32(1), int64(0), int64(1), int32(101), "a\x00b")
 	f.Add("", "a b", int32(-1), int64(-1), int64(0), int32(-1), "\xff")
+	f.Add("q", "t", int32(1), int64(0), time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano(), int32(0), "")
+	f.Add("q", "t", int32(1), int64(0), time.Date(1999, 12, 31, 23, 59, 59, 0, time.UTC).UnixNano(), int32(0), "")
 	f.Fuzz(func(t *testing.T, queue, tenant string, payloadLen int32, delay, runAtNanos int64, maxAttempts int32, key string) {
 		s := Spec{
 			Queue: queue, Tenant: tenant,
@@ -312,6 +360,8 @@ func FuzzValidateSpec(f *testing.F) {
 			t.Fatalf("accepted max_attempts %d", s.MaxAttempts)
 		case s.Delay > 0 && !s.RunAt.IsZero():
 			t.Fatalf("accepted Delay %v together with RunAt %v", s.Delay, s.RunAt)
+		case !s.RunAt.IsZero() && (s.RunAt.UTC().Year() < 2000 || s.RunAt.UTC().Year() >= 3000):
+			t.Fatalf("accepted RunAt %v", s.RunAt)
 		case s.Delay < 0 || s.Delay > MaxDelay || s.Delay%time.Microsecond != 0:
 			t.Fatalf("accepted Delay %v", s.Delay)
 		case len(s.IdempotencyKey) > MaxIdempotencyKeyBytes || !utf8.ValidString(s.IdempotencyKey) || strings.ContainsRune(s.IdempotencyKey, 0):

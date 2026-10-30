@@ -154,7 +154,8 @@ type Spec struct {
 	// Delay postpones the job by this long, within [0, MaxDelay].
 	Delay time.Duration
 	// RunAt schedules the job for an instant. The zero time means not
-	// scheduled. It must not be combined with a positive Delay.
+	// scheduled. It must not be combined with a positive Delay, and it must
+	// fall in the UTC years [MinRunAtYear, MaxRunAtYear).
 	RunAt time.Time
 	// MaxAttempts is the lease budget; 0 means DefaultMaxAttempts.
 	MaxAttempts int32
