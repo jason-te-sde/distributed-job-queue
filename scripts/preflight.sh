@@ -11,6 +11,23 @@ if [ -n "$unformatted" ]; then
   exit 1
 fi
 
+# The generated code must match the proto files. Fingerprint internal/gen
+# around `make gen` instead of asking git whether it changed: a tree that is
+# already dirty must not fail by itself, and a file that was modified before
+# and differs after is still drift, which a before/after `git status` cannot
+# tell apart.
+gen_fingerprint() {
+  find internal/gen -type f | LC_ALL=C sort | while IFS= read -r file; do
+    printf '%s  %s\n' "$(git hash-object "$file")" "$file"
+  done
+}
+gen_before="$(gen_fingerprint)"
+make gen
+if [ "$gen_before" != "$(gen_fingerprint)" ]; then
+  echo "gen: internal/gen was out of date and make gen has rewritten it; review the changes and commit them" >&2
+  exit 1
+fi
+
 make lint
 make hygiene
 make test-scripts

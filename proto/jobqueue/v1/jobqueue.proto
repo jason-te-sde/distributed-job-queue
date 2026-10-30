@@ -1,0 +1,225 @@
+syntax = "proto3";
+
+package jobqueue.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+// JobQueueService is the broker's client-facing API. Field numbers are fixed
+// once merged.
+service JobQueueService {
+  rpc Enqueue(EnqueueRequest) returns (EnqueueResponse);
+  rpc Lease(LeaseRequest) returns (LeaseResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc Ack(AckRequest) returns (AckResponse);
+  rpc Release(ReleaseRequest) returns (ReleaseResponse);
+  rpc GetJob(GetJobRequest) returns (GetJobResponse);
+  rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
+  rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
+  rpc ListDeadJobs(ListDeadJobsRequest) returns (ListDeadJobsResponse);
+  rpc RequeueJob(RequeueJobRequest) returns (RequeueJobResponse);
+  rpc PurgeJobs(PurgeJobsRequest) returns (PurgeJobsResponse);
+}
+
+enum JobState {
+  JOB_STATE_UNSPECIFIED = 0;
+  JOB_STATE_READY = 1;
+  JOB_STATE_LEASED = 2;
+  JOB_STATE_SUCCEEDED = 3;
+  JOB_STATE_DEAD = 4;
+  JOB_STATE_CANCELLED = 5;
+}
+
+enum LeaseStatus {
+  LEASE_STATUS_UNSPECIFIED = 0;
+  LEASE_STATUS_HELD = 1;
+  LEASE_STATUS_LOST = 2;
+}
+
+enum AckStatus {
+  ACK_STATUS_UNSPECIFIED = 0;
+  ACK_STATUS_ACCEPTED = 1;
+  ACK_STATUS_DUPLICATE = 2;
+  ACK_STATUS_FENCED = 3;
+}
+
+message EnqueueItem {
+  string queue = 1;
+  string tenant = 2;
+  bytes payload = 3;
+  google.protobuf.Duration delay = 4;
+  google.protobuf.Timestamp run_at = 5;
+  int32 max_attempts = 6;
+  string idempotency_key = 7;
+}
+
+message EnqueueRequest {
+  repeated EnqueueItem items = 1;
+}
+
+message EnqueueResult {
+  int64 id = 1;
+  bool deduplicated = 2;
+}
+
+message EnqueueResponse {
+  repeated EnqueueResult results = 1;
+}
+
+message LeaseRequest {
+  string queue = 1;
+  int32 max_jobs = 2;
+  google.protobuf.Duration wait = 3;
+  google.protobuf.Duration ttl = 4;
+  string worker_id = 5;
+}
+
+message LeasedJob {
+  int64 id = 1;
+  string queue = 2;
+  string tenant = 3;
+  bytes payload = 4;
+  int64 token = 5;
+  int32 attempt = 6;
+  int32 max_attempts = 7;
+  google.protobuf.Duration remaining = 8;
+  google.protobuf.Timestamp enqueued_at = 9;
+}
+
+message LeaseResponse {
+  repeated LeasedJob jobs = 1;
+  google.protobuf.Duration waited = 2;
+}
+
+message LeaseRef {
+  int64 id = 1;
+  string queue = 2;
+  int64 token = 3;
+}
+
+message HeartbeatRequest {
+  repeated LeaseRef leases = 1;
+  google.protobuf.Duration ttl = 2;
+}
+
+message HeartbeatResult {
+  LeaseStatus status = 1;
+  google.protobuf.Duration remaining = 2;
+}
+
+message HeartbeatResponse {
+  repeated HeartbeatResult results = 1;
+}
+
+message Success {
+  bytes result = 1;
+}
+
+message Failure {
+  string error = 1;
+  bool permanent = 2;
+  google.protobuf.Duration retry_after = 3;
+  int32 attempt = 4;
+}
+
+message AckItem {
+  LeaseRef lease = 1;
+  oneof outcome {
+    Success success = 2;
+    Failure failure = 3;
+  }
+}
+
+message AckRequest {
+  repeated AckItem items = 1;
+}
+
+message AckResponse {
+  repeated AckStatus results = 1;
+}
+
+message ReleaseRequest {
+  repeated LeaseRef leases = 1;
+}
+
+message ReleaseResponse {
+  repeated AckStatus results = 1;
+}
+
+message Job {
+  int64 id = 1;
+  string queue = 2;
+  string tenant = 3;
+  JobState state = 4;
+  bytes payload = 5;
+  google.protobuf.Timestamp run_at = 6;
+  int32 attempts = 7;
+  int32 max_attempts = 8;
+  int64 epoch = 9;
+  google.protobuf.Timestamp lease_expires_at = 10;
+  string last_error = 11;
+  bytes result = 12;
+  google.protobuf.Timestamp created_at = 13;
+  google.protobuf.Timestamp finished_at = 14;
+  string idempotency_key = 15;
+}
+
+message GetJobRequest {
+  int64 id = 1;
+}
+
+message GetJobResponse {
+  Job job = 1;
+}
+
+message CancelJobRequest {
+  int64 id = 1;
+}
+
+message CancelJobResponse {
+  JobState state = 1;
+}
+
+message GetStatsRequest {
+  string queue = 1;
+}
+
+message TenantStats {
+  string tenant = 1;
+  int64 ready = 2;
+  int64 scheduled = 3;
+  int64 leased = 4;
+  int64 dead = 5;
+  google.protobuf.Duration oldest_ready_age = 6;
+}
+
+message GetStatsResponse {
+  repeated TenantStats tenants = 1;
+}
+
+message ListDeadJobsRequest {
+  string queue = 1;
+  int64 after_id = 2;
+  int32 limit = 3;
+}
+
+message ListDeadJobsResponse {
+  repeated Job jobs = 1;
+  int64 next_after_id = 2;
+}
+
+message RequeueJobRequest {
+  int64 id = 1;
+}
+
+message RequeueJobResponse {}
+
+message PurgeJobsRequest {
+  string queue = 1;
+  JobState state = 2;
+  google.protobuf.Timestamp finished_before = 3;
+}
+
+message PurgeJobsResponse {
+  int64 deleted = 1;
+}

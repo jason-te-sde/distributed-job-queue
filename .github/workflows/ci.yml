@@ -30,6 +30,42 @@ jobs:
           version: v2.15.0
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      # buf-action runs lint only. The breaking comparison is the next step,
+      # which fetches the base branch itself and skips when it has no proto/.
+      - uses: bufbuild/buf-action@v1
+        with:
+          version: 1.75.0
+          lint: true
+          format: false
+          breaking: false
+          push: false
+          pr_comment: false
+      - name: buf breaking
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$GITHUB_BASE_REF"
+          base="$(git rev-parse FETCH_HEAD)"
+          if git cat-file -e "$base:proto" 2>/dev/null; then
+            # The commit id is explicit on purpose: buf 1.75.0 accepts
+            # ref=FETCH_HEAD but then reports nothing, even for a breaking change.
+            buf breaking --against ".git#ref=$base"
+          else
+            echo "buf breaking: $GITHUB_BASE_REF has no proto/ directory yet, so there is nothing to compare against"
+          fi
+      - name: gen-check
+        run: |
+          make gen
+          # git status, not git diff: a diff ignores generated files that were
+          # never committed, and `git add -N` would stage the deletion of a
+          # stale one and hide it.
+          changes="$(git status --porcelain -- internal/gen)"
+          if [ -n "$changes" ]; then
+            echo "internal/gen is out of date; run make gen and commit the result:" >&2
+            echo "$changes" >&2
+            git diff --stat -- internal/gen >&2
+            exit 1
+          fi
 
   test:
     name: test (go ${{ matrix.go }}, ${{ matrix.os }})
