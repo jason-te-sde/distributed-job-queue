@@ -93,6 +93,46 @@ jobs:
             internal/sim/testdata/failures/**
           if-no-files-found: ignore
 
+  pg:
+    name: pg (postgres ${{ matrix.postgres }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["15", "18"]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 2s
+          --health-retries 30
+        ports:
+          - 5432:5432
+    env:
+      JOBQUEUE_TEST_DSN: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.x
+      - name: go vet
+        run: go vet -tags pg ./...
+      - name: go test -race
+        run: go test -race -tags pg -json ./... > pg.json
+      - name: Count the pg tests
+        run: scripts/check-pg-count.sh pg.json
+      - name: Upload the test events
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pg-events-postgres${{ matrix.postgres }}
+          path: pg.json
+          if-no-files-found: ignore
+
   hygiene:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
