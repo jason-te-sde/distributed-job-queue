@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"pgregory.net/rapid"
+
+	"github.com/jason-te-sde/distributed-job-queue/internal/core/job"
 )
 
 // The model below is the smallest shell and server that can exercise the
@@ -13,8 +15,9 @@ import (
 //
 //   - The shell side performs the tracker's effects. Every send effect
 //     becomes one reply event after a random delay of 0 to 8s, and one send in
-//     five fails. A handler is an event too: it returns after a random time,
-//     or never.
+//     five fails. One Lease reply in eight also stalls for another 25s or
+//     more, long enough for its grants to arrive past their deadline. A
+//     handler is an event too: it returns after a random time, or never.
 //   - The server side keeps the true expiry of every lease it granted. The
 //     instant at which it served a request is drawn between the instant the
 //     request was sent (plus the wait a grant reports) and the instant its
@@ -198,7 +201,7 @@ func (m *model) requestLeases(e RequestLeases) {
 		m.t.Fatalf("at %v: a Lease request after Drain", m.now)
 	case m.outstanding != 0:
 		m.t.Fatalf("at %v: Lease request %d while %d is outstanding", m.now, e.Seq, m.outstanding)
-	case e.Max != m.cfg.Concurrency-m.running || e.Max < 1:
+	case e.Max != min(m.cfg.Concurrency-m.running, job.MaxBatch) || e.Max < 1:
 		m.t.Fatalf("at %v: Lease request Max %d with %d of %d slots free", m.now, e.Max, m.cfg.Concurrency-m.running, m.cfg.Concurrency)
 	case e.Wait != m.cfg.LongPoll || e.TTL != m.cfg.TTL:
 		m.t.Fatalf("at %v: Lease request %+v does not carry the configured wait and TTL", m.now, e)
@@ -207,6 +210,9 @@ func (m *model) requestLeases(e RequestLeases) {
 	sentAt := m.now
 	failed := m.oneIn("lease request fails", 5)
 	d := m.delay("lease reply delay", maxReplyDelay)
+	if m.oneIn("lease reply stalls", 8) {
+		d += 25*time.Second + m.delay("lease stall", 10*time.Second)
+	}
 	m.requestEvent[e.Seq] = m.after(d, func() {
 		if m.outstanding == e.Seq {
 			m.outstanding = 0
@@ -249,6 +255,10 @@ func (m *model) startHandler(e StartHandler) {
 	ref := e.Grant.Ref
 	if m.started[ref] || m.released[ref] {
 		m.t.Fatalf("at %v: StartHandler for %+v, which was started or released before", m.now, ref)
+	}
+	// A handler never starts on a lease with less than the margin left.
+	if exp := m.expiry[ref]; m.now >= exp-m.cfg.Margin {
+		m.t.Fatalf("at %v: StartHandler for %+v, whose lease expires at %v (margin %v)", m.now, ref, exp, m.cfg.Margin)
 	}
 	m.started[ref] = true
 	m.running++
@@ -461,7 +471,7 @@ func (m *model) run(drainAfter int) {
 func TestTrackerProperties(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		cfg := Config{
-			Concurrency: rapid.IntRange(1, 6).Draw(t, "concurrency"),
+			Concurrency: rapid.SampledFrom([]int{1, 2, 3, 6, 70}).Draw(t, "concurrency"),
 			TTL:         30 * time.Second,
 			Margin:      3 * time.Second,
 			AckWindow:   2 * time.Millisecond,

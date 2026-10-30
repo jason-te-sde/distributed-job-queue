@@ -188,7 +188,8 @@ type Effect interface{ isEffect() }
 type RequestLeases struct {
 	// Seq identifies the request.
 	Seq uint64
-	// Max is the most jobs to take.
+	// Max is the most jobs to take: the number of free slots, but never more
+	// than job.MaxBatch.
 	Max int
 	// Wait is how long the broker may hold the request while it has no work.
 	Wait time.Duration
@@ -247,7 +248,8 @@ type SendRelease struct {
 	Refs []Ref
 }
 
-// Discard is a grant that will not run. The shell drops the job's payload.
+// Discard is a grant that will not run: it arrived late, while draining, or
+// with its local deadline already passed. The shell drops the job's payload.
 // The same call's SendRelease gives the lease back.
 type Discard struct {
 	// Ref is the lease.

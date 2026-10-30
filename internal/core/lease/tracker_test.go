@@ -135,6 +135,24 @@ func startAndGrant(t *testing.T, tr *Tracker, at Mono, ids ...int64) []Effect {
 	return effs
 }
 
+// startAndGrantInBatches starts tr at instant 0 and answers its Lease
+// requests at instant at with the given jobs, as many per response as each
+// request allows, which is at most job.MaxBatch.
+func startAndGrantInBatches(t *testing.T, tr *Tracker, at Mono, ids ...int64) {
+	t.Helper()
+	req := only[RequestLeases](t, tr.Start(0))
+	for len(ids) > 0 {
+		n := min(len(ids), req.Max)
+		effs, err := tr.LeasesGranted(at, req.Seq, 0, 0, grants(ids[:n]...))
+		if err != nil {
+			t.Fatalf("LeasesGranted: %v", err)
+		}
+		if ids = ids[n:]; len(ids) > 0 {
+			req = only[RequestLeases](t, effs)
+		}
+	}
+}
+
 // allHeld answers every ref of hb as held with a full 30s remaining.
 func allHeld(hb SendHeartbeat) []HeartbeatStatus {
 	out := make([]HeartbeatStatus, len(hb.Refs))
@@ -426,7 +444,7 @@ func TestFullAckBatchFlushesAtOnce(t *testing.T) {
 	for i := range ids {
 		ids[i] = int64(i + 1)
 	}
-	startAndGrant(t, tr, 100*ms, ids...)
+	startAndGrantInBatches(t, tr, 100*ms, ids...)
 	for _, id := range ids[:127] {
 		effs, err := tr.HandlerDone(sec, ref(id), Outcome{Kind: OutcomeSuccess})
 		if err != nil {
@@ -450,7 +468,7 @@ func TestAckBatchInFlightHoldsBackTheRest(t *testing.T) {
 	for i := range ids {
 		ids[i] = int64(i + 1)
 	}
-	startAndGrant(t, tr, 100*ms, ids...)
+	startAndGrantInBatches(t, tr, 100*ms, ids...)
 	var batch SendAcks
 	for _, id := range ids {
 		effs, err := tr.HandlerDone(sec, ref(id), Outcome{Kind: OutcomeSuccess})
@@ -609,6 +627,125 @@ func TestEmptyGrantRequestsAgain(t *testing.T) {
 	}
 	if got := only[RequestLeases](t, effs); got != (RequestLeases{Seq: 2, Max: 4, Wait: 20 * sec, TTL: 30 * sec}) {
 		t.Fatalf("request = %+v, want Seq 2, Max 4", got)
+	}
+}
+
+func TestLeaseRequestIsClampedToMaxBatch(t *testing.T) {
+	// A Lease call carries payloads, so the broker takes at most MaxBatch
+	// jobs in one. The tracker asks for no more, whatever the free slots.
+	tr := newTracker(t, func(c *Config) { c.Concurrency = 200 })
+	req := only[RequestLeases](t, tr.Start(0))
+	if req.Max != job.MaxBatch {
+		t.Fatalf("first request Max = %d, want %d with 200 slots free", req.Max, job.MaxBatch)
+	}
+	// A response with more grants than the clamped Max is a bug, even though
+	// slots were free for them.
+	over := make([]int64, job.MaxBatch+1)
+	for i := range over {
+		over[i] = int64(i + 1)
+	}
+	_, err := tr.LeasesGranted(sec, req.Seq, 0, 0, grants(over...))
+	wantInvariant(t, err, ref(job.MaxBatch+1))
+
+	running := 0
+	for _, wantMax := range []int{64, 64, 64, 8} { // 200 = 3*64 + 8
+		if req.Max != wantMax {
+			t.Fatalf("request with %d running: Max = %d, want %d", running, req.Max, wantMax)
+		}
+		ids := make([]int64, req.Max)
+		for i := range ids {
+			ids[i] = int64(running + i + 1)
+		}
+		effs, err := tr.LeasesGranted(sec, req.Seq, 0, 0, grants(ids...))
+		if err != nil {
+			t.Fatalf("LeasesGranted with %d running: %v", running, err)
+		}
+		running += len(ids)
+		if running == 200 {
+			none[RequestLeases](t, effs) // every slot is taken
+			break
+		}
+		req = only[RequestLeases](t, effs)
+	}
+	// Slots that free up are refilled in requests of at most MaxBatch too.
+	for id := int64(1); id <= 100; id++ {
+		effs, err := tr.HandlerDone(2*sec, ref(id), Outcome{Kind: OutcomeSuccess})
+		if err != nil {
+			t.Fatalf("HandlerDone(%d): %v", id, err)
+		}
+		for _, r := range all[RequestLeases](effs) {
+			if r.Max < 1 || r.Max > job.MaxBatch {
+				t.Fatalf("request Max = %d after %d handlers returned, want 1..%d", r.Max, id, job.MaxBatch)
+			}
+		}
+	}
+}
+
+func TestGrantPastItsDeadlineIsDiscardedAndReleased(t *testing.T) {
+	tr := newTracker(t)
+	req := only[RequestLeases](t, tr.Start(0))
+	// Job 1 was leased for 3s of which the margin takes all, so its local
+	// deadline (sentAt + waited + 3s - 3s = 0) is long past on arrival at 5s.
+	// Job 2 has a full lease.
+	stale := Grant{Ref: ref(1), Attempt: 1, Remaining: 3 * sec}
+	effs, err := tr.LeasesGranted(5*sec, req.Seq, 0, 0, []Grant{stale, grant(2)})
+	if err != nil {
+		t.Fatalf("LeasesGranted: %v", err)
+	}
+	if got := all[Discard](effs); len(got) != 1 || got[0].Ref != ref(1) {
+		t.Fatalf("Discard = %v, want job 1 only", got)
+	}
+	if got := all[StartHandler](effs); len(got) != 1 || got[0].Grant.Ref != ref(2) {
+		t.Fatalf("StartHandler = %v, want job 2 only", got)
+	}
+	rel := only[SendRelease](t, effs)
+	if !slices.Equal(rel.Refs, []Ref{ref(1)}) {
+		t.Fatalf("SendRelease refs = %v, want job 1", rel.Refs)
+	}
+	none[CancelHandler](t, effs)
+	// Only job 2 holds a slot, so the next request asks for the other three.
+	if got := only[RequestLeases](t, effs); got.Max != 3 {
+		t.Fatalf("request Max = %d, want 3", got.Max)
+	}
+	if ids := heldIDs(tr, 5*sec); !slices.Equal(ids, []int64{2}) {
+		t.Fatalf("Held = %v, want only job 2", ids)
+	}
+	// The discarded lease is never heartbeated, and no handler ever returns
+	// for it.
+	hb := only[SendHeartbeat](t, tr.Tick(7500*ms))
+	if !slices.Equal(hb.Refs, []Ref{ref(2)}) {
+		t.Fatalf("heartbeat refs = %v, want only job 2", hb.Refs)
+	}
+	if _, err := tr.HandlerDone(8*sec, ref(1), Outcome{Kind: OutcomeSuccess}); err == nil {
+		t.Fatalf("HandlerDone for a discarded grant returned no error")
+	}
+}
+
+func TestGrantDeadlineBoundaryIsDiscarded(t *testing.T) {
+	// The deadline of a grant sent at 0 with 30s remaining is 27s: a grant
+	// that arrives at that instant is discarded, one just before it starts.
+	for _, tc := range []struct {
+		name  string
+		at    Mono
+		start bool
+	}{
+		{"one nanosecond before the deadline", 27*sec - time.Nanosecond, true},
+		{"at the deadline", 27 * sec, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := newTracker(t)
+			req := only[RequestLeases](t, tr.Start(0))
+			effs, err := tr.LeasesGranted(tc.at, req.Seq, 0, 0, grants(1))
+			if err != nil {
+				t.Fatalf("LeasesGranted: %v", err)
+			}
+			if got := len(all[StartHandler](effs)) == 1; got != tc.start {
+				t.Fatalf("handler started = %v, want %v in %v", got, tc.start, effs)
+			}
+			if got := len(all[Discard](effs)) == 1; got == tc.start {
+				t.Fatalf("grant discarded = %v, want %v in %v", got, !tc.start, effs)
+			}
+		})
 	}
 }
 

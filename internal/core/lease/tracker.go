@@ -142,7 +142,9 @@ func (t *Tracker) Start(now Mono) []Effect {
 // at sentAt and which the broker says waited for the given time before it
 // found work. An answer for a request that is not outstanding, or that comes
 // while draining, has all its grants discarded and released. Otherwise every
-// grant starts a handler.
+// grant starts a handler, except one whose local deadline has already passed
+// on arrival: that one is discarded and released the same way, because a
+// handler must never run on a lease the tracker would cancel at once.
 //
 // A response with more grants than the request's Max, or with a grant whose
 // job is already held by a live lease, is an *InvariantError. The call then
@@ -160,8 +162,14 @@ func (t *Tracker) LeasesGranted(now Mono, seq uint64, sentAt Mono, waited time.D
 	t.reqSeq = 0
 	t.leaseFailures = 0
 	var out []Effect
+	var unrun []Ref
 	for _, g := range grants {
 		d := t.grantDeadline(now, sentAt, waited, g.Remaining)
+		if d <= now {
+			out = append(out, Discard{Ref: g.Ref})
+			unrun = append(unrun, g.Ref)
+			continue
+		}
 		t.leases[g.Ref] = &lease{ref: g.Ref, attempt: g.Attempt, state: stateRunning, handler: true, deadline: d}
 		t.byID[g.Ref.ID]++
 		t.running++
@@ -170,7 +178,7 @@ func (t *Tracker) LeasesGranted(now Mono, seq uint64, sentAt Mono, waited time.D
 		}
 		out = append(out, StartHandler{Grant: g})
 	}
-	return t.advance(now, out), nil
+	return t.advance(now, t.sendRelease(unrun, out)), nil
 }
 
 // grantDeadline is the local deadline of a new lease. The broker leased the
@@ -603,15 +611,18 @@ func (t *Tracker) fireLeaseRetry(now Mono) {
 }
 
 // requestLeases asks for work when a slot is free and nothing holds the
-// request back: another request outstanding, a backoff wait, or a drain.
+// request back: another request outstanding, a backoff wait, or a drain. A
+// Lease call carries job payloads, so it asks for at most job.MaxBatch jobs
+// however many slots are free. The tracker owns that limit, not the shell,
+// so that the simulator sees it too.
 func (t *Tracker) requestLeases(out []Effect) []Effect {
 	free := t.cfg.Concurrency - t.running
 	if !t.started || t.draining || t.reqSeq != 0 || t.retryPending || free <= 0 {
 		return out
 	}
 	t.reqSeq = t.seq()
-	t.reqMax = free
-	return append(out, RequestLeases{Seq: t.reqSeq, Max: free, Wait: t.cfg.LongPoll, TTL: t.cfg.TTL})
+	t.reqMax = min(free, job.MaxBatch)
+	return append(out, RequestLeases{Seq: t.reqSeq, Max: t.reqMax, Wait: t.cfg.LongPoll, TTL: t.cfg.TTL})
 }
 
 // stopIfDone emits Stopped, once, when a drain has finished: no ack or
