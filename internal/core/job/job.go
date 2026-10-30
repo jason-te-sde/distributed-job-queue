@@ -2,6 +2,7 @@ package job
 
 import (
 	"bytes"
+	"slices"
 	"strconv"
 	"time"
 )
@@ -67,9 +68,11 @@ func ParseState(s string) (State, error) {
 }
 
 // Job is one row of the queue. Every time in it is UTC at microsecond
-// precision (see NormalizeTime). The byte slices are treated as immutable:
-// the transitions share them between the job they receive and the job they
-// return, and never write into them.
+// precision (see NormalizeTime). The transitions share the byte slices
+// between the job they receive and the job they return, and never write into
+// them. A Job is therefore safe to pass by value only as long as nobody
+// writes into its slices: a store that keeps a Job beyond a call, or hands
+// one out, must Clone it at that boundary.
 type Job struct {
 	// ID is the job's identifier, unique within a store.
 	ID int64
@@ -109,6 +112,15 @@ type Job struct {
 	// FinishedAt is when the job reached a terminal state; the zero time
 	// unless State.Terminal().
 	FinishedAt time.Time
+}
+
+// Clone returns a copy of j that shares no memory with it: Payload and Result
+// are copied byte for byte, nil staying nil and empty staying empty, and every
+// other field is copied by value.
+func (j Job) Clone() Job {
+	j.Payload = slices.Clone(j.Payload)
+	j.Result = slices.Clone(j.Result)
+	return j
 }
 
 // Equal reports whether a and b hold the same values. It compares the byte

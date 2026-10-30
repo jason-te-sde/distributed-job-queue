@@ -150,3 +150,49 @@ func TestNormalizeTimeIsUTCMicroseconds(t *testing.T) {
 		t.Error("the zero time must stay zero so that IsZero keeps meaning \"unset\"")
 	}
 }
+
+func TestCloneSharesNoMemoryWithTheOriginal(t *testing.T) {
+	orig := fullJob()
+	clone := orig.Clone()
+	if !Equal(orig, clone) {
+		t.Fatalf("Clone changed a value: got %+v, want %+v", clone, orig)
+	}
+	clone.Payload[0] ^= 0xff
+	clone.Result[0] ^= 0xff
+	if string(orig.Payload) != "payload" || string(orig.Result) != "result" {
+		t.Fatalf("writing into the clone's bytes changed the original: payload %q, result %q", orig.Payload, orig.Result)
+	}
+	if Equal(orig, clone) {
+		t.Fatal("the clone's bytes were not independent: the write did not show up in the clone")
+	}
+
+	// And the other way round: a write into the original leaves the clone alone.
+	clone = orig.Clone()
+	orig.Payload[0] ^= 0xff
+	orig.Result[0] ^= 0xff
+	if string(clone.Payload) != "payload" || string(clone.Result) != "result" {
+		t.Fatalf("writing into the original's bytes changed the clone: payload %q, result %q", clone.Payload, clone.Result)
+	}
+}
+
+func TestCloneKeepsNilAndEmptyBytesAsTheyAre(t *testing.T) {
+	j := fullJob()
+	j.Payload, j.Result = nil, []byte{}
+	c := j.Clone()
+	if c.Payload != nil {
+		t.Errorf("a nil Payload became %#v", c.Payload)
+	}
+	if c.Result == nil || len(c.Result) != 0 {
+		t.Errorf("an empty Result became %#v", c.Result)
+	}
+}
+
+func TestCloneCopiesTheOtherFieldsByValue(t *testing.T) {
+	j := fullJob()
+	c := j.Clone()
+	c.ID, c.Queue, c.State, c.Attempts, c.LeasedBy = 99, "other", StateDead, 99, "other"
+	c.RunAt = c.RunAt.Add(time.Hour)
+	if !Equal(j, fullJob()) {
+		t.Fatalf("changing the clone's fields changed the original: %+v", j)
+	}
+}
