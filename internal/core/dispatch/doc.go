@@ -10,8 +10,11 @@
 // work, and at most MaxInFlight fetches per queue run at once.
 //
 // A waiter is never told "nothing" before something has looked for it: Tick
-// times out only a waiter that a fetch has served, or one whose queue is
-// known to be empty. Any other waiter waits for its turn at a fetch slot.
+// times out only a waiter that a fetch has served or failed to serve, or one
+// whose queue is known to be empty. Any other waiter waits for its turn at a
+// fetch slot. Knowledge that a queue is empty goes stale, and Tick runs only
+// while a waiter is parked, so an arriving waiter first applies the poll and
+// due-time rules that Tick would.
 //
 // The core is pure. It holds no clock, no lock and no store. Every method
 // takes the current monotonic instant and returns effects for the shell to

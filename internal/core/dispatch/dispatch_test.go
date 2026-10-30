@@ -284,6 +284,21 @@ func TestFailedFetchDoesNotChainAndThePollServesTheNextWaiter(t *testing.T) {
 	wantEffects(t, effs, Fetch{Waiter: 2, Queue: testQueue, Max: 8, Waited: sec})
 }
 
+func TestFailedFetchLetsParkedWaitersTimeOut(t *testing.T) {
+	// A failed fetch does not close the queue. The waiters parked behind it
+	// have had the store's chance all the same, so they time out on schedule
+	// instead of waiting for one poll per waiter while the store is down.
+	c := New(Config{MaxInFlight: 1, PollInterval: time.Hour})
+	c.Arrive(0, wt(1, 0))
+	w := wt(2, 0)
+	w.Deadline = 5 * sec
+	wantEffects(t, c.Arrive(0, w))
+	wantEffects(t, c.Tick(5*sec)) // still waiting for its turn at the slot
+
+	wantEffects(t, c.FetchDone(5*sec, 1, 0, true), Respond{Waiter: 1, Reason: ReasonUnavailable}, Arm{At: 5 * sec})
+	wantEffects(t, c.Tick(5*sec), Respond{Waiter: 2, Reason: ReasonTimeout})
+}
+
 func TestNeverFetchedWaiterIsNotTimedOutByTick(t *testing.T) {
 	// The only fetch slot is busy, so a waiter that asked for no wait is
 	// parked without a fetch. Tick must not tell it "nothing" before a fetch
@@ -476,6 +491,59 @@ func TestWaitZeroOnKnownEmptyQueueRespondsAtOnce(t *testing.T) {
 	wantCounts(t, c, testQueue, 1, 0)
 }
 
+func TestWaitZeroArriveSeesAKnownEmptyQueueGoneStale(t *testing.T) {
+	// Knowledge that the queue is empty is refreshed by a notification and by
+	// Tick, and Tick runs only while a waiter is parked. A worker that
+	// arrives after the queue went quiet must not be answered from knowledge
+	// that a poll or a due time would have refreshed.
+	for _, tc := range []struct {
+		name     string
+		poll     time.Duration
+		dueAt    Mono
+		tick     bool // the waiter times out in a Tick; otherwise it is cancelled
+		arriveAt Mono
+		want     []Effect
+	}{
+		{
+			name: "due time passed", poll: time.Hour, dueAt: 5 * sec, tick: true, arriveAt: 10 * sec,
+			want: []Effect{Fetch{Waiter: 2, Queue: testQueue, Max: 8}},
+		},
+		{
+			name: "poll interval passed after a lost notification", poll: sec, arriveAt: 60 * sec,
+			want: []Effect{Fetch{Waiter: 2, Queue: testQueue, Max: 8}},
+		},
+		{
+			name: "due time still ahead", poll: time.Hour, dueAt: 20 * sec, tick: true, arriveAt: 10 * sec,
+			want: []Effect{Respond{Waiter: 2, Reason: ReasonTimeout}},
+		},
+		{
+			name: "knowledge still fresh", poll: sec, arriveAt: sec - time.Microsecond,
+			want: []Effect{Respond{Waiter: 2, Reason: ReasonTimeout}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := New(Config{PollInterval: tc.poll})
+			w := wt(1, 0)
+			w.Deadline = sec / 2
+			c.Arrive(0, w)
+			c.FetchDone(0, 1, 0, false) // the queue is known empty
+			if tc.dueAt != 0 {
+				c.DueAt(0, testQueue, tc.dueAt)
+			}
+			if tc.tick {
+				// The waiter times out and nothing is armed any more.
+				wantEffects(t, c.Tick(sec), Respond{Waiter: 1, Reason: ReasonTimeout})
+			} else {
+				wantEffects(t, c.Cancel(0, 1)) // no Tick: the queue state is kept as it is
+			}
+
+			zero := wt(2, tc.arriveAt)
+			zero.Deadline = zero.Arrived
+			wantEffects(t, c.Arrive(tc.arriveAt, zero), tc.want...)
+		})
+	}
+}
+
 func TestWaitZeroDeliversWhatTheFetchFound(t *testing.T) {
 	c := New(Config{})
 	w := wt(1, 0)
@@ -565,6 +633,50 @@ func TestDueAtInThePastWakesAtTheNextTick(t *testing.T) {
 	wantEffects(t, c.Tick(2*sec), Fetch{Waiter: 1, Queue: testQueue, Max: 8, Waited: sec})
 }
 
+func TestWakeWithNoFreeSlotMarksTheQueueDirty(t *testing.T) {
+	// A due time or a poll that finds every fetch slot busy is not lost: the
+	// fetch that comes back chains the next waiter instead of closing the
+	// queue on an answer that may predate the wake.
+	for _, tc := range []struct {
+		name  string
+		poll  time.Duration
+		dueAt Mono
+		tick  Mono
+	}{
+		{name: "due time", poll: time.Hour, dueAt: 2 * sec, tick: 2 * sec},
+		{name: "poll", poll: sec, tick: 2 * sec},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := New(Config{MaxInFlight: 1, PollInterval: tc.poll})
+			first := wt(1, 0)
+			first.Deadline = 3 * sec
+			c.Arrive(0, first)
+			c.Arrive(0, wt(2, 0)) // parked behind the busy slot
+			if tc.dueAt != 0 {
+				c.DueAt(0, testQueue, tc.dueAt)
+			}
+			wantEffects(t, c.Tick(tc.tick)) // woken, but no slot: nothing to start
+
+			effs := c.FetchDone(3*sec, 1, 0, false)
+			wantEffects(t, effs,
+				Respond{Waiter: 1, Reason: ReasonTimeout},
+				Fetch{Waiter: 2, Queue: testQueue, Max: 8, Waited: 3 * sec},
+			)
+		})
+	}
+
+	// Without the wake the empty answer closes the queue, and waiter 2 waits.
+	c := New(Config{MaxInFlight: 1, PollInterval: time.Hour})
+	first := wt(1, 0)
+	first.Deadline = 3 * sec
+	c.Arrive(0, first)
+	c.Arrive(0, wt(2, 0))
+	effs := c.FetchDone(3*sec, 1, 0, false)
+	if len(fetches(effs)) != 0 {
+		t.Fatalf("fetched without a wake: %s", describeAll(effs))
+	}
+}
+
 func TestCancelWhileWaitingRemoves(t *testing.T) {
 	c := parked(t, Config{PollInterval: time.Hour}, 1, 2)
 	wantEffects(t, c.Cancel(0, 1), Arm{At: 20 * sec}) // waiter 2 remains
@@ -629,15 +741,20 @@ func TestFetchFailureRespondsUnavailable(t *testing.T) {
 	wantEffects(t, c.Arrive(0, wt(2, 0)), Fetch{Waiter: 2, Queue: testQueue, Max: 8})
 }
 
-func TestFetchFailureIgnoresGrants(t *testing.T) {
+func TestFetchFailureReleasesGrantsOfACancelledWaiter(t *testing.T) {
+	// A failure report that still lists jobs must not leave them to expire.
 	c := New(Config{})
 	c.Arrive(0, wt(1, 0))
 	wantEffects(t, c.FetchDone(0, 1, 5, true), Respond{Waiter: 1, Reason: ReasonUnavailable})
 
-	// A failed fetch for a cancelled waiter releases nothing either.
 	c.Arrive(0, wt(2, 0))
 	c.Cancel(0, 2)
-	wantEffects(t, c.FetchDone(0, 2, 5, true))
+	wantEffects(t, c.FetchDone(0, 2, 5, true), Release{Waiter: 2})
+
+	// A failure with nothing fetched releases nothing.
+	c.Arrive(0, wt(3, 0))
+	c.Cancel(0, 3)
+	wantEffects(t, c.FetchDone(0, 3, 0, true))
 }
 
 func TestFetchFailureKeepsKnownEmpty(t *testing.T) {
@@ -742,14 +859,21 @@ func TestArmDoesNotSpinWhileFetchesSaturate(t *testing.T) {
 	c.Arrive(0, wt(1, 0))
 	wantEffects(t, c.Arrive(0, wt(2, 0))) // the poll could not start a fetch: nothing to arm
 
-	effs := c.Tick(5 * sec) // far past the poll interval
-	wantEffects(t, effs)
+	// A Tick far past the poll interval cannot start a fetch either, and it
+	// leaves nothing armed.
+	wantEffects(t, c.Tick(5*sec))
 
-	// Once the slot frees, the overdue poll is due at once.
-	effs = c.FetchDone(5*sec, 1, 0, false)
-	wantEffects(t, effs, Arm{At: sec})
-	effs = c.Tick(5 * sec)
+	// The wake was not lost: the fetch that comes back chains the next waiter.
+	effs := c.FetchDone(5*sec, 1, 0, false)
 	wantEffects(t, effs, Fetch{Waiter: 1, Queue: testQueue, Max: 8, Waited: 5 * sec})
+
+	// With no Tick in between, the empty answer closes the queue, and once
+	// the slot is free the overdue poll is due at once.
+	c = New(Config{MaxInFlight: 1})
+	c.Arrive(0, wt(1, 0))
+	c.Arrive(0, wt(2, 0))
+	wantEffects(t, c.FetchDone(5*sec, 1, 0, false), Arm{At: sec})
+	wantEffects(t, c.Tick(5*sec), Fetch{Waiter: 1, Queue: testQueue, Max: 8, Waited: 5 * sec})
 }
 
 // parkedOnQueues returns a core with four waiters parked on three queues, in
