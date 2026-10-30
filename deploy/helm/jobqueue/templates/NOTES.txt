@@ -1,0 +1,19 @@
+jobqueue {{ .Chart.AppVersion }} is installed as {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+gRPC clients (SDK, jobqueuectl) dial the headless Service, so that round_robin
+sees every broker:
+
+  dns:///{{ include "jobqueue.fullname" . }}-grpc.{{ .Release.Namespace }}.svc.cluster.local:{{ include "jobqueue.grpcPort" . }}
+
+Health, readiness and metrics: {{ include "jobqueue.fullname" . }}-http, port {{ include "jobqueue.httpPort" . }}.
+{{- if and (not .Values.insecure) (not (and .Values.tokens.secretName .Values.tls.secretName)) }}
+
+WARNING: tokens.secretName and tls.secretName are not both set, and insecure is
+false. The broker refuses to serve without TLS and tokens, so its pods will exit
+on startup. Set both secrets, or set insecure=true on a trusted network.
+{{- end }}
+{{- if .Values.example.keda.enabled }}
+
+The example worker scales between {{ .Values.example.keda.minReplicas }} and {{ .Values.example.keda.maxReplicas }} replicas through KEDA. KEDA must be able to reach
+the {{ include "jobqueue.fullname" . }}-scaler Service from namespace {{ .Values.scaler.allowNamespace }}.
+{{- end }}

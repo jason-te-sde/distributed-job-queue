@@ -18,7 +18,9 @@ updates:
         update-types: [minor, patch]
 
   - package-ecosystem: github-actions
-    directory: /
+    directories:
+      - /
+      - /.github/actions/setup-helm
     schedule:
       interval: weekly
     groups:

@@ -1,0 +1,9 @@
+apiVersion: v2
+name: jobqueue
+description: A distributed job queue on PostgreSQL with fenced leases, fair scheduling and KEDA autoscaling.
+type: application
+version: 0.1.0
+appVersion: 0.1.0
+home: https://github.com/jason-te-sde/distributed-job-queue
+sources:
+  - https://github.com/jason-te-sde/distributed-job-queue

@@ -1,0 +1,34 @@
+{{- if .Values.migrations.enabled }}
+# Applies the schema before brokers of a new version start. The database Secret
+# must already exist, because this hook runs before the chart's own resources.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "jobqueue.fullname" . }}-migrate
+  labels:
+    {{- include "jobqueue.labels" (dict "ctx" . "component" "migrate") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        {{- include "jobqueue.labels" (dict "ctx" . "component" "migrate") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      securityContext:
+        {{- include "jobqueue.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "jobqueue.image" . | quote }}
+          command: ["/jobqueuectl"]
+          args: ["migrate"]
+          env:
+            {{- include "jobqueue.databaseEnv" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- include "jobqueue.containerSecurityContext" . | nindent 12 }}
+{{- end }}

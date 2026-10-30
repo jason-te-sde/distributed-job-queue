@@ -1,0 +1,17 @@
+# gRPC. A headless Service makes DNS return one address per ready broker, which
+# is what the SDK's round_robin balancing needs (a ClusterIP would pin each
+# long-lived connection to a single broker).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "jobqueue.fullname" . }}-grpc
+  labels:
+    {{- include "jobqueue.brokerLabels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "jobqueue.brokerSelectorLabels" . | nindent 4 }}
+  ports:
+    - name: grpc
+      port: {{ include "jobqueue.grpcPort" . }}
+      targetPort: grpc

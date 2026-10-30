@@ -66,6 +66,9 @@ jobs:
             git diff --stat -- internal/gen >&2
             exit 1
           fi
+      - uses: ./.github/actions/setup-helm
+      - name: Helm chart lint and render checks
+        run: scripts/check-helm.sh
 
   test:
     name: test (go ${{ matrix.go }}, ${{ matrix.os }})
@@ -146,6 +149,8 @@ jobs:
         with:
           # Commit messages are scanned too, so the whole history is needed.
           fetch-depth: 0
+      # make test-scripts runs the Helm check's own test, which needs Helm.
+      - uses: ./.github/actions/setup-helm
       - name: Hygiene check and its tests
         run: make hygiene test-scripts
 
