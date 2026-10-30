@@ -7,8 +7,14 @@ GO ?= go
 GOLANGCI_LINT_VERSION := v2.15.0
 GOLANGCI_LINT_SERIES := 2.15
 GOVULNCHECK_VERSION := v1.9.0
+PROTOC_GEN_GO_VERSION := v1.36.12
+PROTOC_GEN_GO_GRPC_VERSION := v1.6.2
 
-.PHONY: test test-pg lint hygiene test-scripts preflight
+# Code generators are installed here, so a generation run never depends on
+# whatever versions happen to be on the developer's PATH.
+BIN := $(CURDIR)/bin
+
+.PHONY: test test-pg lint gen hygiene test-scripts preflight
 
 # Unit and simulator tests.
 test:
@@ -30,7 +36,20 @@ lint:
 		exit 1; \
 	}
 	golangci-lint run ./...
+	buf lint
+	@if git cat-file -e origin/main:proto 2>/dev/null; then \
+		buf breaking --against '.git#branch=origin/main'; \
+	else \
+		echo "lint: skipping buf breaking; origin/main has no proto/ directory yet"; \
+	fi
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+
+# Regenerates internal/gen from proto/. The generated code is committed, and
+# CI fails when `make gen` leaves a diff.
+gen:
+	GOBIN="$(BIN)" $(GO) install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
+	GOBIN="$(BIN)" $(GO) install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)
+	PATH="$(BIN):$$PATH" buf generate
 
 # Tracked files are English only and nothing names an AI tool as an author.
 hygiene:

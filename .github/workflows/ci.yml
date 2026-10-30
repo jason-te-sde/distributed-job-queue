@@ -30,6 +30,20 @@ jobs:
           version: v2.15.0
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      # Lint only: breaking-change detection stays in `make lint`, which runs
+      # it once origin/main has a proto/ directory.
+      - uses: bufbuild/buf-action@v1
+        with:
+          version: 1.75.0
+          lint: true
+          format: false
+          breaking: false
+          push: false
+          pr_comment: false
+      - name: gen-check
+        run: |
+          make gen
+          git diff --exit-code
 
   test:
     name: test (go ${{ matrix.go }}, ${{ matrix.os }})
