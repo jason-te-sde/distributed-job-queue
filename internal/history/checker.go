@@ -3,6 +3,7 @@ package history
 import (
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/jason-te-sde/distributed-job-queue/internal/core/job"
 )
@@ -28,7 +29,7 @@ type SinkRow struct {
 
 // Violation is one broken invariant.
 type Violation struct {
-	// Invariant is the name of the rule: S1, S4, S7 or L1.
+	// Invariant is the name of the rule: one of the Invariant constants.
 	Invariant string
 	// Detail says what was found.
 	Detail string
@@ -51,12 +52,17 @@ type Report struct {
 	DuplicateDeliveries int
 }
 
-// The names of the invariants Check reports.
+// The names of the invariants a Violation can carry.
 const (
-	invS1 = "S1" // no confirmed enqueue is lost
-	invS4 = "S4" // the sink only moves forward and ends at the final epoch
-	invS7 = "S7" // an idempotency key names one job
-	invL1 = "L1" // every confirmed job finishes
+	// InvariantS1 is S1: no confirmed enqueue is lost.
+	InvariantS1 = "S1"
+	// InvariantS4 is S4: the sink only moves forward and ends at the final
+	// epoch.
+	InvariantS4 = "S4"
+	// InvariantS7 is S7: an idempotency key names one job.
+	InvariantS7 = "S7"
+	// InvariantL1 is L1: every confirmed job finishes.
+	InvariantL1 = "L1"
 )
 
 // Check applies the invariants to a history, the final state of the jobs
@@ -73,6 +79,16 @@ const (
 //     writes with equal At keep their order in events.
 //   - L1: every confirmed job in final that no CancelConfirmed covers is
 //     succeeded or dead.
+//
+// The write-order half of S4 is only as sharp as the stamps. It compares the
+// times at which the recording processes read their clocks, not the order of
+// the commits, so when two writes are closer together than the stamp lag
+// (see Event.At) it can report a violation on a correct run, or miss a real
+// one. A violation therefore names both writes' stamps to the nanosecond, both
+// tokens and the gap between the stamps, so that a gap of tens of
+// microseconds can be told from a real regression. The earlier write it cites
+// is the latest one that holds the highest token so far. The other half of S4,
+// the final sink token, does not depend on any stamp.
 //
 // A confirmed id that is missing from final breaks S1 only. Check does not
 // modify its arguments.
@@ -135,13 +151,13 @@ func Check(events []Event, final []FinalJob, sink []SinkRow) Report {
 
 	for _, id := range confirmed {
 		if _, ok := finalByID[id]; !ok {
-			add(invS1, id, "job %d was confirmed as enqueued but is not in the final state", id)
+			add(InvariantS1, id, "job %d was confirmed as enqueued but is not in the final state", id)
 		}
 	}
 
 	for _, key := range keys {
 		if ids := keyIDs[key]; len(ids) > 1 {
-			add(invS7, ids[0], "key %q was confirmed with ids %v", key, ids)
+			add(InvariantS7, ids[0], "key %q was confirmed with ids %v", key, ids)
 		}
 	}
 
@@ -150,22 +166,25 @@ func Check(events []Event, final []FinalJob, sink []SinkRow) Report {
 			continue
 		}
 		if tokens := sinkTokens[f.ID]; len(tokens) == 0 {
-			add(invS4, f.ID, "job %d succeeded at epoch %d but the sink has no row for it", f.ID, f.Epoch)
+			add(InvariantS4, f.ID, "job %d succeeded at epoch %d but the sink has no row for it", f.ID, f.Epoch)
 		} else {
-			add(invS4, f.ID, "job %d succeeded at epoch %d but the sink holds token %v", f.ID, f.Epoch, tokens)
+			add(InvariantS4, f.ID, "job %d succeeded at epoch %d but the sink holds token %v", f.ID, f.Epoch, tokens)
 		}
 	}
 
 	slices.SortStableFunc(applied, func(a, b Event) int { return a.At.Compare(b.At) })
-	highest := make(map[int64]int64)
+	highest := make(map[int64]Event) // per job, the latest applied write at its highest token so far
 	for _, e := range applied {
 		prev, ok := highest[e.ID]
-		if ok && e.Token < prev {
-			add(invS4, e.ID, "job %d: the sink applied token %d at %s after it applied token %d",
-				e.ID, e.Token, e.At.Format("2006-01-02T15:04:05.000000Z07:00"), prev)
+		if ok && e.Token < prev.Token {
+			add(InvariantS4, e.ID,
+				"job %d: the sink applied token %d at %s after it applied token %d at %s; "+
+					"the stamps are %s apart, and a gap within the recording lag may be stamp order, not commit order",
+				e.ID, e.Token, e.At.UTC().Format(time.RFC3339Nano), prev.Token, prev.At.UTC().Format(time.RFC3339Nano),
+				e.At.Sub(prev.At))
 			continue
 		}
-		highest[e.ID] = e.Token
+		highest[e.ID] = e
 	}
 
 	for _, id := range confirmed {
@@ -174,7 +193,7 @@ func Check(events []Event, final []FinalJob, sink []SinkRow) Report {
 			continue
 		}
 		if f.State != job.StateSucceeded && f.State != job.StateDead {
-			add(invL1, id, "confirmed job %d ended %s, want succeeded or dead", id, f.State)
+			add(InvariantL1, id, "confirmed job %d ended %s, want succeeded or dead", id, f.State)
 		}
 	}
 

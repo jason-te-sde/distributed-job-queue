@@ -60,7 +60,7 @@ func TestCheckAlarms(t *testing.T) {
 			events:    []Event{enqueued(1, "k1", 1), enqueued(2, "k2", 2)},
 			final:     []FinalJob{succeeded(1, 1)},
 			sink:      []SinkRow{{JobID: 1, Token: 1}},
-			invariant: "S1",
+			invariant: InvariantS1,
 			jobID:     2,
 		},
 		{
@@ -68,7 +68,7 @@ func TestCheckAlarms(t *testing.T) {
 			events:    []Event{enqueued(1, "k", 1), enqueued(2, "k", 2)},
 			final:     []FinalJob{succeeded(1, 1), succeeded(2, 1)},
 			sink:      []SinkRow{{JobID: 1, Token: 1}, {JobID: 2, Token: 1}},
-			invariant: "S7",
+			invariant: InvariantS7,
 			jobID:     1,
 		},
 		{
@@ -80,7 +80,7 @@ func TestCheckAlarms(t *testing.T) {
 			},
 			final:     []FinalJob{succeeded(1, 2)},
 			sink:      []SinkRow{{JobID: 1, Token: 1}},
-			invariant: "S4",
+			invariant: InvariantS4,
 			jobID:     1,
 		},
 		{
@@ -91,14 +91,14 @@ func TestCheckAlarms(t *testing.T) {
 			},
 			final:     []FinalJob{succeeded(1, 2)},
 			sink:      []SinkRow{{JobID: 1, Token: 2}},
-			invariant: "S4",
+			invariant: InvariantS4,
 			jobID:     1,
 		},
 		{
 			name:      "a confirmed job left ready breaks L1",
 			events:    []Event{enqueued(1, "k", 1)},
 			final:     []FinalJob{{ID: 1, State: job.StateReady}},
-			invariant: "L1",
+			invariant: InvariantL1,
 			jobID:     1,
 		},
 	}
@@ -183,7 +183,7 @@ func TestCheckCounts(t *testing.T) {
 
 func TestCheckSucceededJobWithoutSinkRowBreaksS4(t *testing.T) {
 	r := Check([]Event{enqueued(1, "k", 1)}, []FinalJob{succeeded(1, 1)}, nil)
-	if got := invariants(r); !slices.Equal(got, []string{"S4"}) {
+	if got := invariants(r); !slices.Equal(got, []string{InvariantS4}) {
 		t.Fatalf("invariants = %v, want [S4]: %+v", got, r.Violations)
 	}
 }
@@ -204,7 +204,7 @@ func TestCheckOrdersSinkWritesByTimeNotBySlicePosition(t *testing.T) {
 	if r := Check(good, final, sink); len(r.Violations) != 0 {
 		t.Errorf("token 1 at 2s then token 2 at 3s is in order, whatever the slice says: %+v", r.Violations)
 	}
-	if r := Check(bad, final, sink); !slices.Equal(invariants(r), []string{"S4"}) {
+	if r := Check(bad, final, sink); !slices.Equal(invariants(r), []string{InvariantS4}) {
 		t.Errorf("token 2 at 2s then token 1 at 3s goes backwards, whatever the slice says: %+v", r.Violations)
 	}
 }
@@ -248,8 +248,8 @@ func TestCheckCancelledJobsAreExemptFromL1(t *testing.T) {
 	}{
 		{"cancelled after a confirmed cancel", []Event{enqueued(1, "k", 1), cancelled(2, 1)}, job.StateCancelled, nil},
 		{"left ready although the cancel was confirmed", []Event{enqueued(1, "k", 1), cancelled(2, 1)}, job.StateReady, nil},
-		{"cancelled without any confirmed cancel", []Event{enqueued(1, "k", 1)}, job.StateCancelled, []string{"L1"}},
-		{"left leased", []Event{enqueued(1, "k", 1)}, job.StateLeased, []string{"L1"}},
+		{"cancelled without any confirmed cancel", []Event{enqueued(1, "k", 1)}, job.StateCancelled, []string{InvariantL1}},
+		{"left leased", []Event{enqueued(1, "k", 1)}, job.StateLeased, []string{InvariantL1}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -282,7 +282,7 @@ func TestCheckConfirmingOneJobTwiceIsNotAViolation(t *testing.T) {
 
 	// And a missing id is reported once, however often it was confirmed.
 	r = Check(events, nil, nil)
-	if got := invariants(r); !slices.Equal(got, []string{"S1"}) {
+	if got := invariants(r); !slices.Equal(got, []string{InvariantS1}) {
 		t.Fatalf("invariants = %v, want [S1]: %+v", got, r.Violations)
 	}
 }
@@ -301,7 +301,7 @@ func TestCheckReportsOneS7ViolationPerKey(t *testing.T) {
 	final := []FinalJob{succeeded(1, 1), succeeded(2, 1), succeeded(3, 1)}
 	sink := []SinkRow{{JobID: 1, Token: 1}, {JobID: 2, Token: 1}, {JobID: 3, Token: 1}}
 	r := Check(events, final, sink)
-	if got := invariants(r); !slices.Equal(got, []string{"S7"}) {
+	if got := invariants(r); !slices.Equal(got, []string{InvariantS7}) {
 		t.Fatalf("invariants = %v, want [S7]: %+v", got, r.Violations)
 	}
 	for _, id := range []string{"1", "2", "3"} {
@@ -315,18 +315,102 @@ func TestCheckReportsEveryRuleThatIsBroken(t *testing.T) {
 	events := []Event{enqueued(1, "k", 1), enqueued(2, "k", 2), enqueued(3, "k3", 3), enqueued(4, "k4", 4)}
 	final := []FinalJob{{ID: 1, State: job.StateReady}, succeeded(2, 1), succeeded(3, 1)}
 	r := Check(events, final, []SinkRow{{JobID: 2, Token: 1}})
-	want := []string{"S1", "S7", "S4", "L1"}
+	want := []string{InvariantS1, InvariantS7, InvariantS4, InvariantL1}
 	if got := invariants(r); !slices.Equal(got, want) {
 		t.Fatalf("invariants = %v, want %v: %+v", got, want, r.Violations)
 	}
 }
 
 func TestCheckLeavesItsInputsAlone(t *testing.T) {
-	events := []Event{enqueued(1, "k", 1), sinkWrite(3, 1, 2, true), sinkWrite(2, 1, 1, true)}
-	before := slices.Clone(events)
-	Check(events, []FinalJob{succeeded(1, 2)}, []SinkRow{{JobID: 1, Token: 2}})
-	if !slices.Equal(events, before) {
+	// Every slice is out of the order a tidy implementation would put it in,
+	// and the writes of job 1 are out of time order.
+	events := []Event{
+		enqueued(1, "k2", 2), enqueued(1, "k1", 1),
+		sinkWrite(3, 1, 2, true), sinkWrite(2, 1, 1, true),
+	}
+	final := []FinalJob{succeeded(2, 1), succeeded(1, 2)}
+	sink := []SinkRow{{JobID: 2, Token: 1}, {JobID: 1, Token: 2}}
+	eventsBefore, finalBefore, sinkBefore := slices.Clone(events), slices.Clone(final), slices.Clone(sink)
+
+	Check(events, final, sink)
+
+	if !slices.Equal(events, eventsBefore) {
 		t.Errorf("Check reordered or changed its events: %+v", events)
+	}
+	if !slices.Equal(final, finalBefore) {
+		t.Errorf("Check reordered or changed final: %+v", final)
+	}
+	if !slices.Equal(sink, sinkBefore) {
+		t.Errorf("Check reordered or changed the sink rows: %+v", sink)
+	}
+}
+
+func TestInvariantNames(t *testing.T) {
+	// The names are what a person reads in a failing chaos run and what a
+	// script greps for.
+	for got, want := range map[string]string{
+		InvariantS1: "S1", InvariantS4: "S4", InvariantS7: "S7", InvariantL1: "L1",
+	} {
+		if got != want {
+			t.Errorf("invariant name %q, want %q", got, want)
+		}
+	}
+}
+
+func TestCheckBackwardsWriteDetailShowsBothStamps(t *testing.T) {
+	// A write-order violation rests on two recorder stamps, so the report
+	// must carry both, to the nanosecond, with the tokens and the gap: a
+	// 40 microsecond inversion is stamp lag until proven otherwise, a
+	// minute-long one is a regression.
+	east, west := time.FixedZone("UTC+1", 3600), time.FixedZone("UTC-5", -5*3600)
+	first := time.Date(2026, 1, 1, 0, 0, 0, 123456789, time.UTC)
+	second := first.Add(40 * time.Microsecond)
+	events := []Event{
+		enqueued(0, "k", 1),
+		{At: first.In(east), Kind: SinkWrite, ID: 1, Token: 2, Worker: "w2", Applied: true},
+		{At: second.In(west), Kind: SinkWrite, ID: 1, Token: 1, Worker: "w1", Applied: true},
+	}
+	r := Check(events, []FinalJob{succeeded(1, 2)}, []SinkRow{{JobID: 1, Token: 2}})
+	if got := invariants(r); !slices.Equal(got, []string{InvariantS4}) {
+		t.Fatalf("invariants = %v, want [S4]: %+v", got, r.Violations)
+	}
+	gap := (40 * time.Microsecond).String()
+	for _, want := range []string{
+		"2026-01-01T00:00:00.123456789Z",
+		"2026-01-01T00:00:00.123496789Z",
+		"token 2",
+		"token 1",
+		gap,
+	} {
+		if !strings.Contains(r.Violations[0].Detail, want) {
+			t.Errorf("detail %q does not contain %q", r.Violations[0].Detail, want)
+		}
+	}
+	if strings.Contains(r.Violations[0].Detail, "-"+gap) {
+		t.Errorf("detail %q gives the gap a negative sign", r.Violations[0].Detail)
+	}
+}
+
+func TestCheckBackwardsWriteCitesTheLatestWriteAtTheHighestToken(t *testing.T) {
+	events := []Event{
+		enqueued(0, "k", 1),
+		sinkWrite(1, 1, 3, true), sinkWrite(2, 1, 3, true), sinkWrite(3, 1, 1, true),
+	}
+	r := Check(events, []FinalJob{succeeded(1, 3)}, []SinkRow{{JobID: 1, Token: 3}})
+	if len(r.Violations) != 1 {
+		t.Fatalf("want one violation: %+v", r.Violations)
+	}
+	d := r.Violations[0].Detail
+	// The nearest write that makes the step backwards, one second away, not
+	// the first one, two seconds away.
+	if want := at(2).Format(time.RFC3339Nano); !strings.Contains(d, want) {
+		t.Errorf("detail %q does not contain %q", d, want)
+	}
+	if want := time.Second.String(); !strings.Contains(d, want) {
+		t.Errorf("detail %q does not contain the gap %q", d, want)
+	}
+	if bad := at(1).Format(time.RFC3339Nano); strings.Contains(d, bad) {
+		t.Errorf("detail %q cites the older write at %q", d, bad)
 	}
 }
 
@@ -431,6 +515,20 @@ func TestRecorderRefusesAnUnknownKind(t *testing.T) {
 	}
 }
 
+func TestRecorderRefusesAZeroTime(t *testing.T) {
+	// Check orders sink writes by At. A zero At sorts before every real one
+	// and would leave the order to the position of the file in ReadAll's
+	// arguments.
+	var buf bytes.Buffer
+	rec := NewRecorder(&buf)
+	if err := rec.Record(Event{Kind: SinkWrite, ID: 1, Token: 1, Applied: true}); err == nil {
+		t.Error("Record accepted an event without a time")
+	}
+	if buf.Len() != 0 {
+		t.Errorf("a refused event left %q in the file", buf.String())
+	}
+}
+
 type failingWriter struct{ err error }
 
 func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
@@ -497,7 +595,9 @@ func TestReadAllRejectsMalformedLine(t *testing.T) {
 		{"an object without a kind", `{"at":"2026-01-01T00:00:00Z","id":1}`},
 		{"an unknown kind", `{"at":"2026-01-01T00:00:00Z","kind":"teleport","id":1}`},
 		{"a field of the wrong type", `{"at":"2026-01-01T00:00:00Z","kind":"handler_start","id":"seven"}`},
-		{"two events on one line", `{"kind":"cancel_confirmed","id":1} {"kind":"cancel_confirmed","id":2}`},
+		{"two events on one line", `{"at":"2026-01-01T00:00:00Z","kind":"cancel_confirmed","id":1} {"at":"2026-01-01T00:00:00Z","kind":"cancel_confirmed","id":2}`},
+		{"an event without a time", `{"kind":"cancel_confirmed","id":1}`},
+		{"an event at the zero time", `{"at":"0001-01-01T00:00:00Z","kind":"cancel_confirmed","id":1}`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -520,6 +620,25 @@ func TestReadAllRejectsMalformedLine(t *testing.T) {
 				t.Errorf("ReadAll returned %d events together with an error", len(got))
 			}
 		})
+	}
+}
+
+func TestReadAllRejectsATornFinalLine(t *testing.T) {
+	// A process killed in the middle of a write leaves a last line that
+	// stops anywhere and has no newline. It must be an error that names the
+	// line, not an event and not silence.
+	const good = `{"at":"2026-01-01T00:00:00Z","kind":"enqueue_confirmed","key":"k","id":1}`
+	for _, cut := range []int{1, len(good) / 2, len(good) - 1} {
+		file := good + "\n" + good[:cut]
+		got, err := ReadAll(strings.NewReader(file))
+		if err == nil {
+			t.Fatalf("ReadAll accepted a final line cut at %d bytes and returned %d events", cut, len(got))
+		}
+		for _, want := range []string{"file index 0", "line 2"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("cut at %d: error %q does not name %q", cut, err, want)
+			}
+		}
 	}
 }
 
