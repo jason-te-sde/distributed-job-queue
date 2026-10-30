@@ -9,8 +9,11 @@
 // roles may call which method. toStatus is the one place where errors of the
 // store and the core become gRPC status codes.
 //
-// Every handler follows the same order: it validates the whole request, then
-// authorizes the caller, and only then calls the store, so a request that is
-// malformed or not allowed never reaches it. Handlers hold no state of their
-// own; the store is the authority on jobs and on time.
+// Server implements the gRPC API. Every handler follows the same order: it
+// validates the whole request, then authorizes the caller, and only then calls
+// the store, so a request that is malformed or not allowed never reaches it.
+// Apart from a jitter generator and a draining flag the Server keeps no state:
+// the store is the authority on jobs and on time. Waiting for work, and
+// sharing it between tenants, is the job of a LeaseDispatcher that Lease
+// calls. Metrics holds the Prometheus collectors that the handlers update.
 package broker
