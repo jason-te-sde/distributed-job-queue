@@ -18,7 +18,7 @@ const mod = "github.com/jason-te-sde/distributed-job-queue"
 // mustExist lists the module-relative paths of packages that the repository
 // test must find. It guards the test against silently looking at nothing: a
 // package is added here in the task that creates it.
-var mustExist = []string{}
+var mustExist = []string{"internal/sim"}
 
 // wantRule fails unless exactly one violation has the given rule.
 func wantRule(t *testing.T, vs []Violation, rule string) {
@@ -142,6 +142,70 @@ func TestCheckAllowsClockAndRandCallsOutsideCore(t *testing.T) {
 	v := Check(mod, []Package{{Path: mod + "/internal/broker", Files: []File{
 		{Name: "a.go", Calls: []string{"time.Now", "time.Sleep", "math/rand/v2.IntN"}},
 	}}})
+	if len(v) != 0 {
+		t.Fatalf("unexpected: %v", v)
+	}
+}
+
+func TestCheckFlagsGoStatementInSim(t *testing.T) {
+	v := Check(mod, []Package{{Path: mod + "/internal/sim", Files: []File{
+		{Name: "a.go"},
+		{Name: "b.go", HasGo: true},
+	}}})
+	wantRule(t, v, "sim-determinism")
+	if v[0].Package != mod+"/internal/sim" || v[0].File != "b.go" {
+		t.Errorf("violation %v does not name internal/sim and b.go", v[0])
+	}
+}
+
+func TestCheckFlagsEveryBannedTimeFunctionInSim(t *testing.T) {
+	for _, fn := range []string{"Now", "Since", "Until", "After", "AfterFunc", "Sleep", "Tick", "NewTimer", "NewTicker"} {
+		t.Run(fn, func(t *testing.T) {
+			v := Check(mod, []Package{{Path: mod + "/internal/sim", Files: []File{{Name: "a.go", Calls: []string{"time." + fn}}}}})
+			wantRule(t, v, "sim-determinism")
+			if len(v) != 1 {
+				t.Fatalf("want only the sim-determinism violation, got %v", v)
+			}
+		})
+	}
+}
+
+func TestCheckFlagsGlobalRandFunctionsInSim(t *testing.T) {
+	for _, fn := range []string{"IntN", "N", "Shuffle", "Perm", "Float64"} {
+		t.Run(fn, func(t *testing.T) {
+			call := "math/rand/v2." + fn
+			v := Check(mod, []Package{{Path: mod + "/internal/sim", Files: []File{{Name: "a.go", Calls: []string{call}}}}})
+			wantRule(t, v, "sim-determinism")
+			if len(v) != 1 {
+				t.Fatalf("want only the sim-determinism violation, got %v", v)
+			}
+			if !strings.Contains(v[0].Detail, call) || !strings.Contains(v[0].Detail, "use the World's Rand") {
+				t.Errorf("detail %q should name %s and point at the World's Rand", v[0].Detail, call)
+			}
+		})
+	}
+}
+
+func TestCheckAllowsOrdinaryCodeInSim(t *testing.T) {
+	// The simulator is not core: it may use closures, channels, select and
+	// the time package's pure functions. The constructors of an explicitly
+	// seeded math/rand/v2 generator are how it gets its randomness.
+	v := Check(mod, []Package{{Path: mod + "/internal/sim", Files: []File{
+		{Name: "a.go", HasSelect: true, HasChan: true, Calls: []string{
+			"time.Date", "time.Unix", "fmt.Sprintf",
+			"math/rand/v2.New", "math/rand/v2.NewPCG", "math/rand/v2.NewChaCha8",
+		}},
+	}}})
+	if len(v) != 0 {
+		t.Fatalf("unexpected: %v", v)
+	}
+}
+
+func TestCheckSimRuleAppliesToSubpackagesAndWholePathElements(t *testing.T) {
+	v := Check(mod, []Package{{Path: mod + "/internal/sim/checker", Files: []File{{Name: "a.go", HasGo: true}}}})
+	wantRule(t, v, "sim-determinism")
+	// internal/simulator is not internal/sim.
+	v = Check(mod, []Package{{Path: mod + "/internal/simulator", Files: []File{{Name: "a.go", HasGo: true, Calls: []string{"time.Now"}}}}})
 	if len(v) != 0 {
 		t.Fatalf("unexpected: %v", v)
 	}

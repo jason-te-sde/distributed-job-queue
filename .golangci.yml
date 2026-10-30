@@ -78,7 +78,7 @@ linters:
         - name: package-comments
   exclusions:
     rules:
-      - path-except: internal/core/
+      - path-except: internal/(core|sim)/
         linters:
           - forbidigo
 

@@ -1,0 +1,19 @@
+// Package sim is the deterministic simulation kernel: a single-goroutine
+// scheduler over virtual time, seeded randomness, per-node clocks that
+// drift, and a network that drops, duplicates, delays and partitions
+// messages.
+//
+// A run is a function of its seed. Nothing here reads the wall clock, starts
+// a goroutine or draws from a global random source: virtual time moves only
+// when World.Step fires the next event, and every random choice comes from a
+// World's Rand. Running the same scenario twice with the same seed therefore
+// fires the same events in the same order, which World.TraceHash makes
+// checkable, and a failing seed replays exactly.
+//
+// internal/archtest enforces the parts of this that a compiler cannot: the
+// sim-determinism rule rejects a go statement and the time package's clock
+// functions anywhere under internal/sim.
+//
+// Epoch is the wall-clock instant that virtual time zero stands for when a
+// simulated database needs a timestamp; see World.StoreTime.
+package sim
