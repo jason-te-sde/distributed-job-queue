@@ -148,6 +148,16 @@ func leaseFrom(t *testing.T, h Harness, queue, tenant string, limit int) []store
 	return leaseTakes(t, h, queue, store.TenantTake{Tenant: tenant, Limit: limit})
 }
 
+// leaseExactlyOne leases the next job of one tenant, which must exist.
+func leaseExactlyOne(t *testing.T, h Harness, queue, tenant string) store.Grant {
+	t.Helper()
+	grants := leaseFrom(t, h, queue, tenant, 1)
+	if len(grants) != 1 {
+		t.Fatalf("leasing one job of tenant %s in queue %s returned %d grants", tenant, queue, len(grants))
+	}
+	return grants[0]
+}
+
 // leaseOne enqueues s and leases it.
 func leaseOne(t *testing.T, h Harness, s job.Spec) store.Grant {
 	t.Helper()

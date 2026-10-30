@@ -2,6 +2,7 @@ package storetest
 
 import (
 	"bytes"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -29,6 +30,9 @@ func RunAck(t *testing.T, nh NewHarness) {
 	run(t, nh, "FailTruncatesError", failTruncatesError)
 	run(t, nh, "ReleaseRefundsAttempt", releaseRefundsAttempt)
 	run(t, nh, "BatchResultsAlignWithRequests", batchResultsAlignWithRequests)
+	run(t, nh, "HeartbeatResultsAlignWithRequests", heartbeatResultsAlignWithRequests)
+	run(t, nh, "FailResultsAlignWithRequests", failResultsAlignWithRequests)
+	run(t, nh, "ReleaseResultsAlignWithRequests", releaseResultsAlignWithRequests)
 	run(t, nh, "AckBatchLimit", ackBatchLimit)
 	run(t, nh, "AckRejectsInvalidArguments", ackRejectsInvalidArguments)
 	run(t, nh, "ReturnedBytesAreCopies", returnedBytesAreCopies)
@@ -223,6 +227,83 @@ func batchResultsAlignWithRequests(t *testing.T, h Harness) {
 	for i := range want {
 		wantOutcome(t, out[i], want[i], "item "+strconv.Itoa(i))
 	}
+}
+
+// mixedRefs are four references with four different fates.
+type mixedRefs struct {
+	// valid names a live lease.
+	valid store.Ref
+	// stale carries the token of a lease that was taken away.
+	stale store.Ref
+	// unknown names a job that does not exist.
+	unknown store.Ref
+	// wrongQueue names a live lease, but in a queue the job is not in.
+	wrongQueue store.Ref
+}
+
+// newMixedRefs leases the jobs behind a mixedRefs.
+func newMixedRefs(t *testing.T, h Harness) mixedRefs {
+	t.Helper()
+	valid := leaseOne(t, h, newSpec("q1", "t1"))
+	stale := leaseOne(t, h, newSpec("q1", "t1"))
+	staleRef := refOf(stale)
+	relet(t, h, stale)
+	other := leaseOne(t, h, newSpec("q1", "t1"))
+	wrong := refOf(other)
+	wrong.Queue = "q2"
+	return mixedRefs{
+		valid:      refOf(valid),
+		stale:      staleRef,
+		unknown:    store.Ref{ID: other.Job.ID + 1000, Queue: "q1", Token: 1},
+		wrongQueue: wrong,
+	}
+}
+
+// wantOutcomes fails unless got is want, item by item.
+func wantOutcomes(t *testing.T, got, want []job.Outcome, call string) {
+	t.Helper()
+	if !slices.Equal(got, want) {
+		t.Errorf("%s returned %v, want %v: one outcome per item, in request order", call, got, want)
+	}
+}
+
+func heartbeatResultsAlignWithRequests(t *testing.T, h Harness) {
+	m := newMixedRefs(t, h)
+	res, err := h.Store().Heartbeat(t.Context(), []store.Ref{m.unknown, m.valid, m.wrongQueue, m.stale}, 40*time.Second)
+	if err != nil || len(res) != 4 {
+		t.Fatalf("Heartbeat = %v, %v; want 4 results", res, err)
+	}
+	got := []job.Outcome{res[0].Outcome, res[1].Outcome, res[2].Outcome, res[3].Outcome}
+	wantOutcomes(t, got, []job.Outcome{job.NotFound, job.Applied, job.NotFound, job.Fenced}, "Heartbeat")
+	if want := []time.Duration{0, 40 * time.Second, 0, 0}; res[0].Remaining != want[0] || res[1].Remaining != want[1] || res[2].Remaining != want[2] || res[3].Remaining != want[3] {
+		t.Errorf("Remaining = [%v %v %v %v], want %v: positive only for the applied item", res[0].Remaining, res[1].Remaining, res[2].Remaining, res[3].Remaining, want)
+	}
+}
+
+func failResultsAlignWithRequests(t *testing.T, h Harness) {
+	m := newMixedRefs(t, h)
+	var reqs []store.FailRequest
+	for _, r := range []store.Ref{m.stale, m.wrongQueue, m.valid, m.unknown} {
+		reqs = append(reqs, store.FailRequest{Ref: r, Error: "boom"})
+	}
+	got, err := h.Store().Fail(t.Context(), reqs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOutcomes(t, got, []job.Outcome{job.Fenced, job.NotFound, job.Applied, job.NotFound}, "Fail")
+	wantState(t, h, m.valid.ID, job.StateReady, "after Fail")
+	wantState(t, h, m.stale.ID, job.StateLeased, "after the fenced Fail")
+}
+
+func releaseResultsAlignWithRequests(t *testing.T, h Harness) {
+	m := newMixedRefs(t, h)
+	got, err := h.Store().Release(t.Context(), []store.Ref{m.wrongQueue, m.stale, m.unknown, m.valid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOutcomes(t, got, []job.Outcome{job.NotFound, job.Fenced, job.NotFound, job.Applied}, "Release")
+	wantState(t, h, m.valid.ID, job.StateReady, "after Release")
+	wantState(t, h, m.stale.ID, job.StateLeased, "after the fenced Release")
 }
 
 func ackBatchLimit(t *testing.T, h Harness) {

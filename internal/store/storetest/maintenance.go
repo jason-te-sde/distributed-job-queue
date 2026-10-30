@@ -24,6 +24,7 @@ func RunMaintenance(t *testing.T, nh NewHarness) {
 	run(t, nh, "ReapExhaustedGoesDead", reapExhaustedGoesDead)
 	run(t, nh, "ReapVisitsInIDOrderAndHonorsLimit", reapVisitsInIDOrderAndHonorsLimit)
 	run(t, nh, "ReapSkipsLive", reapSkipsLive)
+	run(t, nh, "ReapRejectsTheWholeCallOnAnInvalidBackoff", reapRejectsTheWholeCallOnAnInvalidBackoff)
 	run(t, nh, "RequeueDead", requeueDead)
 	run(t, nh, "RequeueNonDeadWrongState", requeueNonDeadWrongState)
 	run(t, nh, "PruneHonorsRetention", pruneHonorsRetention)
@@ -35,6 +36,7 @@ func RunMaintenance(t *testing.T, nh NewHarness) {
 	run(t, nh, "ListDeadReturnsCopies", listDeadReturnsCopies)
 	run(t, nh, "StatsCountsPerTenant", statsCountsPerTenant)
 	run(t, nh, "ActivityListsTenantsWithDueWork", activityListsTenantsWithDueWork)
+	run(t, nh, "ActivityNextDueCoversTenantsWithDueWork", activityNextDueCoversTenantsWithDueWork)
 	run(t, nh, "MaintenanceRejectsInvalidArguments", maintenanceRejectsInvalidArguments)
 }
 
@@ -200,31 +202,31 @@ func reapExhaustedGoesDead(t *testing.T, h Harness) {
 }
 
 func reapVisitsInIDOrderAndHonorsLimit(t *testing.T, h Harness) {
-	// Job k is leased k times, so that its attempts tell the order of the
-	// backoff calls. All five end up leased by the same call and expire
-	// together.
+	// Job k belongs to tenant k, and is failed k-1 times for an immediate
+	// retry, so that its attempts tell the order of the backoff calls. Then
+	// each job is leased once more, the highest id first and a second apart,
+	// so that the leases expire in the opposite order of the ids. Ascending id
+	// is therefore not the order of (expiry, id).
+	tenants := []string{"t1", "t2", "t3", "t4", "t5"}
 	var specs []job.Spec
-	for range 5 {
-		specs = append(specs, newSpec("q1", "t1"))
+	for _, tenant := range tenants {
+		specs = append(specs, newSpec("q1", tenant))
 	}
-	enqueue(t, h, specs...)
-	for round := 1; round <= 5; round++ {
-		grants := leaseFrom(t, h, "q1", "", job.MaxBatch)
-		if len(grants) != 6-round {
-			t.Fatalf("round %d leased %d jobs, want %d", round, len(grants), 6-round)
-		}
-		if round == 5 {
-			break
-		}
-		var fails []store.FailRequest
-		for _, g := range grants[1:] { // the lowest id stays leased for good
-			fails = append(fails, store.FailRequest{Ref: refOf(g), Error: "retry"})
-		}
-		if _, err := h.Store().Fail(t.Context(), fails); err != nil {
-			t.Fatal(err)
+	id := enqueue(t, h, specs...)
+	for i, tenant := range tenants {
+		for range i {
+			failRetryably(t, h, refOf(leaseExactlyOne(t, h, "q1", tenant)))
 		}
 	}
-	h.Advance(30 * time.Second)
+	for i := len(tenants) - 1; i >= 0; i-- {
+		if got := leaseFrom(t, h, "q1", tenants[i], 1); len(got) != 1 || got[0].Job.Attempts != int32(i+1) {
+			t.Fatalf("test setup: the last lease of job %d = %v, want one grant with %d attempts", id[i], got, i+1)
+		}
+		if i > 0 {
+			h.Advance(time.Second)
+		}
+	}
+	h.Advance(30 * time.Second) // the lease that was granted last expires exactly now
 
 	var calls []int32
 	backoff := func(attempts int32) time.Duration {
@@ -236,12 +238,12 @@ func reapVisitsInIDOrderAndHonorsLimit(t *testing.T, h Harness) {
 		t.Fatalf("Reap with limit 3 = %d, %v; want 3", n, err)
 	}
 	if want := []int32{1, 2, 3}; !slices.Equal(calls, want) {
-		t.Errorf("backoff was called with %v, want the attempts of ids 1, 2, 3 in that order: %v", calls, want)
+		t.Errorf("backoff was called with %v, want %v: the attempts of the three lowest ids, in id order, although the leases of the highest ids expired first", calls, want)
 	}
-	for id, state := range map[int64]job.State{1: job.StateReady, 2: job.StateReady, 3: job.StateReady, 4: job.StateLeased, 5: job.StateLeased} {
-		wantState(t, h, id, state, "after Reap with limit 3")
+	for i, state := range []job.State{job.StateReady, job.StateReady, job.StateReady, job.StateLeased, job.StateLeased} {
+		wantState(t, h, id[i], state, "after Reap with limit 3")
 	}
-	wantTime(t, get(t, h, 3).RunAt, h.Now().Add(3*time.Second), "RunAt of job 3: now plus its 3 attempts of backoff")
+	wantTime(t, get(t, h, id[2]).RunAt, h.Now().Add(3*time.Second), "RunAt of the third job: now plus its 3 attempts of backoff")
 
 	calls = nil
 	n, err = h.Store().Reap(t.Context(), 3, backoff)
@@ -268,6 +270,39 @@ func reapSkipsLive(t *testing.T, h Harness) {
 	wantState(t, h, live.Job.ID, job.StateLeased, "after Reap of a live lease")
 	wantState(t, h, done, job.StateSucceeded, "after Reap")
 	wantState(t, h, ready, job.StateReady, "after Reap")
+}
+
+func reapRejectsTheWholeCallOnAnInvalidBackoff(t *testing.T, h Harness) {
+	enqueue(t, h, newSpec("q1", "t1"), newSpec("q1", "t1"))
+	if got := leaseFrom(t, h, "q1", "t1", 2); len(got) != 2 {
+		t.Fatalf("test setup: leased %d jobs, want 2", len(got))
+	}
+	h.Advance(31 * time.Second) // both leases have run out
+	before := snapshot(t, h)
+	for name, bad := range map[string]time.Duration{
+		"a negative delay":        -time.Second,
+		"a sub-microsecond delay": time.Second + time.Nanosecond,
+	} {
+		asked := 0
+		_, err := h.Store().Reap(t.Context(), 10, func(int32) time.Duration {
+			asked++
+			if asked == 1 {
+				return time.Second
+			}
+			return bad
+		})
+		wantInvalid(t, err, "Reap with a valid delay for the first row and "+name+" for the second")
+		after := snapshot(t, h)
+		if len(after) != len(before) {
+			t.Fatalf("Reap with %s changed the number of rows from %d to %d", name, len(before), len(after))
+		}
+		for i := range before {
+			if !job.Equal(before[i], after[i]) {
+				t.Errorf("Reap with %s changed job %d from %+v to %+v: an invalid delay must reject the call before any row changes",
+					name, before[i].ID, before[i], after[i])
+			}
+		}
+	}
 }
 
 func requeueDead(t *testing.T, h Harness) {
@@ -440,17 +475,16 @@ func listDeadPaginates(t *testing.T, h Harness) {
 		}
 		return out
 	}
-	e := first[0]
-	if got, want := list(0, 2), []int64{e, e + 1}; !slices.Equal(got, want) {
+	if got, want := list(0, 2), []int64{first[0], first[1]}; !slices.Equal(got, want) {
 		t.Errorf("first page = %v, want %v", got, want)
 	}
-	if got, want := list(e+1, 2), []int64{e + 2, e + 3}; !slices.Equal(got, want) {
+	if got, want := list(first[1], 2), []int64{first[2], first[3]}; !slices.Equal(got, want) {
 		t.Errorf("second page = %v, want %v", got, want)
 	}
-	if got, want := list(e+3, 2), []int64{e + 4}; !slices.Equal(got, want) {
+	if got, want := list(first[3], 2), []int64{first[4]}; !slices.Equal(got, want) {
 		t.Errorf("third page = %v, want %v", got, want)
 	}
-	if got := list(e+4, 2); len(got) != 0 {
+	if got := list(first[4], 2); len(got) != 0 {
 		t.Errorf("page after the last = %v, want none", got)
 	}
 }
@@ -546,6 +580,31 @@ func activityListsTenantsWithDueWork(t *testing.T, h Harness) {
 	h.Advance(60 * time.Second)
 	if got := activity("when everything is due"); !slices.Equal(got.Tenants, []string{"a", "b", "c", "d"}) || got.HasNextDue {
 		t.Errorf("Activity when everything is due = %+v, want tenants [a b c d] and nothing scheduled", got)
+	}
+}
+
+func activityNextDueCoversTenantsWithDueWork(t *testing.T, h Harness) {
+	// Tenant b has due work and a job scheduled in 10s; tenant a has only a
+	// job scheduled in 30s. The next job to fall due is b's, so NextDueIn
+	// looks at the whole queue, not only at tenants without due work.
+	soon, late := newSpec("q1", "b"), newSpec("q1", "a")
+	soon.Delay, late.Delay = 10*time.Second, 30*time.Second
+	enqueue(t, h, newSpec("q1", "b"), soon, late)
+
+	activity := func(when string) store.Activity {
+		t.Helper()
+		got, err := h.Store().Activity(t.Context(), "q1")
+		if err != nil {
+			t.Fatalf("Activity %s: %v", when, err)
+		}
+		return got
+	}
+	if got := activity("at the start"); !slices.Equal(got.Tenants, []string{"b"}) || !got.HasNextDue || got.NextDueIn != 10*time.Second {
+		t.Errorf("Activity = %+v, want tenants [b] and the next job due in 10s: the scheduled job of a tenant with due work counts", got)
+	}
+	h.Advance(10 * time.Second)
+	if got := activity("when b's scheduled job is due"); !slices.Equal(got.Tenants, []string{"b"}) || !got.HasNextDue || got.NextDueIn != 20*time.Second {
+		t.Errorf("Activity 10s later = %+v, want tenants [b] and the next job due in 20s", got)
 	}
 }
 

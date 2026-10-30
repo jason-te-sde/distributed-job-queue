@@ -137,19 +137,53 @@ func TestObserverSkipsCallsThatChangeNothing(t *testing.T) {
 func TestObserverChangesAreCopies(t *testing.T) {
 	var changes []memstore.Change
 	h := newHarness(t, func(c memstore.Change) { changes = append(changes, c) })
-	res, err := h.s.Enqueue(t.Context(), []job.Spec{spec("q1", "t1")})
-	if err != nil {
-		t.Fatal(err)
+	ctx := t.Context()
+	noErr := func(call string, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s: %v", call, err)
+		}
 	}
-	for _, b := range [][]byte{changes[0].After.Payload, changes[0].Before.Payload} {
+	scribble := func(b []byte) {
 		for i := range b {
 			b[i] = '!'
 		}
 	}
-	got, err := h.s.Get(t.Context(), res[0].ID, "")
-	if err != nil || string(got.Payload) != "payload" {
-		t.Errorf("after the observer changed the bytes of a Change, Get = %q, %v; want the original payload", got.Payload, err)
+	// wantStored fails unless the row still holds the payload and result that
+	// it was given, whatever the caller did to the bytes of the last Changes.
+	wantStored := func(id int64, result, when string) {
+		t.Helper()
+		got, err := h.s.Get(ctx, id, "")
+		if err != nil || string(got.Payload) != "payload" || string(got.Result) != result {
+			t.Errorf("%s: Get = Payload %q, Result %q, %v; want %q and %q", when, got.Payload, got.Result, err, "payload", result)
+		}
 	}
+
+	res, err := h.s.Enqueue(ctx, []job.Spec{spec("q1", "t1")})
+	noErr("Enqueue", err)
+	id := res[0].ID
+	scribble(changes[0].Before.Payload)
+	scribble(changes[0].After.Payload)
+	wantStored(id, "", "after the observer changed the bytes of the enqueue Change")
+
+	grants, err := h.s.Lease(ctx, store.LeaseRequest{Queue: "q1", Takes: []store.TenantTake{{Tenant: "t1", Limit: 1}}, TTL: time.Minute, Worker: "w1"})
+	noErr("Lease", err)
+	if len(grants) != 1 || len(changes) != 2 {
+		t.Fatalf("Lease returned %d grants and %d changes were seen, want 1 and 2", len(grants), len(changes))
+	}
+	scribble(changes[1].Before.Payload)
+	scribble(changes[1].After.Payload)
+	wantStored(id, "", "after the observer changed the bytes of the lease Change")
+
+	_, err = h.s.Complete(ctx, []store.CompleteRequest{{Ref: store.Ref{ID: id, Queue: "q1", Token: grants[0].Job.Epoch}, Result: []byte("result")}})
+	noErr("Complete", err)
+	if len(changes) != 3 {
+		t.Fatalf("%d changes were seen after Complete, want 3", len(changes))
+	}
+	scribble(changes[2].Before.Payload)
+	scribble(changes[2].After.Payload)
+	scribble(changes[2].After.Result)
+	wantStored(id, "result", "after the observer changed the bytes of the complete Change")
 }
 
 func TestNewWithoutClockPanics(t *testing.T) {

@@ -211,15 +211,24 @@ func getTenantScope(t *testing.T, h Harness) {
 }
 
 func snapshotOrderedByID(t *testing.T, h Harness) {
-	enqueue(t, h, newSpec("q2", "t2"), newSpec("q1", "t1"))
-	enqueue(t, h, newSpec("q1", "t3"))
+	id := enqueue(t, h, newSpec("q2", "t2"), newSpec("q1", "t1"), newSpec("q1", "t3"))
+	// Change the earlier rows after the later ones exist, so that neither the
+	// order of insertion nor the order of the last change is the id order.
+	g := leaseFrom(t, h, "q1", "t1", 1)
+	leaseFrom(t, h, "q2", "t2", 1)
+	if len(g) != 1 || heartbeatOne(t, h, refOf(g[0]), 10*time.Second).Outcome != job.Applied {
+		t.Fatalf("test setup: leasing and extending job %d failed", id[1])
+	}
 	rows := snapshot(t, h)
 	if len(rows) != 3 {
 		t.Fatalf("Snapshot returned %d rows, want 3", len(rows))
 	}
-	for i := 1; i < len(rows); i++ {
-		if rows[i].ID <= rows[i-1].ID {
-			t.Errorf("Snapshot ids %d then %d are not ascending", rows[i-1].ID, rows[i].ID)
+	for i, r := range rows {
+		if r.ID != id[i] {
+			t.Errorf("Snapshot row %d is job %d, want job %d: ascending id", i, r.ID, id[i])
 		}
+	}
+	if rows[0].State != job.StateLeased || rows[1].State != job.StateLeased || rows[2].State != job.StateReady {
+		t.Errorf("Snapshot states = %v %v %v, want leased leased ready", rows[0].State, rows[1].State, rows[2].State)
 	}
 }

@@ -15,6 +15,7 @@ func RunLease(t *testing.T, nh NewHarness) {
 	run(t, nh, "LeaseRespectsRunAt", leaseRespectsRunAt)
 	run(t, nh, "LeaseOrdersByRunAtThenIDWithinTenant", leaseOrdersByRunAtThenIDWithinTenant)
 	run(t, nh, "LeaseHonorsPerTenantLimits", leaseHonorsPerTenantLimits)
+	run(t, nh, "LeaseGrantsAreOrderedByRunAtThenIDAcrossTakes", leaseGrantsAreOrderedByRunAtThenIDAcrossTakes)
 	run(t, nh, "LeaseFIFOAcrossTenants", leaseFIFOAcrossTenants)
 	run(t, nh, "LeaseIncrementsEpochAndAttempts", leaseIncrementsEpochAndAttempts)
 	run(t, nh, "LeaseSetsExpiryAndRemaining", leaseSetsExpiryAndRemaining)
@@ -41,21 +42,22 @@ func leaseRespectsRunAt(t *testing.T, h Harness) {
 }
 
 func leaseOrdersByRunAtThenIDWithinTenant(t *testing.T, h Harness) {
-	// Delays in seconds, by id 1..5. All are due after 5 seconds, and the
-	// order is then by run_at, with the id breaking the tie of ids 2 and 4.
+	// Delays in seconds, by position 0..4. All are due after 5 seconds, and
+	// the order is then by run_at, with the id breaking the tie of positions
+	// 1 and 3.
 	var specs []job.Spec
 	for _, d := range []int{3, 0, 1, 0, 2} {
 		s := newSpec("q1", "t1")
 		s.Delay = time.Duration(d) * time.Second
 		specs = append(specs, s)
 	}
-	enqueue(t, h, specs...)
+	id := enqueue(t, h, specs...)
 	h.Advance(5 * time.Second)
-	if got := ids(leaseFrom(t, h, "q1", "t1", 3)); !slices.Equal(got, []int64{2, 4, 3}) {
-		t.Errorf("the first three leased = %v, want [2 4 3]", got)
+	if got, want := ids(leaseFrom(t, h, "q1", "t1", 3)), []int64{id[1], id[3], id[2]}; !slices.Equal(got, want) {
+		t.Errorf("the first three leased = %v, want %v", got, want)
 	}
-	if got := ids(leaseFrom(t, h, "q1", "t1", 10)); !slices.Equal(got, []int64{5, 1}) {
-		t.Errorf("the rest leased = %v, want [5 1]", got)
+	if got, want := ids(leaseFrom(t, h, "q1", "t1", 10)), []int64{id[4], id[0]}; !slices.Equal(got, want) {
+		t.Errorf("the rest leased = %v, want %v", got, want)
 	}
 }
 
@@ -64,9 +66,9 @@ func leaseHonorsPerTenantLimits(t *testing.T, h Harness) {
 	for range 5 {
 		specs = append(specs, newSpec("q1", "a"), newSpec("q1", "b"))
 	}
-	enqueue(t, h, specs...) // a has ids 1 3 5 7 9, b has 2 4 6 8 10
+	id := enqueue(t, h, specs...) // a is at even positions 0..8, b at odd ones
 	grants := leaseTakes(t, h, "q1", store.TenantTake{Tenant: "a", Limit: 2}, store.TenantTake{Tenant: "b", Limit: 3})
-	if got, want := ids(grants), []int64{1, 2, 3, 4, 6}; !slices.Equal(got, want) {
+	if got, want := ids(grants), []int64{id[0], id[1], id[2], id[3], id[5]}; !slices.Equal(got, want) {
 		t.Errorf("leased %v, want %v: 2 of tenant a and 3 of tenant b, in (run_at, id) order", got, want)
 	}
 	for _, g := range grants {
@@ -76,11 +78,28 @@ func leaseHonorsPerTenantLimits(t *testing.T, h Harness) {
 	}
 }
 
+func leaseGrantsAreOrderedByRunAtThenIDAcrossTakes(t *testing.T, h Harness) {
+	// Tenant a's job has the lowest id but runs last. Tenants b and c run at
+	// the same instant, c with the lower id. The takes are asked for in the
+	// order a, b, c, which is neither the order of the ids nor of the run_at
+	// values, so the grants can only come back right if they are sorted by
+	// (run_at, id) across the takes.
+	later := newSpec("q1", "a")
+	later.Delay = 10 * time.Second
+	id := enqueue(t, h, later, newSpec("q1", "c"), newSpec("q1", "b"))
+	h.Advance(10 * time.Second)
+	grants := leaseTakes(t, h, "q1",
+		store.TenantTake{Tenant: "a", Limit: 1}, store.TenantTake{Tenant: "b", Limit: 1}, store.TenantTake{Tenant: "c", Limit: 1})
+	if got, want := ids(grants), []int64{id[1], id[2], id[0]}; !slices.Equal(got, want) {
+		t.Errorf("grants = %v, want %v: by (run_at, id) across takes, not by take or by id", got, want)
+	}
+}
+
 func leaseFIFOAcrossTenants(t *testing.T, h Harness) {
-	enqueue(t, h, newSpec("q1", "a"), newSpec("q1", "b"), newSpec("q1", "a"))
+	id := enqueue(t, h, newSpec("q1", "a"), newSpec("q1", "b"), newSpec("q1", "a"))
 	got := ids(leaseFrom(t, h, "q1", "", 2))
-	if !slices.Equal(got, []int64{1, 2}) {
-		t.Errorf("a FIFO take of 2 leased %v, want the first two by id [1 2]", got)
+	if want := []int64{id[0], id[1]}; !slices.Equal(got, want) {
+		t.Errorf("a FIFO take of 2 leased %v, want the first two by id %v", got, want)
 	}
 }
 
