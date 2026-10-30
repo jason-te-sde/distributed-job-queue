@@ -189,6 +189,29 @@ expect_status build-failure-shows-compiler-output 1
 expect_output build-failure-shows-compiler-output "p_test.go:5:34: undefined: missing"
 pass build-failure-shows-compiler-output
 
+# (n) A package result that go test replayed from its cache is refused: the
+# passes it carries were not produced by this run, so they say nothing about
+# the database. A package that ran is accepted.
+{
+  three_passes
+  printf '%s\n' '{"Time":"2026-10-29T10:00:00Z","Action":"output","Package":"example.com/p","Output":"ok  \texample.com/p\t0.344s\n"}'
+} >"$workdir/ran.json"
+run_check "$workdir/ran.json" 3
+expect_status fresh-package-result-is-accepted 0
+pass fresh-package-result-is-accepted
+
+{
+  three_passes
+  printf '%s\n' '{"Time":"2026-10-29T10:00:00Z","Action":"output","Package":"example.com/p","Output":"ok  \texample.com/p\t(cached)\n"}'
+} >"$workdir/cached.json"
+run_check "$workdir/cached.json" 3
+expect_status cached-package-result-fails 1
+expect_output cached-package-result-fails "(cached)"
+expect_output cached-package-result-fails "example.com/p"
+expect_output cached-package-result-fails "-count=1"
+expect_no_output cached-package-result-fails "passed (minimum"
+pass cached-package-result-fails
+
 # (k) The committed minimum is a positive whole number, so the real run
 # cannot be configured away by an empty or zero file.
 committed="$(tr -d '[:space:]' <"$here/../pg-min-tests.txt")"

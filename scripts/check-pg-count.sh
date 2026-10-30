@@ -3,13 +3,15 @@
 #
 # usage: check-pg-count.sh <json-file>
 #
-# Fails when any event in the file has "Action":"fail", and when fewer
-# top-level tests named TestPG* passed than the minimum in pg-min-tests.txt
-# next to this script. The count is what makes the run trustworthy: a test that
-# is skipped, excluded by a build tag or lost in a refactor leaves the build
-# green but lowers it, and the minimum, raised in the commit that adds tests,
-# turns that into a failure. The environment variable PG_MIN_TESTS_FILE names
-# a different minimum file.
+# Fails when any event in the file has "Action":"fail", when any line of go
+# test's output says "(cached)", and when fewer top-level tests named TestPG*
+# passed than the minimum in pg-min-tests.txt next to this script. The count
+# is what makes the run trustworthy: a test that is skipped, excluded by a
+# build tag or lost in a refactor leaves the build green but lowers it, and the
+# minimum, raised in the commit that adds tests, turns that into a failure. A
+# cached package result replays the passes of an earlier run, so it would
+# satisfy the count without touching the database; the run must use -count=1.
+# The environment variable PG_MIN_TESTS_FILE names a different minimum file.
 #
 # Output: "pg tests: N passed (minimum M)", or the failures with the output
 # the failing tests produced, or the shortfall. The run's own text goes into
@@ -86,6 +88,14 @@ if [ "$failed" -ne 0 ]; then
   # A package that did not build reports its compiler errors in separate events.
   { grep -F '"Action":"build-output"' -- "$results" || true; } | output_text >&2
   printf 'pg tests: failures found in %s\n' "$results" >&2
+  exit 1
+fi
+
+# go test reports a package whose result it replayed from its cache with
+# "(cached)" on its summary line.
+if grep -qF '(cached)' -- "$results"; then
+  grep -F '(cached)' -- "$results" | output_text >&2
+  printf 'pg tests: cached results in %s; the run did not touch PostgreSQL, run go test with -count=1\n' "$results" >&2
   exit 1
 fi
 

@@ -44,11 +44,13 @@ func DSN(t testing.TB) string {
 	return dsn
 }
 
-// NewDB creates a database named jobqueue_test_<pid>_<seq> on the server DSN
-// points at, migrates it, installs the test clock and returns a pool on it.
-// When the test ends, the pool is closed and the database is dropped, even if
-// other connections are still open.
-func NewDB(t testing.TB) *pgxpool.Pool {
+// NewEmptyDB creates a database named jobqueue_test_<pid>_<seq> on the server
+// DSN points at and returns a pool on it, with nothing installed: no schema,
+// no migrations, no test clock. It is for tests of the migrations themselves,
+// which need a database that has not been migrated. When the test ends, the
+// pool is closed and the database is dropped, even if other connections are
+// still open.
+func NewEmptyDB(t testing.TB) *pgxpool.Pool {
 	t.Helper()
 	dsn := DSN(t)
 	name := fmt.Sprintf("jobqueue_test_%d_%d", os.Getpid(), databaseSeq.Add(1))
@@ -88,12 +90,19 @@ func NewDB(t testing.TB) *pgxpool.Pool {
 	// Registered after the drop, so it runs first: the pool is closed before
 	// its database goes away.
 	t.Cleanup(pool.Close)
+	return pool
+}
 
+// NewDB is NewEmptyDB followed by the migrations and the test clock: the
+// database every store test starts from. The test fails if either step does.
+func NewDB(t testing.TB) *pgxpool.Pool {
+	t.Helper()
+	pool := NewEmptyDB(t)
 	if _, err := migrate.Up(t.Context(), pool); err != nil {
-		t.Fatalf("pgtest: migrate %s: %v", name, err)
+		t.Fatalf("pgtest: migrate: %v", err)
 	}
 	if err := InstallTestClock(t.Context(), pool); err != nil {
-		t.Fatalf("pgtest: install the test clock in %s: %v", name, err)
+		t.Fatalf("pgtest: install the test clock: %v", err)
 	}
 	return pool
 }

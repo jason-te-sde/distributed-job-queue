@@ -34,6 +34,10 @@ CREATE TABLE jobqueue.jobs (
     -- A lease exists exactly while the job is leased.
     CONSTRAINT jobs_leased_iff_lease_set
         CHECK ((state = 'leased') = (lease_expires_at IS NOT NULL AND leased_by IS NOT NULL)),
+    -- The two lease columns are set together or not at all, in every state. The
+    -- check above ties them to the leased state only through their conjunction,
+    -- so without this a ready row could carry leased_by and no expiry.
+    CONSTRAINT jobs_lease_fields_paired CHECK ((lease_expires_at IS NULL) = (leased_by IS NULL)),
     -- finished_at is set exactly in the three terminal states.
     CONSTRAINT jobs_finished_iff_terminal
         CHECK ((state IN ('succeeded', 'dead', 'cancelled')) = (finished_at IS NOT NULL))

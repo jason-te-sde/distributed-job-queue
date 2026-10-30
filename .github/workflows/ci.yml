@@ -122,8 +122,13 @@ jobs:
       - name: go vet
         run: go vet -tags pg ./...
       - name: go test -race
-        run: go test -race -tags pg -json ./... > pg.json
+        run: go test -race -count=1 -tags pg -json ./... > pg.json
+      # Also after a failed go test, which writes only JSON: this step is what
+      # prints the failing tests and what they wrote. It is skipped when an
+      # earlier step failed before go test started, because pg.json does not
+      # exist then.
       - name: Count the pg tests
+        if: ${{ always() && hashFiles('pg.json') != '' }}
         run: scripts/check-pg-count.sh pg.json
       - name: Upload the test events
         if: failure()

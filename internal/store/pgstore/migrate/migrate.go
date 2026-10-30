@@ -113,6 +113,12 @@ func Up(ctx context.Context, pool *pgxpool.Pool) (applied int, err error) {
 	if err != nil {
 		return 0, err
 	}
+	return up(ctx, pool, migrations)
+}
+
+// up is Up over the given migrations, which must be in ascending version
+// order. It is separate so that a test can hand it a migration that fails.
+func up(ctx context.Context, pool *pgxpool.Pool, migrations []migration) (applied int, err error) {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("migrate: acquire a connection: %w", err)
