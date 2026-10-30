@@ -2193,8 +2193,7 @@ const file_jobqueue_v1_jobqueue_proto_rawDesc = "" +
 	"\fListDeadJobs\x12 .jobqueue.v1.ListDeadJobsRequest\x1a!.jobqueue.v1.ListDeadJobsResponse\x12M\n" +
 	"\n" +
 	"RequeueJob\x12\x1e.jobqueue.v1.RequeueJobRequest\x1a\x1f.jobqueue.v1.RequeueJobResponse\x12J\n" +
-	"\tPurgeJobs\x12\x1d.jobqueue.v1.PurgeJobsRequest\x1a\x1e.jobqueue.v1.PurgeJobsResponseB\xc0\x01\n" +
-	"\x0fcom.jobqueue.v1B\rJobqueueProtoP\x01ZQgithub.com/jason-te-sde/distributed-job-queue/internal/gen/jobqueue/v1;jobqueuev1\xa2\x02\x03JXX\xaa\x02\vJobqueue.V1\xca\x02\vJobqueue\\V1\xe2\x02\x17Jobqueue\\V1\\GPBMetadata\xea\x02\fJobqueue::V1b\x06proto3"
+	"\tPurgeJobs\x12\x1d.jobqueue.v1.PurgeJobsRequest\x1a\x1e.jobqueue.v1.PurgeJobsResponseBSZQgithub.com/jason-te-sde/distributed-job-queue/internal/gen/jobqueue/v1;jobqueuev1b\x06proto3"
 
 var (
 	file_jobqueue_v1_jobqueue_proto_rawDescOnce sync.Once

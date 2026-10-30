@@ -1,6 +1,19 @@
 version: v2
 managed:
   enabled: true
+  # Managed mode stays on so go_package_prefix applies to every proto this
+  # repository compiles, including vendored ones. The options for other
+  # languages it would add are switched off: nothing here generates code for
+  # them, and they would otherwise be embedded in the Go descriptor bytes.
+  disable:
+    - file_option: java_package
+    - file_option: java_outer_classname
+    - file_option: java_multiple_files
+    - file_option: objc_class_prefix
+    - file_option: csharp_namespace
+    - file_option: php_namespace
+    - file_option: php_metadata_namespace
+    - file_option: ruby_package
   override:
     - file_option: go_package_prefix
       value: github.com/jason-te-sde/distributed-job-queue/internal/gen
