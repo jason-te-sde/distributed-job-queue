@@ -1,0 +1,82 @@
+# Default values for the jobqueue chart.
+#
+# The chart never creates Secrets. The database, tokens and TLS Secrets named
+# below must exist in the release namespace before the chart is installed,
+# because the migration hook runs before anything else does.
+
+image:
+  repository: ghcr.io/jason-te-sde/distributed-job-queue
+  # An empty tag means the chart appVersion.
+  tag: ""
+
+# Broker replicas. Keep at least 2 so that a rolling restart or a node drain
+# always leaves a broker serving.
+replicas: 2
+
+database:
+  # Secret holding the PostgreSQL connection URL, passed to the broker, the
+  # migration Job and the example worker as JOBQUEUE_DATABASE_URL.
+  secretName: jobqueue-database
+  secretKey: url
+
+# Secret with a key named "tokens": the bearer-token file (see
+# docs/operations.md for the format). Empty means no token file.
+tokens:
+  secretName: ""
+
+# Secret of type kubernetes.io/tls (keys tls.crt and tls.key). Empty means the
+# broker serves plaintext.
+tls:
+  secretName: ""
+
+# The broker refuses to serve a non-loopback address without both TLS and
+# tokens. Set this to true only for a trusted network or a test cluster.
+insecure: false
+
+# Dispatch order across tenants: drr or fifo.
+scheduler: drr
+# Per-tenant weights for drr, for example "a=4,b=1". Empty means weight 1 each.
+tenantWeights: ""
+
+# KEDA external scaler endpoint. It carries no token authentication, because
+# KEDA does not send bearer tokens, so a NetworkPolicy restricts it to the
+# namespace named in allowNamespace.
+scaler:
+  enabled: true
+  port: 7072
+  allowNamespace: keda
+
+pdb:
+  minAvailable: 1
+
+# preStop sleep plus the broker shutdown grace (25s) must fit inside the
+# termination grace period.
+terminationGracePeriodSeconds: 40
+preStopSleepSeconds: 5
+
+# Applied to the broker, the migration Job and the example worker.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+# A demonstration worker that renders thumbnails (examples/thumbnail).
+example:
+  enabled: false
+  queue: thumbnails
+  concurrency: 4
+  # Scale the example worker on the queue backlog through KEDA. Requires KEDA
+  # to be installed in the cluster, example.enabled and scaler.enabled.
+  keda:
+    enabled: false
+    minReplicas: 0
+    maxReplicas: 5
+    targetBacklog: 10
+    pollingInterval: 5
+    cooldownPeriod: 30
+
+# Run "jobqueuectl migrate" as a pre-install and pre-upgrade hook.
+migrations:
+  enabled: true

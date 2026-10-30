@@ -15,7 +15,7 @@ PROTOC_GEN_GO_GRPC_VERSION := v1.6.2
 # whatever versions happen to be on the developer's PATH.
 BIN := $(CURDIR)/bin
 
-.PHONY: test test-pg lint check-buf gen hygiene test-scripts preflight
+.PHONY: test test-pg lint check-buf gen hygiene helm-check test-scripts preflight
 
 # Unit and simulator tests.
 test:
@@ -81,10 +81,29 @@ gen: check-buf
 hygiene:
 	scripts/check-hygiene.sh .
 
+# Runs a command that needs Helm: with_helm <command> <name of the check>.
+# Without Helm a developer machine prints a SKIPPED line and moves on. CI always
+# installs Helm, so there (the CI variable is set) a missing Helm is an error.
+define with_helm
+	@if command -v helm >/dev/null 2>&1; then \
+		$(1); \
+	elif [ -n "$$CI" ]; then \
+		echo "$(2): helm is required in CI but is not installed" >&2; \
+		exit 1; \
+	else \
+		echo "SKIPPED $(2): helm not installed"; \
+	fi
+endef
+
+# Lints and renders the Helm chart and asserts on the rendering.
+helm-check:
+	$(call with_helm,scripts/check-helm.sh,helm check)
+
 # Tests for the scripts themselves.
 test-scripts:
 	bash scripts/tests/hygiene_test.sh
 	bash scripts/tests/pg_count_test.sh
+	$(call with_helm,bash scripts/tests/helm_test.sh,helm test)
 
 preflight:
 	scripts/preflight.sh

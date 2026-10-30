@@ -1,0 +1,16 @@
+# Health, readiness and Prometheus metrics. gRPC clients use the headless
+# Service instead.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "jobqueue.fullname" . }}-http
+  labels:
+    {{- include "jobqueue.labels" (dict "ctx" . "component" "broker") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "jobqueue.selectorLabels" (dict "ctx" . "component" "broker") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ include "jobqueue.httpPort" . }}
+      targetPort: http

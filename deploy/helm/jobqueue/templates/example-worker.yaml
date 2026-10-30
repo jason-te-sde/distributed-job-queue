@@ -1,0 +1,38 @@
+{{- if .Values.example.enabled }}
+# A demonstration worker for the thumbnails queue. Under KEDA it starts at zero
+# replicas and the ScaledObject raises it when the queue has a backlog.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "jobqueue.fullname" . }}-example-worker
+  labels:
+    {{- include "jobqueue.labels" (dict "ctx" . "component" "example-worker") | nindent 4 }}
+spec:
+  replicas: {{ if .Values.example.keda.enabled }}0{{ else }}1{{ end }}
+  selector:
+    matchLabels:
+      {{- include "jobqueue.selectorLabels" (dict "ctx" . "component" "example-worker") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "jobqueue.labels" (dict "ctx" . "component" "example-worker") | nindent 8 }}
+    spec:
+      securityContext:
+        {{- include "jobqueue.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: worker
+          image: {{ include "jobqueue.image" . | quote }}
+          command: ["/thumbnail"]
+          args:
+            - "work"
+            - "--addr"
+            - {{ printf "dns:///%s-grpc:%s" (include "jobqueue.fullname" .) (include "jobqueue.grpcPort" .) | quote }}
+            - "--concurrency"
+            - {{ .Values.example.concurrency | quote }}
+          env:
+            {{- include "jobqueue.databaseEnv" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- include "jobqueue.containerSecurityContext" . | nindent 12 }}
+{{- end }}

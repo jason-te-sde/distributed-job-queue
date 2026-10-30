@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "jobqueue.fullname" . }}
+  labels:
+    {{- include "jobqueue.labels" (dict "ctx" . "component" "broker") | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      {{- include "jobqueue.selectorLabels" (dict "ctx" . "component" "broker") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "jobqueue.labels" (dict "ctx" . "component" "broker") | nindent 8 }}
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- include "jobqueue.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: broker
+          image: {{ include "jobqueue.image" . | quote }}
+          # The image entrypoint is the broker binary, so only its flags go here.
+          args:
+            - {{ printf "--grpc-addr=:%s" (include "jobqueue.grpcPort" .) | quote }}
+            - {{ printf "--http-addr=:%s" (include "jobqueue.httpPort" .) | quote }}
+            {{- if .Values.scaler.enabled }}
+            - {{ printf "--scaler-addr=:%v" .Values.scaler.port | quote }}
+            {{- end }}
+            {{- if .Values.tokens.secretName }}
+            - "--tokens-file=/etc/jobqueue/tokens/tokens"
+            {{- end }}
+            {{- if .Values.tls.secretName }}
+            - "--tls-cert=/etc/jobqueue/tls/tls.crt"
+            - "--tls-key=/etc/jobqueue/tls/tls.key"
+            {{- end }}
+            {{- if .Values.insecure }}
+            - "--insecure"
+            {{- end }}
+            - {{ printf "--scheduler=%s" .Values.scheduler | quote }}
+            {{- if .Values.tenantWeights }}
+            - {{ printf "--tenant-weights=%s" .Values.tenantWeights | quote }}
+            {{- end }}
+            - "--log-format=json"
+          env:
+            {{- include "jobqueue.databaseEnv" . | nindent 12 }}
+          ports:
+            - name: grpc
+              containerPort: {{ include "jobqueue.grpcPort" . }}
+            - name: http
+              containerPort: {{ include "jobqueue.httpPort" . }}
+            {{- if .Values.scaler.enabled }}
+            - name: scaler
+              containerPort: {{ .Values.scaler.port }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          # Distroless has no shell, so the sleep is a subcommand of jobqueuectl.
+          # It gives the endpoint removal time to reach every client before the
+          # broker starts draining.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/jobqueuectl", "sleep", {{ printf "%vs" .Values.preStopSleepSeconds | quote }}]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- include "jobqueue.containerSecurityContext" . | nindent 12 }}
+          {{- if or .Values.tokens.secretName .Values.tls.secretName }}
+          volumeMounts:
+            {{- if .Values.tokens.secretName }}
+            - name: tokens
+              mountPath: /etc/jobqueue/tokens
+              readOnly: true
+            {{- end }}
+            {{- if .Values.tls.secretName }}
+            - name: tls
+              mountPath: /etc/jobqueue/tls
+              readOnly: true
+            {{- end }}
+          {{- end }}
+      {{- if or .Values.tokens.secretName .Values.tls.secretName }}
+      volumes:
+        {{- if .Values.tokens.secretName }}
+        - name: tokens
+          secret:
+            secretName: {{ .Values.tokens.secretName }}
+        {{- end }}
+        {{- if .Values.tls.secretName }}
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.secretName }}
+        {{- end }}
+      {{- end }}

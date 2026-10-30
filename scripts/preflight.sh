@@ -30,6 +30,7 @@ fi
 
 make lint
 make hygiene
+make helm-check
 make test-scripts
 make test
 

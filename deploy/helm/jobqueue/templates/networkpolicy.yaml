@@ -1,0 +1,31 @@
+{{- if .Values.scaler.enabled }}
+# A NetworkPolicy that selects pods denies every ingress it does not list, so
+# this one admits the gRPC and HTTP ports from anywhere and the scaler port
+# only from the KEDA namespace. Leaving out the first rule would cut every
+# client off from the brokers.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "jobqueue.fullname" . }}
+  labels:
+    {{- include "jobqueue.labels" (dict "ctx" . "component" "broker") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "jobqueue.selectorLabels" (dict "ctx" . "component" "broker") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: {{ include "jobqueue.grpcPort" . }}
+        - protocol: TCP
+          port: {{ include "jobqueue.httpPort" . }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.scaler.allowNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.scaler.port }}
+{{- end }}

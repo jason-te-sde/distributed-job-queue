@@ -1,0 +1,27 @@
+{{- if .Values.example.keda.enabled }}
+{{- if not .Values.example.enabled }}
+{{- fail "example.keda.enabled requires example.enabled: the ScaledObject scales the example worker" }}
+{{- end }}
+{{- if not .Values.scaler.enabled }}
+{{- fail "example.keda.enabled requires scaler.enabled: KEDA reads the backlog from the broker's scaler endpoint" }}
+{{- end }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "jobqueue.fullname" . }}-example-worker
+  labels:
+    {{- include "jobqueue.labels" (dict "ctx" . "component" "example-worker") | nindent 4 }}
+spec:
+  scaleTargetRef:
+    name: {{ include "jobqueue.fullname" . }}-example-worker
+  minReplicaCount: {{ .Values.example.keda.minReplicas }}
+  maxReplicaCount: {{ .Values.example.keda.maxReplicas }}
+  pollingInterval: {{ .Values.example.keda.pollingInterval }}
+  cooldownPeriod: {{ .Values.example.keda.cooldownPeriod }}
+  triggers:
+    - type: external
+      metadata:
+        scalerAddress: {{ printf "%s-scaler.%s.svc.cluster.local:%v" (include "jobqueue.fullname" .) .Release.Namespace .Values.scaler.port | quote }}
+        queue: {{ .Values.example.queue | quote }}
+        targetBacklog: {{ .Values.example.keda.targetBacklog | quote }}
+{{- end }}
