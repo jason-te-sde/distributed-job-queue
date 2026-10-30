@@ -25,6 +25,7 @@ var mustExist = []string{
 	"internal/store/memstore",
 	"internal/core/lease",
 	"internal/core/dispatch",
+	"internal/store/pgstore",
 }
 
 // wantRule fails unless exactly one violation has the given rule.

@@ -4,7 +4,10 @@ package pgstore_test
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"slices"
 	"testing"
 	"time"
@@ -74,6 +77,10 @@ func TestPGConformanceLease(t *testing.T) {
 
 func TestPGConformanceAck(t *testing.T) {
 	storetest.RunAck(t, newHarness(t))
+}
+
+func TestPGConformanceMaintenance(t *testing.T) {
+	storetest.RunMaintenance(t, newHarness(t))
 }
 
 // listener is a connection that LISTENs on the ready channel.
@@ -520,4 +527,266 @@ func TestPGReleaseAndRequeueNotify(t *testing.T) {
 		t.Fatalf("Requeue of a dead job = %v, %v", out, err)
 	}
 	l.wantPayloads("q\tb")
+}
+
+// deadDSN is a DSN for a port that nothing listens on.
+func deadDSN(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("postgres://127.0.0.1:%d/postgres?sslmode=disable&connect_timeout=2", port)
+}
+
+// everyCall runs each method of the store once with valid arguments and
+// returns the error of each, by method name.
+func everyCall(ctx context.Context, s *pgstore.Store) map[string]error {
+	ref := store.Ref{ID: 1, Queue: "q", Token: 1}
+	calls := map[string]func() error{
+		"Enqueue": func() error { _, err := s.Enqueue(ctx, []job.Spec{spec("q", "t")}); return err },
+		"Lease": func() error {
+			_, err := s.Lease(ctx, store.LeaseRequest{Queue: "q", Takes: []store.TenantTake{{Tenant: "t", Limit: 1}}, TTL: time.Minute, Worker: "w"})
+			return err
+		},
+		"Heartbeat": func() error { _, err := s.Heartbeat(ctx, []store.Ref{ref}, time.Minute); return err },
+		"Complete":  func() error { _, err := s.Complete(ctx, []store.CompleteRequest{{Ref: ref}}); return err },
+		"Fail":      func() error { _, err := s.Fail(ctx, []store.FailRequest{{Ref: ref}}); return err },
+		"Release":   func() error { _, err := s.Release(ctx, []store.Ref{ref}); return err },
+		"Cancel":    func() error { _, err := s.Cancel(ctx, 1, ""); return err },
+		"Requeue":   func() error { _, err := s.Requeue(ctx, 1); return err },
+		"Reap":      func() error { _, err := s.Reap(ctx, 1, func(int32) time.Duration { return 0 }); return err },
+		"Prune":     func() error { _, err := s.Prune(ctx, store.Retention{}, 1); return err },
+		"Purge": func() error {
+			_, err := s.Purge(ctx, store.PurgeRequest{Queue: "q", State: job.StateSucceeded, FinishedBefore: pgtest.Epoch})
+			return err
+		},
+		"Get":      func() error { _, err := s.Get(ctx, 1, ""); return err },
+		"ListDead": func() error { _, err := s.ListDead(ctx, "q", 0, 1); return err },
+		"Stats":    func() error { _, err := s.Stats(ctx, "q"); return err },
+		"Activity": func() error { _, err := s.Activity(ctx, "q"); return err },
+		"Snapshot": func() error { _, err := s.Snapshot(ctx); return err },
+	}
+	out := make(map[string]error, len(calls))
+	for name, call := range calls {
+		out[name] = call()
+	}
+	return out
+}
+
+func TestPGClassifiesConnectionErrors(t *testing.T) {
+	t.Run("a server that is not there", func(t *testing.T) {
+		pool, err := pgxpool.New(t.Context(), deadDSN(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(pool.Close)
+		for name, err := range everyCall(t.Context(), pgstore.New(pool)) {
+			if !errors.Is(err, store.ErrUnavailable) {
+				t.Errorf("%s: error = %v, want one wrapping store.ErrUnavailable", name, err)
+			}
+			if errors.Is(err, job.ErrInvalid) {
+				t.Errorf("%s: error = %v, which must not look like a caller's mistake", name, err)
+			}
+		}
+	})
+
+	t.Run("a pool that was closed", func(t *testing.T) {
+		pool := pgtest.NewDB(t)
+		s := pgstore.New(pool)
+		pool.Close()
+		for name, err := range everyCall(t.Context(), s) {
+			if !errors.Is(err, store.ErrUnavailable) {
+				t.Errorf("%s: error = %v, want one wrapping store.ErrUnavailable", name, err)
+			}
+		}
+	})
+
+	t.Run("a cancelled context", func(t *testing.T) {
+		s := pgstore.New(pgtest.NewDB(t))
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		for name, err := range everyCall(ctx, s) {
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("%s: error = %v, want one wrapping context.Canceled", name, err)
+			}
+			if errors.Is(err, store.ErrUnavailable) {
+				t.Errorf("%s: error = %v, which must not wrap store.ErrUnavailable: the caller gave up, the store did not fail", name, err)
+			}
+		}
+	})
+}
+
+func TestPGOpen(t *testing.T) {
+	dsn := pgtest.DSN(t)
+
+	pool, err := pgstore.Open(t.Context(), dsn, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	if got := pool.Config().MaxConns; got != 3 {
+		t.Errorf("MaxConns = %d, want 3", got)
+	}
+	var app string
+	if err := pool.QueryRow(t.Context(), "SHOW application_name").Scan(&app); err != nil || app != "jobqueue" {
+		t.Errorf("application_name = %q, %v; want jobqueue", app, err)
+	}
+
+	def, err := pgstore.Open(t.Context(), dsn, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(def.Close)
+	if got := def.Config().MaxConns; got < 1 {
+		t.Errorf("MaxConns for a limit of 0 = %d, want pgxpool's default", got)
+	}
+
+	if _, err := pgstore.Open(t.Context(), deadDSN(t), 2); !errors.Is(err, store.ErrUnavailable) {
+		t.Errorf("Open on a port nothing listens on: error = %v, want one wrapping store.ErrUnavailable", err)
+	}
+	if _, err := pgstore.Open(t.Context(), "not a url", 2); err == nil || errors.Is(err, store.ErrUnavailable) {
+		t.Errorf("Open on a malformed URL: error = %v, want a plain error", err)
+	}
+}
+
+// The reference store takes any instant as the bound of a purge, however far
+// from the present; so does pgstore, although the database cannot hold some of
+// them.
+func TestPGPurgeAcceptsAnyInstant(t *testing.T) {
+	pool := pgtest.NewDB(t)
+	s := pgstore.New(pool)
+	refs := leaseAll(t, 2, s)
+	if out, err := s.Complete(t.Context(), []store.CompleteRequest{{Ref: refs[0]}, {Ref: refs[1]}}); err != nil || slices.Contains(out, job.Fenced) {
+		t.Fatalf("Complete = %v, %v", out, err)
+	}
+	purge := func(before time.Time) int {
+		t.Helper()
+		n, err := s.Purge(t.Context(), store.PurgeRequest{Queue: "q", State: job.StateSucceeded, FinishedBefore: before})
+		if err != nil {
+			t.Fatalf("Purge(before %v): %v", before, err)
+		}
+		return n
+	}
+	for _, before := range []time.Time{{}, time.Unix(-1<<60, 0), pgtest.Epoch} {
+		if n := purge(before); n != 0 {
+			t.Errorf("Purge of jobs that finished before %v deleted %d, want 0", before, n)
+		}
+	}
+	if n := purge(time.Unix(1<<60, 0)); n != 2 {
+		t.Errorf("Purge of jobs that finished before the end of time deleted %d, want 2", n)
+	}
+}
+
+// planNode is the part of a node of EXPLAIN's JSON output that the test reads.
+type planNode struct {
+	NodeType       string     `json:"Node Type"`
+	Relation       string     `json:"Relation Name"`
+	ActualRows     float64    `json:"Actual Rows"`
+	ActualLoops    float64    `json:"Actual Loops"`
+	RemovedFilter  float64    `json:"Rows Removed by Filter"`
+	RemovedJoin    float64    `json:"Rows Removed by Join Filter"`
+	RemovedRecheck float64    `json:"Rows Removed by Index Recheck"`
+	Plans          []planNode `json:"Plans"`
+}
+
+// rowsRead is the number of rows of the jobs table that the plan below n read,
+// whether it kept them or threw them away.
+func (n planNode) rowsRead() float64 {
+	total := 0.0
+	if n.Relation == "jobs" {
+		total = n.ActualRows*n.ActualLoops + n.RemovedFilter + n.RemovedJoin + n.RemovedRecheck
+	}
+	for _, c := range n.Plans {
+		total += c.rowsRead()
+	}
+	return total
+}
+
+// The statements that run every second or on every poll must read the rows
+// they use and no others, however many rows the table holds. Each of them has a
+// formulation that reads the whole table when no job qualifies, which no
+// functional test sees, because the tables they use are small: a lease that
+// compares run_at with a joined clock, a reap that asks the primary key for the
+// lowest expired ids, a prune that does the same. This test fills the table
+// with rows that none of them may touch and bounds the rows each one reads;
+// Activity gets a queue with a backlog of due jobs as well, since it looks past
+// them for the next scheduled one.
+func TestPGHotStatementsDoNotScanTheTable(t *testing.T) {
+	pool := pgtest.NewDB(t)
+	// The test clock stands still at the epoch, so now is the epoch throughout.
+	for _, stmt := range []string{
+		// Ready, but scheduled for tomorrow or later: nothing is due.
+		`INSERT INTO jobqueue.jobs (queue, tenant, state, payload, run_at, attempts, max_attempts, created_at)
+		 SELECT 'q', 't' || (g % 10), 'ready', ''::bytea, jobqueue.now() + interval '1 day' + g * interval '1 second', 0, 25, jobqueue.now()
+		 FROM generate_series(1, 10000) g`,
+		// Finished an hour ago, younger than any retention used below.
+		`INSERT INTO jobqueue.jobs (queue, tenant, state, payload, run_at, attempts, max_attempts, created_at, finished_at)
+		 SELECT 'q', 't' || (g % 10), CASE WHEN g % 3 = 0 THEN 'dead' ELSE 'succeeded' END, ''::bytea,
+		        jobqueue.now(), 1, 25, jobqueue.now(), jobqueue.now() - interval '1 hour'
+		 FROM generate_series(1, 15000) g`,
+		// Leased until tomorrow: no lease has run out.
+		`INSERT INTO jobqueue.jobs (queue, tenant, state, payload, run_at, attempts, max_attempts, lease_epoch, lease_expires_at, leased_by, created_at)
+		 SELECT 'q', 't' || (g % 10), 'leased', ''::bytea, jobqueue.now(), 1, 25, 1, jobqueue.now() + interval '1 day', 'w', jobqueue.now()
+		 FROM generate_series(1, 5000) g`,
+		`ANALYZE jobqueue.jobs`,
+	} {
+		if _, err := pool.Exec(t.Context(), stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A backlog of due jobs in a second queue, and one job scheduled after it:
+	// Activity must find the one scheduled job without reading the backlog.
+	for _, stmt := range []string{
+		`INSERT INTO jobqueue.jobs (queue, tenant, state, payload, run_at, attempts, max_attempts, created_at)
+		 SELECT 'r', 't' || (g % 10), 'ready', ''::bytea, jobqueue.now() - interval '1 hour' + g * interval '1 millisecond', 0, 25, jobqueue.now()
+		 FROM generate_series(1, 10000) g`,
+		`INSERT INTO jobqueue.jobs (queue, tenant, state, payload, run_at, attempts, max_attempts, created_at)
+		 VALUES ('r', 'late', 'ready', ''::bytea, jobqueue.now() + interval '1 minute', 0, 25, jobqueue.now())`,
+		`ANALYZE jobqueue.jobs`,
+	} {
+		if _, err := pool.Exec(t.Context(), stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ttl := time.Minute.Microseconds()
+	for name, c := range map[string]struct {
+		sql  string
+		args []any
+	}{
+		"Lease of one tenant after another": {pgstore.TenantLeaseSQL, []any{"q", []string{"t1", "t2", "t3"}, []int32{5, 5, 5}, ttl, "w"}},
+		"Lease in FIFO order":               {pgstore.FIFOLeaseSQL, []any{"q", int32(10), ttl, "w"}},
+		"Reap":                              {pgstore.ReapSelectSQL, []any{int64(100)}},
+		"Prune":                             {pgstore.PruneSQL, []any{(24 * time.Hour).Microseconds(), (336 * time.Hour).Microseconds(), int64(100)}},
+		"Activity of a queue with scheduled jobs": {pgstore.ActivitySQL, []any{"q"}},
+		"Activity of a queue with a backlog":      {pgstore.ActivitySQL, []any{"r"}},
+	} {
+		// EXPLAIN ANALYZE runs the statement, so it runs in a transaction that
+		// is rolled back.
+		tx, err := pool.Begin(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var raw []byte
+		err = tx.QueryRow(t.Context(), "EXPLAIN (ANALYZE, FORMAT JSON) "+c.sql, c.args...).Scan(&raw)
+		_ = tx.Rollback(t.Context())
+		if err != nil {
+			t.Fatalf("%s: EXPLAIN: %v", name, err)
+		}
+		var plans []struct{ Plan planNode }
+		if err := json.Unmarshal(raw, &plans); err != nil || len(plans) != 1 {
+			t.Fatalf("%s: plan %s: %v", name, raw, err)
+		}
+		// A few rows may be read: the tenants of Activity, the probes of a lateral
+		// join. Anything near the size of the table is a scan.
+		if n := plans[0].Plan.rowsRead(); n > 100 {
+			t.Errorf("%s read %.0f rows of a table of 40000, only a few of which it needs; plan: %s", name, n, raw)
+		}
+	}
 }

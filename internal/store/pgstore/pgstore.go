@@ -3,7 +3,9 @@ package pgstore
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -73,6 +75,26 @@ func Open(ctx context.Context, url string, maxConns int32) (*pgxpool.Pool, error
 		return nil, classify("open", err)
 	}
 	return pool, nil
+}
+
+// invalid builds the error for an argument that is out of range.
+func invalid(field, reason string) error { return &job.InvalidError{Field: field, Reason: reason} }
+
+// validateLimit checks the limit of Reap, Prune and ListDead.
+func validateLimit(limit int) error {
+	if limit < 1 {
+		return invalid("limit", "must be at least 1, got "+strconv.Itoa(limit))
+	}
+	return nil
+}
+
+// validateRetention checks one retention period: not negative, and whole
+// microseconds like every duration that crosses the store boundary.
+func validateRetention(field string, d time.Duration) error {
+	if d < 0 || d%time.Microsecond != 0 {
+		return invalid(field, "must be a non-negative whole number of microseconds, got "+d.String())
+	}
+	return nil
 }
 
 // validateLease checks a lease request as a whole.

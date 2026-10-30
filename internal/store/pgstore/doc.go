@@ -18,6 +18,13 @@
 //   - A lease picks rows with FOR UPDATE SKIP LOCKED in a materialized CTE,
 //     so concurrent leases never see the same row and the planner cannot
 //     evaluate the pick twice.
+//   - A comparison with the clock that should bound an index range is written
+//     against (SELECT now FROM clock), which the planner evaluates once and
+//     uses as the bound; against a join with the clock it reads every row of the
+//     index and filters. Reap and Prune find their candidates through the index
+//     of the column they test and fetch the rows by id, because asked for the
+//     lowest ids directly, the planner walks the primary key. A test pins the
+//     rows each of these statements reads.
 //   - NULL stands for the zero time in lease_expires_at and finished_at, for
 //     the empty string in leased_by, idempotency_key and last_error, and for
 //     an empty result.

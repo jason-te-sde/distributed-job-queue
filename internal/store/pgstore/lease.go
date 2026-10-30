@@ -17,6 +17,11 @@ import (
 // that locks its rows with SKIP LOCKED, so that the planner cannot evaluate it
 // twice and get two different sets. ttl and worker are the numbers of the
 // parameters that hold the TTL in microseconds and the worker id.
+//
+// A pick compares run_at with (SELECT now FROM clock), not with a join to the
+// clock: the subquery is evaluated once and the planner can use it as the upper
+// bound of the index range, whereas a join would read every scheduled job of
+// the queue, in run_at order, and filter them one by one.
 func leaseSQL(pick string, ttl, worker int) string {
 	return fmt.Sprintf(`
 WITH clock AS MATERIALIZED (SELECT jobqueue.now() AS now),
@@ -37,8 +42,8 @@ var tenantLeaseSQL = leaseSQL(`
     SELECT p.id
     FROM unnest($2::text[], $3::int4[]) AS t(tenant, lim)
     CROSS JOIN LATERAL (
-        SELECT j.id FROM jobqueue.jobs j, clock
-        WHERE j.queue = $1 AND j.tenant = t.tenant AND j.state = 'ready' AND j.run_at <= clock.now
+        SELECT j.id FROM jobqueue.jobs j
+        WHERE j.queue = $1 AND j.tenant = t.tenant AND j.state = 'ready' AND j.run_at <= (SELECT now FROM clock)
         ORDER BY j.run_at, j.id
         LIMIT t.lim
         FOR UPDATE OF j SKIP LOCKED
@@ -49,8 +54,8 @@ var tenantLeaseSQL = leaseSQL(`
 //
 //	$1 queue, $2 limit, $3 TTL in microseconds, $4 worker
 var fifoLeaseSQL = leaseSQL(`
-    SELECT j.id FROM jobqueue.jobs j, clock
-    WHERE j.queue = $1 AND j.state = 'ready' AND j.run_at <= clock.now
+    SELECT j.id FROM jobqueue.jobs j
+    WHERE j.queue = $1 AND j.state = 'ready' AND j.run_at <= (SELECT now FROM clock)
     ORDER BY j.run_at, j.id
     LIMIT $2::int4
     FOR UPDATE OF j SKIP LOCKED`, 3, 4)

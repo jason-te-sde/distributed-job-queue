@@ -123,14 +123,15 @@ ready_tenants(tenant) AS (
     FROM ready_tenants r WHERE r.tenant IS NOT NULL
 ),
 due AS (
-    SELECT r.tenant FROM ready_tenants r, clock
+    SELECT r.tenant FROM ready_tenants r
     WHERE r.tenant IS NOT NULL
       AND EXISTS (SELECT 1 FROM jobqueue.jobs j
-                  WHERE j.queue = $1 AND j.tenant = r.tenant AND j.state = 'ready' AND j.run_at <= clock.now)
+                  WHERE j.queue = $1 AND j.tenant = r.tenant AND j.state = 'ready'
+                    AND j.run_at <= (SELECT now FROM clock))
 )
 SELECT (SELECT array_agg(due.tenant) FROM due),
-       (SELECT j.run_at FROM jobqueue.jobs j, clock
-        WHERE j.queue = $1 AND j.state = 'ready' AND j.run_at > clock.now
+       (SELECT j.run_at FROM jobqueue.jobs j
+        WHERE j.queue = $1 AND j.state = 'ready' AND j.run_at > (SELECT now FROM clock)
         ORDER BY j.run_at LIMIT 1),
        (SELECT now FROM clock)`
 
@@ -167,12 +168,62 @@ func compareBytes(a, b string) int {
 	return 0
 }
 
-// ListDead implements store.Store. It is not implemented yet.
-func (s *Store) ListDead(context.Context, string, int64, int) ([]job.Job, error) {
-	return nil, errNotImplemented
+// listDeadSQL is a keyset page of a queue's dead jobs, read through jobs_dead.
+//
+//	$1 queue, $2 id to start after, $3 limit
+const listDeadSQL = `SELECT ` + jobCols + ` FROM jobqueue.jobs j
+WHERE j.queue = $1 AND j.state = 'dead' AND j.id > $2
+ORDER BY j.id
+LIMIT $3::int8`
+
+// ListDead implements store.Store.
+func (s *Store) ListDead(ctx context.Context, queue string, afterID int64, limit int) ([]job.Job, error) {
+	if err := job.ValidateName("queue", queue); err != nil {
+		return nil, err
+	}
+	if err := validateLimit(limit); err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx, listDeadSQL, queue, afterID, int64(limit))
+	if err != nil {
+		return nil, classify("list dead", err)
+	}
+	jobs, err := collectJobs(rows)
+	if err != nil {
+		return nil, classify("list dead", err)
+	}
+	return jobs, nil
 }
 
-// Purge implements store.Store. It is not implemented yet.
-func (s *Store) Purge(context.Context, store.PurgeRequest) (int, error) {
-	return 0, errNotImplemented
+// Representable instants of the database: PostgreSQL's timestamptz covers the
+// years 4713 BC to 294276, but pgx refuses a time.Time outside what it can
+// encode. No job finishes outside the years 1 to 9999, so a bound beyond them
+// selects the same jobs as the nearest instant inside.
+var (
+	earliestBound = time.Date(1, 1, 1, 0, 0, 0, 0, time.UTC)
+	latestBound   = time.Date(9999, 12, 31, 23, 59, 59, 999999000, time.UTC)
+)
+
+// Purge implements store.Store.
+func (s *Store) Purge(ctx context.Context, req store.PurgeRequest) (int, error) {
+	if err := job.ValidateName("queue", req.Queue); err != nil {
+		return 0, err
+	}
+	if !req.State.Terminal() {
+		return 0, invalid("state", "must be a terminal state, got "+req.State.String())
+	}
+	before := job.NormalizeTime(req.FinishedBefore)
+	if before.Before(earliestBound) {
+		before = earliestBound
+	}
+	if before.After(latestBound) {
+		before = latestBound
+	}
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM jobqueue.jobs WHERE queue = $1 AND state = $2 AND finished_at < $3`,
+		req.Queue, req.State.String(), before)
+	if err != nil {
+		return 0, classify("purge", err)
+	}
+	return int(tag.RowsAffected()), nil
 }
