@@ -133,9 +133,10 @@ func (d *DRR) Plan(max int) []Take {
 }
 
 // Settle reports how many jobs each take really delivered, got[i] for
-// takes[i], which must be the result of the preceding Plan. A tenant that
-// delivered fewer jobs than asked has run out of work: it leaves the ring and
-// loses its deficit until it is activated again.
+// takes[i]. The takes come from an earlier Plan, not necessarily the latest:
+// several fetches can be in flight, and their plans may be settled in any
+// order. A tenant that delivered fewer jobs than asked has run out of work:
+// it leaves the ring and loses its deficit until it is activated again.
 //
 // Settle panics if got and takes differ in length.
 func (d *DRR) Settle(takes []Take, got []int) {
