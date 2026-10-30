@@ -1,0 +1,100 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Never download a toolchain: each job runs the Go version it asked for.
+  GOTOOLCHAIN: local
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.x
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  test:
+    name: test (go ${{ matrix.go }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.26.x", "1.27.x"]
+        os: [ubuntu-24.04, macos-15]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+      - name: go test -race
+        run: go test -race ./...
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-failures-${{ matrix.os }}-go${{ matrix.go }}
+          path: |
+            **/*.log
+            internal/sim/testdata/failures/**
+          if-no-files-found: ignore
+
+  hygiene:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Commit messages are scanned too, so the whole history is needed.
+          fetch-depth: 0
+      - name: Hygiene check and its tests
+        run: make hygiene test-scripts
+
+  clean-clone:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.x
+          cache: false
+      - name: Build and test a fresh clone with cold caches
+        run: |
+          set -euo pipefail
+          # Everything lives under RUNNER_TEMP so the upload step can find it.
+          clone="$RUNNER_TEMP/clean-clone"
+          git clone --no-hardlinks "$GITHUB_WORKSPACE" "$clone"
+          GOMODCACHE="$(mktemp -d "$RUNNER_TEMP/gomodcache.XXXXXX")"
+          GOCACHE="$(mktemp -d "$RUNNER_TEMP/gocache.XXXXXX")"
+          export GOMODCACHE GOCACHE
+          cd "$clone"
+          go build ./...
+          go test ./...
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: clean-clone-failures
+          path: |
+            ${{ runner.temp }}/clean-clone/**/*.log
+            ${{ runner.temp }}/clean-clone/internal/sim/testdata/failures/**
+          if-no-files-found: ignore

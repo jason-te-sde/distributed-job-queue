@@ -1,0 +1,88 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - depguard
+    - forbidigo
+    - exhaustive
+    - gochecksumtype
+    - revive
+    - errorlint
+    - bodyclose
+    - misspell
+    - unconvert
+    - nolintlint
+  settings:
+    depguard:
+      rules:
+        core:
+          files:
+            - "**/internal/core/**"
+          list-mode: lax
+          allow:
+            - math/rand/v2
+          deny:
+            - pkg: os
+              desc: "core is pure: effects are returned, not performed"
+            - pkg: net
+              desc: "core is pure: effects are returned, not performed"
+            - pkg: sync
+              desc: "core is pure: effects are returned, not performed"
+            - pkg: sync/atomic
+              desc: "core is pure: effects are returned, not performed"
+            - pkg: syscall
+              desc: "core is pure: effects are returned, not performed"
+            - pkg: unsafe
+              desc: "core is pure: effects are returned, not performed"
+            - pkg: math/rand
+              desc: "core is pure: effects are returned, not performed"
+            - pkg: crypto/rand
+              desc: "core is pure: effects are returned, not performed"
+            - pkg: log
+              desc: "core is pure: effects are returned, not performed"
+            - pkg: log/slog
+              desc: "core is pure: effects are returned, not performed"
+            - pkg: runtime
+              desc: "core is pure: effects are returned, not performed"
+            - pkg: reflect
+              desc: "core is pure: effects are returned, not performed"
+            - pkg: io/ioutil
+              desc: "core is pure: effects are returned, not performed"
+        main:
+          files:
+            - "$all"
+            - "!$test"
+            - "!**/bench/**"
+          deny:
+            - pkg: pgregory.net/rapid
+              desc: test-only dependency
+            - pkg: golang.org/x/tools
+              desc: test-only dependency
+            - pkg: github.com/Shopify/toxiproxy
+              desc: test-only dependency
+    exhaustive:
+      default-signifies-exhaustive: false
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: ^time\.(Now|Since|Until|After|AfterFunc|Sleep|Tick|NewTimer|NewTicker)$
+        - pattern: ^rand\.(Int|IntN|Int32|Int32N|Int64|Int64N|Uint|Uint32|Uint32N|Uint64|Uint64N|UintN|Float32|Float64|N|Perm|Shuffle|ExpFloat64|NormFloat64)$
+    gochecksumtype:
+      default-signifies-exhaustive: false
+    nolintlint:
+      require-explanation: true
+    revive:
+      rules:
+        - name: exported
+        - name: package-comments
+  exclusions:
+    rules:
+      - path-except: internal/core/
+        linters:
+          - forbidigo
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
