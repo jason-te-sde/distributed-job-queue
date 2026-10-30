@@ -99,27 +99,33 @@ func applyFuzzOp(kind byte, j Job, now time.Time, token int64, p byte) (out Job,
 	return out, o, true
 }
 
-// fuzzSeed encodes a start row followed by every operation once with the
-// matching token and no time step.
-func fuzzSeed(state State, epoch, attempts, maxAttempts byte, runOffset, leaseOffset int8) []byte {
+// fuzzSeed encodes a start row followed by every operation once with no time
+// step. tok is the token byte of each operation: below 0x80 it names that
+// token, and with the top bit set it means the job's current epoch.
+func fuzzSeed(state State, epoch, attempts, maxAttempts byte, runOffset, leaseOffset int8, tok byte) []byte {
 	b := []byte{byte(state - StateReady), epoch, attempts, maxAttempts, byte(runOffset), byte(leaseOffset)}
 	for kind := byte(0); kind < fuzzOps; kind++ {
-		b = append(b, kind, 0x80, 0, 0)
+		b = append(b, kind, tok, 0, 0)
 	}
 	return b
 }
 
 func FuzzTransitions(f *testing.F) {
-	// The nine rows of the matrix, with epoch 7 and fuzzStart as now.
-	f.Add(fuzzSeed(StateReady, 7, 0, 5, 0, 0))
-	f.Add(fuzzSeed(StateReady, 7, 0, 5, 1, 0))
-	f.Add(fuzzSeed(StateLeased, 7, 1, 5, 0, 10))
-	f.Add(fuzzSeed(StateLeased, 7, 1, 5, 0, -1))
-	f.Add(fuzzSeed(StateLeased, 8, 1, 5, 0, 10))
-	f.Add(fuzzSeed(StateSucceeded, 7, 1, 5, 0, -1))
-	f.Add(fuzzSeed(StateSucceeded, 8, 1, 5, 0, -1))
-	f.Add(fuzzSeed(StateDead, 7, 5, 5, 0, -1))
-	f.Add(fuzzSeed(StateCancelled, 7, 1, 5, 0, -1))
+	// The nine rows of the matrix, which fixes the token at 7 and the time
+	// at fuzzStart, each run twice: once with token 7 as the matrix has it,
+	// and once presenting whatever epoch the job has when the operation
+	// runs, so that the leased path is walked after a Lease.
+	for _, tok := range []byte{7, 0x80} {
+		f.Add(fuzzSeed(StateReady, 7, 0, 5, 0, 0, tok))
+		f.Add(fuzzSeed(StateReady, 7, 0, 5, 1, 0, tok))
+		f.Add(fuzzSeed(StateLeased, 7, 1, 5, 0, 10, tok))
+		f.Add(fuzzSeed(StateLeased, 7, 1, 5, 0, -1, tok))
+		f.Add(fuzzSeed(StateLeased, 8, 1, 5, 0, 10, tok))
+		f.Add(fuzzSeed(StateSucceeded, 7, 1, 5, 0, -1, tok))
+		f.Add(fuzzSeed(StateSucceeded, 8, 1, 5, 0, -1, tok))
+		f.Add(fuzzSeed(StateDead, 7, 5, 5, 0, -1, tok))
+		f.Add(fuzzSeed(StateCancelled, 7, 1, 5, 0, -1, tok))
+	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		src := &byteSource{b: data}
 		cur := decodeStart(src)
