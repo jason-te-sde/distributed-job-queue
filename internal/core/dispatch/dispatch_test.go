@@ -170,20 +170,53 @@ func TestArriveOnKnownEmptyQueueWaits(t *testing.T) {
 }
 
 func TestNotifyWakesOldestWaiter(t *testing.T) {
-	c := parked(t, Config{MaxInFlight: 1}, 1, 2)
+	c := parked(t, Config{}, 1, 2)
 	effs := c.Notify(0, testQueue)
-	wantEffects(t, effs, Fetch{Waiter: 1, Queue: testQueue, Max: 8}, Arm{At: 20 * sec}) // waiter 2 waits on
+	wantEffects(t, effs, Fetch{Waiter: 1, Queue: testQueue, Max: 8}, Arm{At: sec}) // waiter 2 waits on
 	wantCounts(t, c, testQueue, 1, 1)
 }
 
-func TestNotifyFillsFreeSlotsOldestFirst(t *testing.T) {
-	c := parked(t, Config{MaxInFlight: 2}, 1, 2, 3)
-	effs := c.Notify(0, testQueue)
-	wantEffects(t, effs,
-		Fetch{Waiter: 1, Queue: testQueue, Max: 8},
-		Fetch{Waiter: 2, Queue: testQueue, Max: 8},
-		Arm{At: 20 * sec}, // waiter 3 waits and the queue is saturated: no poll instant
-	)
+func TestNotifyStartsOneFetchPerNotification(t *testing.T) {
+	// Four fetch slots and three parked waiters: each notification still
+	// wakes one waiter, the oldest, so wakeups follow the work.
+	c := parked(t, Config{MaxInFlight: 4}, 1, 2, 3)
+	wantEffects(t, c.Notify(0, testQueue), Fetch{Waiter: 1, Queue: testQueue, Max: 8}, Arm{At: sec})
+	wantEffects(t, c.Notify(0, testQueue), Fetch{Waiter: 2, Queue: testQueue, Max: 8}, Arm{At: sec})
+	wantEffects(t, c.Notify(0, testQueue), Fetch{Waiter: 3, Queue: testQueue, Max: 8})
+	wantEffects(t, c.Notify(0, testQueue)) // nobody is left to wake
+	wantCounts(t, c, testQueue, 0, 3)
+}
+
+func TestPollStartsOneFetch(t *testing.T) {
+	c := parked(t, Config{}, 1, 2, 3)
+	effs := c.Tick(sec)
+	wantEffects(t, effs, Fetch{Waiter: 1, Queue: testQueue, Max: 8, Waited: sec}, Arm{At: 2 * sec})
+	wantCounts(t, c, testQueue, 2, 1)
+}
+
+func TestDueWakeStartsOneFetch(t *testing.T) {
+	c := parked(t, Config{PollInterval: time.Hour}, 1, 2, 3)
+	wantArm(t, c.DueAt(0, testQueue, 5*sec), 5*sec)
+	effs := c.Tick(5 * sec)
+	wantEffects(t, effs, Fetch{Waiter: 1, Queue: testQueue, Max: 8, Waited: 5 * sec}, Arm{At: 5*sec + time.Hour})
+	wantCounts(t, c, testQueue, 2, 1)
+}
+
+func TestPollAndDueTogetherStartOneFetch(t *testing.T) {
+	c := parked(t, Config{}, 1, 2, 3)
+	c.DueAt(0, testQueue, sec)
+	effs := c.Tick(sec)
+	wantEffects(t, effs, Fetch{Waiter: 1, Queue: testQueue, Max: 8, Waited: sec}, Arm{At: 2 * sec})
+}
+
+func TestArriveFetchesForTheOldestParkedWaiter(t *testing.T) {
+	// A notification woke waiter 1 and left 2 and 3 parked on an open queue.
+	// An arrival gets the next fetch slot in line behind them, not ahead.
+	c := parked(t, Config{}, 1, 2, 3)
+	c.Notify(0, testQueue)
+	effs := c.Arrive(0, wt(4, 0))
+	wantEffects(t, effs, Fetch{Waiter: 2, Queue: testQueue, Max: 8}, Arm{At: sec})
+	wantCounts(t, c, testQueue, 2, 2)
 }
 
 func TestNotifyOnIdleQueueIsHarmless(t *testing.T) {
@@ -216,17 +249,90 @@ func TestPartialFetchStopsChain(t *testing.T) {
 	wantCounts(t, c, testQueue, 1, 0)
 }
 
-func TestFullBatchChainsPastTheEmptyAnswer(t *testing.T) {
-	// The queue is known empty and a wakeup starts two fetches. One comes
-	// back full, so the next waiter is fetched. The other comes back partial,
-	// which closes the queue again: waiter 4 waits.
-	c := parked(t, Config{MaxInFlight: 2}, 1, 2, 3, 4)
-	c.Notify(0, testQueue) // fetches 1 and 2
+func TestFullBatchChainsExactlyOneWaiter(t *testing.T) {
+	c := parked(t, Config{}, 1, 2, 3, 4)
+	c.Notify(0, testQueue) // fetches 1
+	c.Notify(0, testQueue) // fetches 2
 	effs := c.FetchDone(0, 1, 8, false)
-	wantEffects(t, effs, Deliver{Waiter: 1}, Fetch{Waiter: 3, Queue: testQueue, Max: 8}, Arm{At: 20 * sec})
-	effs = c.FetchDone(0, 2, 1, false)
+	wantEffects(t, effs, Deliver{Waiter: 1}, Fetch{Waiter: 3, Queue: testQueue, Max: 8}, Arm{At: sec})
+	effs = c.FetchDone(0, 3, 8, false)
+	wantEffects(t, effs, Deliver{Waiter: 3}, Fetch{Waiter: 4, Queue: testQueue, Max: 8})
+}
+
+func TestFullBatchReopensQueueClosedByPartialOne(t *testing.T) {
+	// Two fetches are out. The partial answer closes the queue, so no waiter
+	// is chained. The full answer that follows reopens it and chains one.
+	c := parked(t, Config{}, 1, 2, 3, 4)
+	c.Notify(0, testQueue) // fetches 1
+	c.Notify(0, testQueue) // fetches 2
+	effs := c.FetchDone(0, 2, 1, false)
 	wantEffects(t, effs, Deliver{Waiter: 2}, Arm{At: sec})
+	effs = c.FetchDone(0, 1, 8, false)
+	wantEffects(t, effs, Deliver{Waiter: 1}, Fetch{Waiter: 3, Queue: testQueue, Max: 8}, Arm{At: sec})
 	wantCounts(t, c, testQueue, 1, 1)
+}
+
+func TestFailedFetchDoesNotChainAndThePollServesTheNextWaiter(t *testing.T) {
+	c := New(Config{MaxInFlight: 1})
+	c.Arrive(0, wt(1, 0))
+	c.Arrive(0, wt(2, 0))
+	effs := c.FetchDone(0, 1, 0, true)
+	wantEffects(t, effs, Respond{Waiter: 1, Reason: ReasonUnavailable}, Arm{At: sec})
+
+	// Waiter 2 was never fetched for. The poll gives it its fetch.
+	effs = c.Tick(sec)
+	wantEffects(t, effs, Fetch{Waiter: 2, Queue: testQueue, Max: 8, Waited: sec})
+}
+
+func TestNeverFetchedWaiterIsNotTimedOutByTick(t *testing.T) {
+	// The only fetch slot is busy, so a waiter that asked for no wait is
+	// parked without a fetch. Tick must not tell it "nothing" before a fetch
+	// has looked for it: it gets its one fetch when the slot frees.
+	c := New(Config{MaxInFlight: 1})
+	wantEffects(t, c.Arrive(0, wt(1, 0)), Fetch{Waiter: 1, Queue: testQueue, Max: 8})
+	w := wt(2, 0)
+	w.Deadline = w.Arrived
+	wantEffects(t, c.Arrive(0, w)) // parked: nothing to fetch with, nothing to arm
+	wantEffects(t, c.Tick(5*sec))  // far past its deadline: still not answered
+
+	effs := c.FetchDone(5*sec, 1, 8, false)
+	wantEffects(t, effs, Deliver{Waiter: 1}, Fetch{Waiter: 2, Queue: testQueue, Max: 8, Waited: 5 * sec})
+	wantEffects(t, c.FetchDone(5*sec, 2, 0, false), Respond{Waiter: 2, Reason: ReasonTimeout})
+	wantCounts(t, c, testQueue, 0, 0)
+}
+
+func TestFetchedWaiterTimesOutWhileAnotherFetchHasTheQueueOpen(t *testing.T) {
+	// Waiters 1 and 2 have both been fetched for and wait on a queue known to
+	// be empty. A poll opens the queue with a fetch for waiter 1. Waiter 2
+	// has been looked for, so its deadline still counts.
+	c := New(Config{})
+	c.Arrive(0, wt(1, 0))
+	c.FetchDone(0, 1, 0, false)
+	c.Notify(0, testQueue) // fetches 1
+	w := wt(2, 0)
+	w.Deadline = 1500 * time.Millisecond
+	wantEffects(t, c.Arrive(0, w), Fetch{Waiter: 2, Queue: testQueue, Max: 8})
+	c.FetchDone(0, 1, 0, false)
+	c.FetchDone(0, 2, 0, false)
+
+	effs := c.Tick(sec)
+	wantEffects(t, effs, Fetch{Waiter: 1, Queue: testQueue, Max: 8, Waited: sec}, Arm{At: 1500 * time.Millisecond})
+	wantEffects(t, c.Tick(1500*time.Millisecond), Respond{Waiter: 2, Reason: ReasonTimeout})
+}
+
+func TestParkedWaiterIsTimedOutOnceTheQueueIsKnownEmpty(t *testing.T) {
+	// A waiter parked behind a busy slot is covered as soon as the queue
+	// is known to be empty: that is what a waiter arriving at such a queue
+	// is told at once.
+	c := New(Config{MaxInFlight: 1, PollInterval: time.Hour})
+	c.Arrive(0, wt(1, 0))
+	w := wt(2, 0)
+	w.Deadline = 5 * sec
+	wantEffects(t, c.Arrive(0, w))
+	wantEffects(t, c.Tick(5*sec)) // the queue is open: not answered
+
+	wantArm(t, c.FetchDone(5*sec, 1, 0, false), 5*sec)
+	wantEffects(t, c.Tick(5*sec), Respond{Waiter: 2, Reason: ReasonTimeout}, Arm{At: 20 * sec})
 }
 
 func TestInFlightBounded(t *testing.T) {
@@ -634,16 +740,16 @@ func TestArmIgnoresFetchingWaiters(t *testing.T) {
 func TestArmDoesNotSpinWhileFetchesSaturate(t *testing.T) {
 	c := New(Config{MaxInFlight: 1})
 	c.Arrive(0, wt(1, 0))
-	wantArm(t, c.Arrive(0, wt(2, 0)), 20*sec) // the poll could not start a fetch
+	wantEffects(t, c.Arrive(0, wt(2, 0))) // the poll could not start a fetch: nothing to arm
 
 	effs := c.Tick(5 * sec) // far past the poll interval
-	wantEffects(t, effs, Arm{At: 20 * sec})
+	wantEffects(t, effs)
 
 	// Once the slot frees, the overdue poll is due at once.
 	effs = c.FetchDone(5*sec, 1, 0, false)
 	wantEffects(t, effs, Arm{At: sec})
 	effs = c.Tick(5 * sec)
-	wantEffects(t, effs, Fetch{Waiter: 1, Queue: testQueue, Max: 8, Waited: 5 * sec}, Arm{At: 20 * sec})
+	wantEffects(t, effs, Fetch{Waiter: 1, Queue: testQueue, Max: 8, Waited: 5 * sec})
 }
 
 // parkedOnQueues returns a core with four waiters parked on three queues, in

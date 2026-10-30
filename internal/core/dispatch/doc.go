@@ -4,10 +4,14 @@
 // A worker that asks for jobs becomes a waiter. The core keeps the waiters of
 // each queue in arrival order and starts a fetch for the oldest one only
 // when there is reason to believe the queue holds work: a notification, a
-// due job, a fallback poll, or a previous fetch that came back full. A full
-// batch chains the next waiter and a partial one stops, so the number of
-// fetches follows the amount of work, and at most MaxInFlight fetches per
-// queue run at once.
+// due job, a fallback poll, or a previous fetch that came back full. Every
+// such event starts at most one fetch. A full batch chains the next waiter
+// and a partial one stops, so the number of fetches follows the amount of
+// work, and at most MaxInFlight fetches per queue run at once.
+//
+// A waiter is never told "nothing" before something has looked for it: Tick
+// times out only a waiter that a fetch has served, or one whose queue is
+// known to be empty. Any other waiter waits for its turn at a fetch slot.
 //
 // The core is pure. It holds no clock, no lock and no store. Every method
 // takes the current monotonic instant and returns effects for the shell to

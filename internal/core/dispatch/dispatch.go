@@ -60,6 +60,8 @@ const (
 type entry struct {
 	w     Waiter
 	state waiterState
+	// fetched says that a Fetch was issued for the waiter at least once.
+	fetched bool
 }
 
 // queueState is what the core knows about one queue.
@@ -80,6 +82,14 @@ type queueState struct {
 	// dueAt is the instant the queue's next scheduled job becomes due, or
 	// zero when there is none.
 	dueAt Mono
+}
+
+// covered reports whether the parked waiter e may be told that there are no
+// jobs: a fetch has looked for it, or the queue is known to be empty, which is
+// what a waiter arriving at such a queue is told at once. A waiter that is
+// not covered is waiting for its turn at a fetch slot.
+func (q *queueState) covered(e *entry) bool {
+	return e.fetched || q.knownEmpty
 }
 
 // oldestWaiting returns the oldest parked entry, or nil.
@@ -125,10 +135,11 @@ func New(cfg Config) *Core {
 	return &Core{cfg: cfg, queues: map[string]*queueState{}, waiters: map[WaiterID]*entry{}}
 }
 
-// Arrive registers a waiter. It is fetched for at once unless the queue is
-// known to be empty or already has MaxInFlight fetches out. After Drain the
-// waiter is rejected instead, and a waiter that asked for no wait on a queue
-// known to be empty is answered with no jobs at once.
+// Arrive registers a waiter. At most one fetch starts, for the oldest parked
+// waiter, which is the new one unless an older one is still parked: none
+// starts if the queue is known to be empty or already has MaxInFlight fetches
+// out. After Drain the waiter is rejected instead, and a waiter that asked
+// for no wait on a queue known to be empty is answered with no jobs at once.
 //
 // Arrive panics if w.ID belongs to a live waiter, which is a bug in the
 // shell.
@@ -148,7 +159,7 @@ func (c *Core) Arrive(now Mono, w Waiter) []Effect {
 	c.waiters[w.ID] = e
 
 	effs := c.pump(now, q, nil)
-	if e.state == stateWaiting && q.knownEmpty && w.Deadline == w.Arrived {
+	if e.state == stateWaiting && q.covered(e) && w.Deadline == w.Arrived {
 		c.forget(q, e)
 		effs = append(effs, Respond{Waiter: w.ID, Reason: ReasonTimeout})
 	}
@@ -156,7 +167,8 @@ func (c *Core) Arrive(now Mono, w Waiter) []Effect {
 }
 
 // Notify reports that jobs may have become ready on a queue. It wakes the
-// oldest waiter, and more while fetch slots are free.
+// oldest parked waiter and no more: a notification starts at most one fetch,
+// so the wakeups follow the work, and a full batch chains the next waiter.
 func (c *Core) Notify(now Mono, queue string) []Effect {
 	q, ok := c.queues[queue]
 	if !ok {
@@ -186,9 +198,10 @@ func (c *Core) DueAt(now Mono, queue string, at Mono) []Effect {
 
 // FetchDone reports the result of the fetch for waiter id: got jobs, or a
 // failure, in which case got is ignored. It answers the waiter, releases
-// the jobs if the waiter was cancelled meanwhile, and lets the queue chain
-// the next waiter when the batch was full. A call for a waiter with no
-// fetch out changes nothing.
+// the jobs if the waiter was cancelled meanwhile, and chains one fetch for
+// the next parked waiter, but only when the batch was full or a notification
+// came in since the last fetch started. A call for a waiter with no fetch out
+// changes nothing.
 func (c *Core) FetchDone(now Mono, id WaiterID, got int, failed bool) []Effect {
 	e, ok := c.waiters[id]
 	if !ok || e.state == stateWaiting {
@@ -224,15 +237,19 @@ func (c *Core) FetchDone(now Mono, id WaiterID, got int, failed bool) []Effect {
 		e.state = stateWaiting // back in its original place
 	}
 
+	full := !failed && got >= e.w.Max
 	if !failed {
 		switch {
-		case got >= e.w.Max:
+		case full:
 			q.knownEmpty = false
 		case !q.dirty:
 			q.knownEmpty = true
 		}
 	}
-	return c.arm(c.pump(now, q, effs))
+	if full || q.dirty {
+		effs = c.pump(now, q, effs)
+	}
+	return c.arm(effs)
 }
 
 // Cancel reports that the client of waiter id went away. A parked waiter is
@@ -252,21 +269,23 @@ func (c *Core) Cancel(now Mono, id WaiterID) []Effect {
 }
 
 // Tick is called when the armed instant arrives. For every queue, in name
-// order, it times out the waiters whose deadline has passed, then wakes the
-// queue if a poll interval has passed since its last fetch or its due time
-// has arrived.
+// order, it times out the covered waiters whose deadline has passed, then
+// wakes the queue, with at most one fetch, if a poll interval has passed
+// since its last fetch or its due time has arrived. A waiter that is not
+// covered, that is one no fetch has looked for on a queue not known to be
+// empty, is not timed out: it waits for its fetch.
 func (c *Core) Tick(now Mono) []Effect {
 	var effs []Effect
 	for _, name := range slices.Sorted(maps.Keys(c.queues)) {
 		q := c.queues[name]
-		effs = c.answerParked(q, func(e *entry) bool { return e.w.Deadline <= now }, ReasonTimeout, effs)
+		effs = c.answerParked(q, func(e *entry) bool { return e.w.Deadline <= now && q.covered(e) }, ReasonTimeout, effs)
 
-		if q.oldestWaiting() != nil && now-q.lastFetch >= c.cfg.PollInterval {
-			q.knownEmpty = false
-			effs = c.pump(now, q, effs)
-		}
+		wake := q.oldestWaiting() != nil && now-q.lastFetch >= c.cfg.PollInterval
 		if q.dueAt != 0 && q.dueAt <= now {
 			q.dueAt = 0
+			wake = true
+		}
+		if wake {
 			q.knownEmpty = false
 			effs = c.pump(now, q, effs)
 		}
@@ -351,37 +370,40 @@ func (c *Core) answerParked(q *queueState, due func(*entry) bool, reason Reason,
 	return effs
 }
 
-// pump starts fetches for the oldest parked waiters of q, as long as a fetch
-// slot is free and the queue is not known to be empty. A notification that
-// came in since the last fetch started counts as news even then.
+// pump starts one fetch for the oldest parked waiter of q, if a fetch slot is
+// free and the queue is not known to be empty. A notification that came in
+// since the last fetch started counts as news even then. It never starts
+// more than one: every event that reaches it, an arrival, a notification, a
+// poll, a due time or a finished fetch, is worth one fetch at most, which
+// keeps the wakeups proportional to the work. Arrivals under load still fill
+// the free slots, one per arrival.
 func (c *Core) pump(now Mono, q *queueState, effs []Effect) []Effect {
-	if c.draining {
+	if c.draining || q.inFlight >= c.cfg.MaxInFlight || (q.knownEmpty && !q.dirty) {
 		return effs
 	}
-	for q.inFlight < c.cfg.MaxInFlight && (!q.knownEmpty || q.dirty) {
-		e := q.oldestWaiting()
-		if e == nil {
-			break
-		}
-		e.state = stateFetching
-		q.inFlight++
-		q.lastFetch = now
-		q.dirty = false
-		effs = append(effs, Fetch{
-			Waiter: e.w.ID,
-			Queue:  e.w.Queue,
-			Max:    e.w.Max,
-			Waited: now - e.w.Arrived,
-		})
+	e := q.oldestWaiting()
+	if e == nil {
+		return effs
 	}
-	return effs
+	e.state = stateFetching
+	e.fetched = true
+	q.inFlight++
+	q.lastFetch = now
+	q.dirty = false
+	return append(effs, Fetch{
+		Waiter: e.w.ID,
+		Queue:  e.w.Queue,
+		Max:    e.w.Max,
+		Waited: now - e.w.Arrived,
+	})
 }
 
 // arm appends the Arm effect: the earliest instant at which Tick has work. A
-// parked waiter counts through its deadline. The poll of a queue and the due
-// time of a queue count while a waiter is parked on it, and the poll only
-// while a fetch slot is free, because a poll cannot start a fetch otherwise
-// and would make the shell spin.
+// parked waiter counts through its deadline once it is covered, because Tick
+// does not time out a waiter that is waiting for its fetch. The poll of a
+// queue and the due time of a queue count while a waiter is parked on it, and
+// the poll only while a fetch slot is free, because a poll cannot start a
+// fetch otherwise and would make the shell spin.
 func (c *Core) arm(effs []Effect) []Effect {
 	var at Mono
 	var armed bool
@@ -395,7 +417,9 @@ func (c *Core) arm(effs []Effect) []Effect {
 		for _, e := range q.waiters {
 			if e.state == stateWaiting {
 				parked = true
-				earliest(e.w.Deadline)
+				if q.covered(e) {
+					earliest(e.w.Deadline)
+				}
 			}
 		}
 		if !parked {

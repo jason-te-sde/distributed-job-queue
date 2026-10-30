@@ -28,6 +28,7 @@ type modelWaiter struct {
 	phase             phase
 	answers           int  // Deliver, Respond and Release effects addressed to it
 	cancelledFetching bool // cancelled while a fetch was out
+	fetched           bool // a Fetch was ever issued for it
 }
 
 // fetchDone describes the FetchDone call whose effects are being checked.
@@ -36,6 +37,7 @@ type fetchDone struct {
 	prev   phase // the phase before the call: phFetching or phGone
 	got    int   // what the core is told it holds: 0 when the fetch failed
 	failed bool
+	full   bool // the fetch found as many jobs as the waiter asked for
 }
 
 // model drives a Core with random calls and checks every effect against its
@@ -50,6 +52,14 @@ type model struct {
 	queues   []string
 	waiters  map[WaiterID]*modelWaiter
 	draining bool
+
+	// notified marks the queues notified since their last Fetch: an upper
+	// bound of what the core calls dirty.
+	notified map[string]bool
+	// preEmpty is what the core knew before the current call: whether each
+	// queue was known to be empty. It is read from the core's own state,
+	// because "known empty" is not visible through any call.
+	preEmpty map[string]bool
 }
 
 func TestDispatchProperties(t *testing.T) {
@@ -59,11 +69,12 @@ func TestDispatchProperties(t *testing.T) {
 			PollInterval: time.Duration(rapid.IntRange(100, 3000).Draw(rt, "pollMs")) * time.Millisecond,
 		}
 		m := &model{
-			t:       rt,
-			c:       New(cfg),
-			maxFly:  cfg.MaxInFlight,
-			next:    1,
-			waiters: map[WaiterID]*modelWaiter{},
+			t:        rt,
+			c:        New(cfg),
+			maxFly:   cfg.MaxInFlight,
+			next:     1,
+			waiters:  map[WaiterID]*modelWaiter{},
+			notified: map[string]bool{},
 		}
 		for i := range rapid.IntRange(1, 3).Draw(rt, "queues") {
 			m.queues = append(m.queues, fmt.Sprintf("q%d", i))
@@ -115,11 +126,13 @@ func (m *model) arrive() {
 		Deadline: m.now + wait,
 	}
 	m.waiters[id] = &modelWaiter{w: w, phase: phWaiting}
-	m.check("Arrive", m.c.Arrive(m.now, w), nil)
+	m.call("Arrive", nil, func() []Effect { return m.c.Arrive(m.now, w) })
 }
 
 func (m *model) notify() {
-	m.check("Notify", m.c.Notify(m.now, m.queue()), nil)
+	q := m.queue()
+	m.notified[q] = true
+	m.call("Notify", nil, func() []Effect { return m.c.Notify(m.now, q) })
 }
 
 func (m *model) dueAt() {
@@ -128,7 +141,7 @@ func (m *model) dueAt() {
 	if rapid.IntRange(0, 5).Draw(m.t, "dueKind") > 0 {
 		at = max(m.now+time.Duration(rapid.IntRange(-2000, 10_000).Draw(m.t, "dueDeltaMs"))*time.Millisecond, 1)
 	}
-	m.check("DueAt", m.c.DueAt(m.now, q, at), nil)
+	m.call("DueAt", nil, func() []Effect { return m.c.DueAt(m.now, q, at) })
 }
 
 // outstanding returns the waiters whose fetch is out, in id order.
@@ -161,7 +174,8 @@ func (m *model) completeFetch(id WaiterID) {
 	if failed {
 		fd.got = 0 // a failed fetch holds nothing, whatever the shell passes
 	}
-	m.check("FetchDone", m.c.FetchDone(m.now, id, got, failed), fd)
+	fd.full = !failed && got == mw.w.Max
+	m.call("FetchDone", fd, func() []Effect { return m.c.FetchDone(m.now, id, got, failed) })
 }
 
 func (m *model) cancel() {
@@ -179,17 +193,33 @@ func (m *model) cancel() {
 	case phGone, phCancelled, phDone:
 		// Cancelling twice, or after the answer, does nothing.
 	}
-	m.check("Cancel", m.c.Cancel(m.now, id), nil)
+	m.call("Cancel", nil, func() []Effect { return m.c.Cancel(m.now, id) })
 }
 
 func (m *model) tick() {
 	m.now += time.Duration(rapid.IntRange(0, 5000).Draw(m.t, "tickPauseMs")) * time.Millisecond
-	m.check("Tick", m.c.Tick(m.now), nil)
+	m.call("Tick", nil, func() []Effect { return m.c.Tick(m.now) })
 }
 
 func (m *model) drain() {
 	m.draining = true
-	m.check("Drain", m.c.Drain(m.now), nil)
+	m.call("Drain", nil, func() []Effect { return m.c.Drain(m.now) })
+}
+
+// knownEmpty reads whether the core holds the queue as known empty.
+func (m *model) knownEmpty(queue string) bool {
+	q, ok := m.c.queues[queue]
+	return ok && q.knownEmpty
+}
+
+// call runs one core call and checks its effects.
+func (m *model) call(op string, fd *fetchDone, f func() []Effect) {
+	m.t.Helper()
+	m.preEmpty = map[string]bool{}
+	for _, q := range m.queues {
+		m.preEmpty[q] = m.knownEmpty(q)
+	}
+	m.check(op, f(), fd)
 }
 
 // answer records that waiter id received a Deliver, Respond or Release.
@@ -244,6 +274,16 @@ func (m *model) check(op string, effs []Effect, fd *fetchDone) {
 	fromFetch := func(id WaiterID, prev phase) bool {
 		return fd != nil && id == fd.id && fd.prev == prev
 	}
+	// Whether a waiter was parked on the queue of a FetchDone before the call.
+	var parkedBehind bool
+	if fd != nil {
+		for id, mw := range m.waiters {
+			if id != fd.id && mw.phase == phWaiting && mw.w.Queue == m.waiters[fd.id].w.Queue {
+				parkedBehind = true
+			}
+		}
+	}
+	fetchesByQueue := map[string]int{}
 
 	var arm Mono
 	var armSeen bool
@@ -262,7 +302,15 @@ func (m *model) check(op string, effs []Effect, fd *fetchDone) {
 				fail("Fetch %s does not match the waiter %+v", describe(e), mw.w)
 			case e.Waited != m.now-mw.w.Arrived:
 				fail("Fetch.Waited = %s, want %s", e.Waited, m.now-mw.w.Arrived)
+			case op == "FetchDone" && !fd.full && !m.notified[e.Queue]:
+				fail("FetchDone chained a fetch without a full batch or a notification")
 			}
+			fetchesByQueue[e.Queue]++
+			if fetchesByQueue[e.Queue] > 1 {
+				fail("more than one Fetch for queue %s from one %s", e.Queue, op)
+			}
+			delete(m.notified, e.Queue)
+			mw.fetched = true
 			mw.phase = phFetching
 		case Deliver:
 			if !fromFetch(e.Waiter, phFetching) || fd.got == 0 {
@@ -289,6 +337,9 @@ func (m *model) check(op string, effs []Effect, fd *fetchDone) {
 				}
 				if op == "FetchDone" && (fd.got != 0 || fd.failed) {
 					fail("Respond{Timeout} to a fetch that did not come back empty")
+				}
+				if !mw.fetched && !m.preEmpty[mw.w.Queue] {
+					fail("Respond{Timeout} to waiter %d, which no fetch looked for and whose queue was not known empty", e.Waiter)
 				}
 			case ReasonDraining:
 				if !m.draining {
@@ -333,23 +384,48 @@ func (m *model) check(op string, effs []Effect, fd *fetchDone) {
 		}
 	}
 
-	// A waiter that is parked must be woken by its deadline at the latest,
-	// and nothing else is worth arming.
+	// A full batch chains the waiter behind it, when there is one.
+	if fd != nil && fd.full && !m.draining && parkedBehind && len(fetchesByQueue) == 0 {
+		fail("a full batch did not chain a fetch for the waiter parked behind it")
+	}
+
+	// What the shell needs armed. A parked waiter that may be told "nothing"
+	// (a fetch looked for it, or its queue is known empty) must be woken by
+	// its deadline at the latest. A parked waiter on a queue with a free
+	// fetch slot needs the poll. A waiter that waits for a busy slot needs
+	// nothing: the fetch that frees the slot reports back. And nothing is
+	// armed when no waiter is parked.
+	flying := map[string]int{}
+	for _, mw := range m.waiters {
+		if mw.phase == phFetching || mw.phase == phGone {
+			flying[mw.w.Queue]++
+		}
+	}
 	var parked int
+	var needsPoll, haveCovered bool
 	var earliest Mono
 	for _, mw := range m.waiters {
-		if mw.phase == phWaiting {
-			if parked == 0 || mw.w.Deadline < earliest {
+		if mw.phase != phWaiting {
+			continue
+		}
+		parked++
+		if flying[mw.w.Queue] < m.maxFly {
+			needsPoll = true
+		}
+		if mw.fetched || m.knownEmpty(mw.w.Queue) {
+			if !haveCovered || mw.w.Deadline < earliest {
 				earliest = mw.w.Deadline
 			}
-			parked++
+			haveCovered = true
 		}
 	}
 	switch {
-	case parked > 0 && !armSeen:
-		fail("%d waiters are parked and nothing is armed", parked)
-	case parked > 0 && arm > earliest:
-		fail("Arm at %s is after the earliest deadline %s", arm, earliest)
+	case haveCovered && !armSeen:
+		fail("a parked waiter can time out and nothing is armed")
+	case haveCovered && arm > earliest:
+		fail("Arm at %s is after the earliest deadline %s of a parked waiter that can time out", arm, earliest)
+	case needsPoll && !armSeen:
+		fail("a parked waiter has a free fetch slot and nothing is armed for the poll")
 	case parked == 0 && armSeen:
 		fail("Arm at %s with no waiter parked", arm)
 	}
@@ -401,7 +477,7 @@ func (m *model) finish() {
 		m.completeFetch(ids[rapid.IntRange(0, len(ids)-1).Draw(m.t, "finishing")])
 	}
 	m.now += time.Second
-	m.check("Tick", m.c.Tick(m.now), nil)
+	m.call("Tick", nil, func() []Effect { return m.c.Tick(m.now) })
 
 	for _, q := range m.queues {
 		if w, f := m.c.Waiting(q), m.c.InFlight(q); w != 0 || f != 0 {
