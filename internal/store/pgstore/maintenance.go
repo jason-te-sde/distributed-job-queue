@@ -2,9 +2,12 @@ package pgstore
 
 import (
 	"context"
+	"errors"
 
 	"github.com/jason-te-sde/distributed-job-queue/internal/store"
 )
+
+var errNotImplemented = errors.New("pgstore: not implemented")
 
 // Reap implements store.Store. It is not implemented yet.
 func (s *Store) Reap(context.Context, int, store.BackoffFunc) (int, error) {

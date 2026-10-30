@@ -4,6 +4,7 @@ package pgstore_test
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/jason-te-sde/distributed-job-queue/internal/core/job"
 	"github.com/jason-te-sde/distributed-job-queue/internal/pgtest"
 	"github.com/jason-te-sde/distributed-job-queue/internal/store"
+	"github.com/jason-te-sde/distributed-job-queue/internal/store/memstore"
 	"github.com/jason-te-sde/distributed-job-queue/internal/store/pgstore"
 	"github.com/jason-te-sde/distributed-job-queue/internal/store/storetest"
 )
@@ -68,6 +70,10 @@ func TestPGConformanceEnqueue(t *testing.T) {
 
 func TestPGConformanceLease(t *testing.T) {
 	storetest.RunLease(t, newHarness(t))
+}
+
+func TestPGConformanceAck(t *testing.T) {
+	storetest.RunAck(t, newHarness(t))
 }
 
 // listener is a connection that LISTENs on the ready channel.
@@ -251,6 +257,15 @@ func TestPGEachStatementReadsTheClockOnce(t *testing.T) {
 	if grants[0].Remaining != ttl {
 		t.Errorf("Remaining = %v, want exactly %v: Lease read the clock twice", grants[0].Remaining, ttl)
 	}
+
+	ref := store.Ref{ID: res[0].ID, Queue: "q", Token: grants[0].Job.Epoch}
+	beats, err := s.Heartbeat(t.Context(), []store.Ref{ref}, 45*time.Second)
+	if err != nil || len(beats) != 1 || beats[0].Outcome != job.Applied {
+		t.Fatalf("Heartbeat = %v, %v", beats, err)
+	}
+	if beats[0].Remaining != 45*time.Second {
+		t.Errorf("Remaining of a heartbeat = %v, want exactly 45s: Heartbeat read the clock twice", beats[0].Remaining)
+	}
 }
 
 // Tenants come back in byte order, whatever collation the database uses.
@@ -309,4 +324,200 @@ func TestPGLeaseMergesRepeatedTenantTakes(t *testing.T) {
 	if want := []int64{1, 2, 3, 4, 5}; !slices.Equal(got, want) {
 		t.Errorf("leased %v, want %v", got, want)
 	}
+}
+
+// leaseAll enqueues n jobs of queue q and tenant t on every store and leases
+// them all, and returns the refs of the leases, which are the same on every
+// store because they start from empty ones with the same clock.
+func leaseAll(t *testing.T, n int, stores ...store.Store) []store.Ref {
+	t.Helper()
+	var refs []store.Ref
+	for k, s := range stores {
+		specs := make([]job.Spec, n)
+		for i := range specs {
+			specs[i] = spec("q", "t")
+		}
+		if _, err := s.Enqueue(t.Context(), specs); err != nil {
+			t.Fatal(err)
+		}
+		grants, err := s.Lease(t.Context(), store.LeaseRequest{
+			Queue: "q", Takes: []store.TenantTake{{Tenant: "t", Limit: n}}, TTL: time.Minute, Worker: "w",
+		})
+		if err != nil || len(grants) != n {
+			t.Fatalf("Lease on store %d = %d grants, %v; want %d", k, len(grants), err, n)
+		}
+		var got []store.Ref
+		for _, g := range grants {
+			got = append(got, store.Ref{ID: g.Job.ID, Queue: "q", Token: g.Job.Epoch})
+		}
+		if k > 0 && !slices.Equal(got, refs) {
+			t.Fatalf("store %d leased %v, store 0 leased %v", k, got, refs)
+		}
+		refs = got
+	}
+	return refs
+}
+
+// A job that appears twice in one call is handled as the reference store
+// handles it, one item after the other: the first item's effect is what the
+// second finds.
+func TestPGRepeatedItemsInOneCallMatchTheReferenceStore(t *testing.T) {
+	pool := pgtest.NewDB(t)
+	pg := pgstore.New(pool)
+	mem := memstore.New(memstore.Options{Clock: func() time.Time { return pgtest.Epoch }})
+	refs := leaseAll(t, 6, mem, pg)
+	with := func(r store.Ref, token int64) store.Ref { r.Token = token; return r }
+
+	calls := map[string]func(s store.Store) (any, error){
+		// The first item of job 1 is stale and the next two are not.
+		"heartbeat": func(s store.Store) (any, error) {
+			return s.Heartbeat(t.Context(), []store.Ref{with(refs[0], 0), refs[0], refs[0]}, 20*time.Second)
+		},
+		// Job 2 completes once, and the first result is the one kept.
+		"complete": func(s store.Store) (any, error) {
+			return s.Complete(t.Context(), []store.CompleteRequest{
+				{Ref: refs[1], Result: []byte("a")}, {Ref: refs[1], Result: []byte("b")}, {Ref: refs[2], Result: []byte("c")},
+			})
+		},
+		// Job 4 fails once and is then no longer leased.
+		"fail": func(s store.Store) (any, error) {
+			return s.Fail(t.Context(), []store.FailRequest{
+				{Ref: refs[3], Error: "one"}, {Ref: refs[3], Error: "two"}, {Ref: refs[3], Permanent: true, Error: "three"},
+			})
+		},
+		"release": func(s store.Store) (any, error) {
+			return s.Release(t.Context(), []store.Ref{refs[4], refs[4], with(refs[4], 9)})
+		},
+		// The stale item comes first, so the item after it is the one that applies.
+		"fail, stale first": func(s store.Store) (any, error) {
+			return s.Fail(t.Context(), []store.FailRequest{
+				{Ref: with(refs[5], 9), Error: "stale"}, {Ref: refs[5], Permanent: true, Error: "real"},
+			})
+		},
+	}
+	for _, name := range slices.Sorted(func(yield func(string) bool) {
+		for name := range calls {
+			if !yield(name) {
+				return
+			}
+		}
+	}) {
+		want, wantErr := calls[name](mem)
+		got, gotErr := calls[name](pg)
+		if wantErr != nil || gotErr != nil {
+			t.Fatalf("%s: errors %v (reference), %v (pgstore)", name, wantErr, gotErr)
+		}
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("%s: pgstore returned %v, the reference store %v", name, got, want)
+		}
+	}
+
+	memRows, err := mem.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pgRows, err := pg.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pgRows) != len(memRows) {
+		t.Fatalf("pgstore holds %d rows, the reference store %d", len(pgRows), len(memRows))
+	}
+	for i := range memRows {
+		if !job.Equal(pgRows[i], memRows[i]) {
+			t.Errorf("job %d differs:\n  pgstore   %+v\n  reference %+v", memRows[i].ID, pgRows[i], memRows[i])
+		}
+	}
+}
+
+// What the model calls empty is NULL in the table: no lease, no key, no error
+// and no result.
+func TestPGEmptyValuesAreStoredAsNull(t *testing.T) {
+	pool := pgtest.NewDB(t)
+	s := pgstore.New(pool)
+	refs := leaseAll(t, 2, s)
+
+	// Job 1 is completed with an empty result, job 2 fails with an empty
+	// message and is then leased again and released.
+	if out, err := s.Complete(t.Context(), []store.CompleteRequest{{Ref: refs[0], Result: []byte{}}}); err != nil || out[0] != job.Applied {
+		t.Fatalf("Complete = %v, %v", out, err)
+	}
+	if out, err := s.Fail(t.Context(), []store.FailRequest{{Ref: refs[1]}}); err != nil || out[0] != job.Applied {
+		t.Fatalf("Fail = %v, %v", out, err)
+	}
+
+	var resultNull, keyNull bool
+	if err := pool.QueryRow(t.Context(), "SELECT result IS NULL, idempotency_key IS NULL FROM jobqueue.jobs WHERE id = 1").Scan(&resultNull, &keyNull); err != nil {
+		t.Fatal(err)
+	}
+	if !resultNull || !keyNull {
+		t.Errorf("job 1: result NULL = %t, idempotency_key NULL = %t, want both", resultNull, keyNull)
+	}
+	var leasedByNull, expiryNull, errNull bool
+	if err := pool.QueryRow(t.Context(), "SELECT leased_by IS NULL, lease_expires_at IS NULL, last_error IS NULL FROM jobqueue.jobs WHERE id = 2").
+		Scan(&leasedByNull, &expiryNull, &errNull); err != nil {
+		t.Fatal(err)
+	}
+	if !leasedByNull || !expiryNull || !errNull {
+		t.Errorf("job 2: leased_by NULL = %t, lease_expires_at NULL = %t, last_error NULL = %t, want all", leasedByNull, expiryNull, errNull)
+	}
+}
+
+func TestPGReleaseAndRequeueNotify(t *testing.T) {
+	pool := pgtest.NewDB(t)
+	s := pgstore.New(pool)
+	l := listen(t, pool)
+
+	// Jobs 1 and 2 belong to tenant a, job 3 to tenant b. Enqueueing wakes
+	// the listeners; that is not what is under test, so it is read away.
+	if _, err := s.Enqueue(t.Context(), []job.Spec{spec("q", "a"), spec("q", "a"), spec("q", "b")}); err != nil {
+		t.Fatal(err)
+	}
+	l.wantPayloads("q\ta", "q\tb")
+	grants, err := s.Lease(t.Context(), store.LeaseRequest{
+		Queue: "q", Takes: []store.TenantTake{{Tenant: "", Limit: 3}}, TTL: time.Minute, Worker: "w",
+	})
+	if err != nil || len(grants) != 3 {
+		t.Fatalf("Lease = %d grants, %v", len(grants), err)
+	}
+	refs := make([]store.Ref, len(grants))
+	for i, g := range grants {
+		refs[i] = store.Ref{ID: g.Job.ID, Queue: "q", Token: g.Job.Epoch}
+	}
+
+	// A release that changes nothing wakes nobody.
+	stale := refs[0]
+	stale.Token = 99
+	if out, err := s.Release(t.Context(), []store.Ref{stale}); err != nil || out[0] != job.Fenced {
+		t.Fatalf("Release with a stale token = %v, %v", out, err)
+	}
+	l.wantPayloads()
+
+	// Releasing three jobs wakes each of their tenants once.
+	if out, err := s.Release(t.Context(), refs); err != nil || slices.Contains(out, job.Fenced) {
+		t.Fatalf("Release = %v, %v", out, err)
+	}
+	l.wantPayloads("q\ta", "q\tb")
+
+	// Requeueing a job that is not dead wakes nobody; requeueing a dead one
+	// wakes its tenant.
+	if out, err := s.Requeue(t.Context(), refs[2].ID); err != nil || out != job.WrongState {
+		t.Fatalf("Requeue of a ready job = %v, %v", out, err)
+	}
+	l.wantPayloads()
+	grants, err = s.Lease(t.Context(), store.LeaseRequest{
+		Queue: "q", Takes: []store.TenantTake{{Tenant: "b", Limit: 1}}, TTL: time.Minute, Worker: "w",
+	})
+	if err != nil || len(grants) != 1 {
+		t.Fatalf("Lease = %d grants, %v", len(grants), err)
+	}
+	dead := []store.FailRequest{{Ref: store.Ref{ID: grants[0].Job.ID, Queue: "q", Token: grants[0].Job.Epoch}, Permanent: true, Error: "no"}}
+	if out, err := s.Fail(t.Context(), dead); err != nil || out[0] != job.Applied {
+		t.Fatalf("Fail = %v, %v", out, err)
+	}
+	l.wantPayloads()
+	if out, err := s.Requeue(t.Context(), grants[0].Job.ID); err != nil || out != job.Applied {
+		t.Fatalf("Requeue of a dead job = %v, %v", out, err)
+	}
+	l.wantPayloads("q\tb")
 }
