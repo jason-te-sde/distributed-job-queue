@@ -67,7 +67,7 @@ linters:
       analyze-types: true
       forbid:
         - pattern: ^time\.(Now|Since|Until|After|AfterFunc|Sleep|Tick|NewTimer|NewTicker)$
-        - pattern: ^rand\.(Int|IntN|Int32|Int32N|Int64|Int64N|Uint32|Uint64|Uint64N|UintN|Float32|Float64|N|Perm|Shuffle|ExpFloat64|NormFloat64)$
+        - pattern: ^rand\.(Int|IntN|Int32|Int32N|Int64|Int64N|Uint|Uint32|Uint32N|Uint64|Uint64N|UintN|Float32|Float64|N|Perm|Shuffle|ExpFloat64|NormFloat64)$
     gochecksumtype:
       default-signifies-exhaustive: false
     nolintlint:

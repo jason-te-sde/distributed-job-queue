@@ -314,6 +314,11 @@ func TestRepositoryHasNoViolations(t *testing.T) {
 	if len(pkgs) == 0 {
 		t.Fatal("loaded no packages: the test is not looking at the repository")
 	}
+	for _, p := range pkgs {
+		if p.Path != mod && !strings.HasPrefix(p.Path, mod+"/") {
+			t.Errorf("loaded package %s is outside module %s: the mod constant does not match go.mod", p.Path, mod)
+		}
+	}
 	for _, v := range Check(mod, pkgs) {
 		t.Error(v)
 	}
@@ -357,13 +362,9 @@ func load(t *testing.T) []Package {
 // loadDir describes every non-test package of the module rooted at dir.
 func loadDir(t *testing.T, dir string) []Package {
 	t.Helper()
-	// NeedDeps type-checks dependencies from source. Without it go/packages
-	// reads their compiler export data, and a go/packages that predates the
-	// installed toolchain fails on a newer export format (seen with Go 1.27
-	// and golang.org/x/tools v0.49.0).
 	cfg := &packages.Config{
 		Mode: packages.NeedName | packages.NeedImports | packages.NeedFiles |
-			packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedDeps,
+			packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo,
 		Dir:   dir,
 		Tests: false,
 	}

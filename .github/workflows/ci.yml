@@ -29,7 +29,7 @@ jobs:
         with:
           version: v2.15.0
       - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
   test:
     name: test (go ${{ matrix.go }}, ${{ matrix.os }})
@@ -80,12 +80,13 @@ jobs:
       - name: Build and test a fresh clone with cold caches
         run: |
           set -euo pipefail
-          work="$(mktemp -d)"
-          git clone --no-hardlinks "$GITHUB_WORKSPACE" "$work/repo"
-          GOMODCACHE="$(mktemp -d)"
-          GOCACHE="$(mktemp -d)"
+          # Everything lives under RUNNER_TEMP so the upload step can find it.
+          clone="$RUNNER_TEMP/clean-clone"
+          git clone --no-hardlinks "$GITHUB_WORKSPACE" "$clone"
+          GOMODCACHE="$(mktemp -d "$RUNNER_TEMP/gomodcache.XXXXXX")"
+          GOCACHE="$(mktemp -d "$RUNNER_TEMP/gocache.XXXXXX")"
           export GOMODCACHE GOCACHE
-          cd "$work/repo"
+          cd "$clone"
           go build ./...
           go test ./...
       - name: Upload failure artifacts
@@ -94,6 +95,6 @@ jobs:
         with:
           name: clean-clone-failures
           path: |
-            **/*.log
-            internal/sim/testdata/failures/**
+            ${{ runner.temp }}/clean-clone/**/*.log
+            ${{ runner.temp }}/clean-clone/internal/sim/testdata/failures/**
           if-no-files-found: ignore

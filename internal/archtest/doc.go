@@ -16,7 +16,10 @@
 //   - core-concurrency: internal/core/... has no go statement, no select
 //     statement and no channel type.
 //   - core-calls: internal/core/... never reads the clock and never uses the
-//     global math/rand/v2 functions.
+//     global math/rand/v2 functions. This rule sees direct call expressions
+//     only: a function value such as `var now = time.Now` is not a call of
+//     time.Now, so archtest misses it. forbidigo matches every use of the
+//     identifier and does catch it (see .golangci.yml).
 //   - layering: which internal packages may import which, and which helper
 //     packages only test files may import.
 //   - dependencies: the non-test code of the module imports only the

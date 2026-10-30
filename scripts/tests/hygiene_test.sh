@@ -145,3 +145,71 @@ run_check "$repo" "HYGIENE_PATTERNS=$workdir/does-not-exist.txt"
 expect_status missing-patterns-is-config-error 2
 expect_output missing-patterns-is-config-error "cannot read patterns file"
 pass missing-patterns-is-config-error
+
+# (i) A pattern that is not a valid regular expression is a configuration
+# error, not "no matches".
+repo="$(new_repo)"
+printf 'package a\n' >"$repo/a.go"
+commit_all "$repo" "feat: add a"
+malformed="$workdir/malformed-patterns.txt"
+{
+  printf '(unclosed\n'
+  tail -n +2 "$here/../attribution-patterns.txt"
+} >"$malformed"
+run_check "$repo" "HYGIENE_PATTERNS=$malformed"
+expect_status malformed-pattern-is-config-error 2
+expect_output malformed-pattern-is-config-error "invalid pattern"
+pass malformed-pattern-is-config-error
+
+# (j) CJK text in a commit message fails, like CJK text in a file.
+repo="$(new_repo)"
+printf 'package a\n' >"$repo/a.go"
+commit_all "$repo" "feat: add a" "$(printf '\xe4\xb8\xad')"
+run_check "$repo"
+expect_status cjk-commit-message-fails 1
+expect_output cjk-commit-message-fails "cjk-text"
+expect_output cjk-commit-message-fails "commit "
+pass cjk-commit-message-fails
+
+# (k) A scan that cannot read a tracked file is an error, not a clean run.
+# Root can read any file, so the case cannot run there.
+if [ "$(id -u)" -eq 0 ]; then
+  printf 'SKIP unreadable-file-is-error: running as root\n'
+else
+  repo="$(new_repo)"
+  printf 'package a\n' >"$repo/a.go"
+  commit_all "$repo" "feat: add a"
+  chmod 000 "$repo/a.go"
+  run_check "$repo"
+  expect_status unreadable-file-is-error 2
+  expect_output unreadable-file-is-error "grep failed"
+  pass unreadable-file-is-error
+fi
+
+# (l) The "an AI" pattern ends at a word boundary, so a longer word is fine.
+repo="$(new_repo)"
+printf '// created by an %s\npackage a\n' "aide" >"$repo/aide.go"
+commit_all "$repo" "feat: add aide"
+run_check "$repo"
+expect_status attribution-needs-word-boundary 0
+pass attribution-needs-word-boundary
+
+# (m) The same pattern still matches at the end of a line.
+repo="$(new_repo)"
+printf '// created by an A''I\npackage a\n' >"$repo/ai.go"
+commit_all "$repo" "feat: add ai"
+run_check "$repo"
+expect_status attribution-at-end-of-line-fails 1
+expect_output attribution-at-end-of-line-fails "ai.go:1"
+pass attribution-at-end-of-line-fails
+
+# (n) History that git cannot read is an error, not an empty history.
+repo="$(new_repo)"
+printf 'package a\n' >"$repo/a.go"
+commit_all "$repo" "feat: add a"
+head_sha="$(git -C "$repo" rev-parse HEAD)"
+rm -f "$repo/.git/objects/${head_sha%"${head_sha#??}"}/${head_sha#??}"
+run_check "$repo"
+expect_status unreadable-history-is-error 2
+expect_output unreadable-history-is-error "git log failed"
+pass unreadable-history-is-error

@@ -6,7 +6,7 @@ GO ?= go
 # Pinned tool versions. Keep them in step with .github/workflows/ci.yml.
 GOLANGCI_LINT_VERSION := v2.15.0
 GOLANGCI_LINT_SERIES := 2.15
-GOVULNCHECK_VERSION := v1.1.4
+GOVULNCHECK_VERSION := v1.9.0
 
 .PHONY: test test-pg lint hygiene test-scripts preflight
 

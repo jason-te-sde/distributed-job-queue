@@ -3,8 +3,8 @@
 #
 # usage: check-hygiene.sh [root]
 #
-# Fails when a tracked file contains CJK text, or when a tracked file or a
-# commit message on the current branch matches an attribution pattern.
+# Fails when a tracked file or a commit message on the current branch
+# contains CJK text, or matches an attribution pattern.
 #
 # The patterns live in attribution-patterns.txt next to this script: one
 # extended regular expression per line, matched case-insensitively. The
@@ -13,7 +13,9 @@
 # sequences readable. The patterns file is never scanned for patterns.
 #
 # Output: "hygiene: ok", or one "path:line: rule" line per violation.
-# Exit status: 0 clean, 1 violations found, 2 configuration or usage error.
+# Exit status: 0 clean, 1 violations found, 2 configuration or usage error,
+# which includes any failure of grep or git themselves: a scan that could
+# not run is never reported as clean.
 set -euo pipefail
 
 # Everything below works on bytes, whatever the caller's locale says.
@@ -63,6 +65,22 @@ while IFS= read -r line || [ -n "$line" ]; do
 done <"$patterns_file"
 [ "$pattern_count" -ge "$min_patterns" ] || die "patterns file has fewer than $min_patterns lines: $patterns_file"
 
+# run_grep <grep arguments>...: leave the matching lines in $tmp/hits. Status 1
+# means no match; a higher status is grep itself failing (an unreadable file,
+# a bad expression) and ends the run, so it cannot read as "no matches".
+run_grep() {
+  local status=0
+  grep "$@" >"$tmp/hits" 2>"$tmp/grep-error" || status=$?
+  if [ "$status" -gt 1 ]; then
+    die "grep failed (status $status): $(head -n 1 "$tmp/grep-error")"
+  fi
+}
+
+# Compile every pattern once, against no input, before any scan relies on them.
+status=0
+grep -E -f "$expanded" /dev/null 2>"$tmp/grep-error" || status=$?
+[ "$status" -le 1 ] || die "patterns file has an invalid pattern: $(head -n 1 "$tmp/grep-error")"
+
 # CJK Unified Ideographs (U+4E00 to U+9FFF) as UTF-8 byte sequences.
 cjk_regex=$'\xe4[\xb8-\xbf][\x80-\xbf]|[\xe5-\xe8][\x80-\xbf][\x80-\xbf]|\xe9[\x80-\xbf][\x80-\xbf]'
 
@@ -75,29 +93,42 @@ report() {
   violations=$((violations + 1))
 }
 
-# scan_file <path relative to root>: report every hit in one tracked file.
-scan_file() {
-  local rel="$1" abs="$root_abs/$1" hit
-  [ -f "$abs" ] || return 0
+# report_hits <where> <rule>: report one violation per line in $tmp/hits.
+report_hits() {
+  local hit
   while IFS= read -r hit; do
-    report "$rel:${hit%%:*}: cjk-text"
-  done < <(grep -InE -e "$cjk_regex" -- "$abs" || true)
-  [ "$abs" != "$patterns_abs" ] || return 0
-  while IFS= read -r hit; do
-    report "$rel:${hit%%:*}: attribution"
-  done < <(grep -InEi -f "$expanded" -- "$abs" || true)
+    report "$1:${hit%%:*}: $2"
+  done <"$tmp/hits"
 }
 
+# scan_file <path relative to root>: report every hit in one tracked file.
+scan_file() {
+  local rel="$1" abs="$root_abs/$1"
+  [ -f "$abs" ] || return 0
+  run_grep -InE -e "$cjk_regex" -- "$abs"
+  report_hits "$rel" cjk-text
+  [ "$abs" != "$patterns_abs" ] || return 0
+  run_grep -InEi -f "$expanded" -- "$abs"
+  report_hits "$rel" attribution
+}
+
+git -C "$root" ls-files -z >"$tmp/files" || die "git ls-files failed in $root"
 while IFS= read -r -d '' rel; do
   scan_file "$rel"
-done < <(git -C "$root" ls-files -z)
+done <"$tmp/files"
 
+# A repository without commits has no history to scan.
+: >"$tmp/commits"
+if git -C "$root" rev-parse --verify --quiet HEAD >/dev/null; then
+  git -C "$root" log --format=%H >"$tmp/commits" || die "git log failed in $root"
+fi
 while IFS= read -r sha; do
-  git -C "$root" show -s --format=%B "$sha" >"$tmp/message"
-  while IFS= read -r hit; do
-    report "commit $sha:${hit%%:*}: attribution"
-  done < <(grep -nEi -f "$expanded" -- "$tmp/message" || true)
-done < <(git -C "$root" log --format=%H 2>/dev/null || true)
+  git -C "$root" show -s --format=%B "$sha" >"$tmp/message" || die "git show failed for $sha in $root"
+  run_grep -nE -e "$cjk_regex" -- "$tmp/message"
+  report_hits "commit $sha" cjk-text
+  run_grep -nEi -f "$expanded" -- "$tmp/message"
+  report_hits "commit $sha" attribution
+done <"$tmp/commits"
 
 if [ "$violations" -gt 0 ]; then
   printf 'hygiene: %d violation(s)\n' "$violations" >&2
