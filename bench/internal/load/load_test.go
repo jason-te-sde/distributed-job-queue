@@ -299,3 +299,64 @@ func TestRunWaitsForSendsInFlight(t *testing.T) {
 		t.Errorf("at most %d sends overlapped, want an open loop to overlap them", maxRunning)
 	}
 }
+
+func TestRunMeasuresLatenessAfterTheSlotIsAcquiredAndNeverExceedsTheCap(t *testing.T) {
+	// 64 jobs on a schedule that wants them all within a millisecond, a cap of 8
+	// sends at once, and sends that block behind a gate for about 100ms. Eight
+	// sends start at once and block. The other 56 wait for a slot, so each of them
+	// begins about 100ms after its intended time, and that wait is lateness: it is
+	// the generator falling behind a system that stopped answering, which the
+	// latency measured from the intended time must show.
+	const (
+		n, limit = 64, 8
+		block    = 100 * time.Millisecond
+	)
+	s := Schedule{Start: time.Now(), Rate: 100000}
+	gate := make(chan struct{})
+	opened := time.AfterFunc(block, func() { close(gate) })
+	defer opened.Stop()
+
+	var (
+		mu         sync.Mutex
+		running    int
+		maxRunning int
+		behind     = make([]time.Duration, n) // time.Since(intended) when the send began
+	)
+	sent, late, err := run(t.Context(), s, n, func(ctx context.Context, k int, intended time.Time) error {
+		mu.Lock()
+		behind[k] = time.Since(intended)
+		running++
+		maxRunning = max(maxRunning, running)
+		mu.Unlock()
+		defer func() {
+			mu.Lock()
+			running--
+			mu.Unlock()
+		}()
+		select {
+		case <-gate:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}, limit)
+	if err != nil || sent != n {
+		t.Fatalf("run = %d sent, %v; want %d, nil", sent, err, n)
+	}
+
+	// Lower bounds only: a slow machine makes the sends later, never earlier.
+	if late < n-limit {
+		t.Errorf("late = %d, want at least %d: the %d sends that waited for a slot began about %v behind schedule", late, n-limit, n-limit, block)
+	}
+	for k := limit; k < n; k++ {
+		if behind[k] < 90*time.Millisecond {
+			t.Errorf("job %d began %v after its intended time, want at least about %v: it waited behind the cap for a slot", k, behind[k], block)
+		}
+	}
+	if maxRunning > limit {
+		t.Errorf("%d sends ran at once, want at most the cap of %d", maxRunning, limit)
+	}
+	if maxRunning < limit {
+		t.Errorf("only %d sends overlapped, want the cap of %d to be reached by a schedule that wants 64 at once", maxRunning, limit)
+	}
+}

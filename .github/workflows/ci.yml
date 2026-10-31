@@ -287,10 +287,19 @@ jobs:
         working-directory: bench
     steps:
       - uses: actions/checkout@v7
+      # The floor of the Go versions the module supports (bench/go.mod says 1.26.0),
+      # which the other jobs reach only through the root module.
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.x
+          go-version: 1.26.x
           cache-dependency-path: bench/go.sum
+      # The root configuration, with the version the lint job runs. The build tags
+      # that the pg tests need are listed in that configuration.
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
+          working-directory: bench
+          args: --config ../.golangci.yml
       - name: go vet
         run: go vet ./... && go vet -tags pg ./...
       - name: go test -race
@@ -298,9 +307,11 @@ jobs:
       # The tests that need the database and whose assertions do not depend on how
       # fast the runner is. The ones that compare latencies (the noisy neighbour,
       # NOTIFY against polling, recovery) run on a developer machine with
-      # JOBQUEUE_TEST_DSN and -tags pg.
+      # JOBQUEUE_TEST_DSN and -tags pg. One package at a time (-p 1): the runner
+      # has two cores, and each test starts brokers, workers and a producer in one
+      # process against the one database.
       - name: go test -tags pg (deterministic subset)
-        run: go test -race -count=1 -tags pg -run 'TestPG(Cluster|StartWorkers|CaptureEnv|Throughput|Soak|River)' ./...
+        run: go test -race -count=1 -p 1 -tags pg -run 'TestPG(Cluster|StartWorkers|CaptureEnv|Throughput|Soak|River)' ./...
       - name: Throughput smoke run
         run: go run ./cmd/jobqueue-bench throughput --duration 10s --rate 200
 

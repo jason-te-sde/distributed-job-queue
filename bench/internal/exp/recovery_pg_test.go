@@ -3,8 +3,11 @@
 package exp
 
 import (
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/jason-te-sde/distributed-job-queue/internal/core/job"
 )
 
 func TestPGRecoveryKillWorkerRestartsEveryHeldJobWithinTheBound(t *testing.T) {
@@ -35,6 +38,10 @@ func TestPGRecoveryKillWorkerRestartsEveryHeldJobWithinTheBound(t *testing.T) {
 	}
 	if all > bound {
 		t.Errorf("all jobs restarted %.2fs after the kill, over the bound of %.2fs", all, bound)
+	}
+	// The first backoff is what the reaper applies, not a number of this file's.
+	if want := job.DefaultBackoff.Ceiling(1).Seconds(); r.Metrics["first_backoff_s"] != want {
+		t.Errorf("first_backoff_s = %v, want %v, the ceiling of the default backoff after the first attempt", r.Metrics["first_backoff_s"], want)
 	}
 	if bound != r.Metrics["ttl_s"]+r.Metrics["reap_interval_s"]+r.Metrics["first_backoff_s"]+r.Metrics["dispatch_s"] {
 		t.Errorf("bound_s %v is not the sum of its parts: %v", bound, r.Metrics)
@@ -69,6 +76,9 @@ func TestPGRecoveryKillBrokerLosesNoJob(t *testing.T) {
 	r := (*results)[0]
 	if r.Params["kill"] != "broker" || r.Params["brokers"] != "3" {
 		t.Errorf("kill %q brokers %q, want broker/3", r.Params["kill"], r.Params["brokers"])
+	}
+	if !strings.Contains(r.Params["mode"], "connections reset through a proxy") || !strings.Contains(r.Params["mode"], "broker process stays up") {
+		t.Errorf("params[mode] = %q, want it to say what was killed", r.Params["mode"])
 	}
 	if r.Metrics["connections_reset"] < 1 {
 		t.Errorf("connections_reset = %v: the kill reset nothing, so the run injected no fault", r.Metrics["connections_reset"])

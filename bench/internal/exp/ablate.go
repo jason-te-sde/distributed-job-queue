@@ -64,17 +64,10 @@ func Ablate(ctx context.Context, o AblateOptions, emit Emit) error {
 	if err != nil {
 		return err
 	}
-	if o.What == "notify" {
-		// An idle queue: one slow worker and a rate far below what it can take.
-		if o.Workers == 0 {
-			o.Workers = 1
-		}
-		if o.Concurrency == 0 {
-			o.Concurrency = 8
-		}
-		if o.FindMax || o.Rate == 0 {
-			return fmt.Errorf("--what notify measures idle-queue latency at one fixed rate: give --rate and not --find-max")
-		}
+	if o.What == "notify" && (o.FindMax || o.Rate == 0) {
+		// The queue must be idle between jobs, which takes a rate far below what the
+		// workers can take, so there is one fixed rate and no search for a maximum.
+		return fmt.Errorf("--what notify measures idle-queue latency at one fixed rate: give --rate and not --find-max")
 	}
 	o.ThroughputOptions = o.withDefaults()
 	if err := o.validate(); err != nil {

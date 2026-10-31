@@ -3,6 +3,9 @@
 package exp
 
 import (
+	"context"
+	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -51,5 +54,36 @@ func TestPGSoakSamplesEveryIntervalAndPrunes(t *testing.T) {
 	}
 	if sum.Metrics["table_bytes_max"] < sum.Metrics["table_bytes_final"] || sum.Metrics["table_bytes_final"] <= 0 {
 		t.Errorf("summary table sizes: %v", sum.Metrics)
+	}
+}
+
+func TestPGSoakStopsAtOnceWhenASampleFails(t *testing.T) {
+	dsn, pool := testDatabase(t)
+	boom := errors.New("the table cannot be read")
+	var calls atomic.Int32
+	opts := SoakOptions{
+		Setup: Setup{DatabaseURL: dsn}, Rate: 50, Interval: 300 * time.Millisecond, Workers: 1, Concurrency: 8,
+		// A soak of ten minutes, whose second sample fails.
+		Duration: 10 * time.Minute,
+		statsFn: func(ctx context.Context, r *rig) (tableStats, error) {
+			if calls.Add(1) >= 2 {
+				return tableStats{}, boom
+			}
+			return r.tableStats(ctx)
+		},
+	}
+	done := make(chan error, 1)
+	go func() { done <- Soak(t.Context(), opts, func(Result) {}) }()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, boom) {
+			t.Errorf("Soak error = %v, want it to wrap the failure of the sample", err)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("Soak was still running 60s after a sample failed, in a soak of ten minutes: the probe was not stopped")
+	}
+	if got := countRows(t, pool); got != 0 {
+		t.Errorf("%d rows left in the jobs table after the failed soak, want it cleaned up", got)
 	}
 }

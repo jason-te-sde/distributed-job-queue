@@ -33,9 +33,6 @@ const (
 	// recoveryBrokers is the number of brokers when a broker is killed: one of
 	// three.
 	recoveryBrokers = 3
-	// firstBackoffCap is the ceiling of the delay before a job whose lease ran
-	// out is tried again: the base of the default backoff, 1s, with full jitter.
-	firstBackoffCap = time.Second
 	// heldTimeout bounds waiting for the worker process to take its leases.
 	heldTimeout = time.Minute
 	// restartSlack is added to twice the bound when waiting for the restarts, so
@@ -252,7 +249,9 @@ func (r *rig) killWorker(ctx context.Context, o RecoveryOptions) (Result, error)
 
 	cfg := r.cluster.Config()
 	dispatch := max(cfg.PollInterval, cfg.ActivityInterval)
-	ttl, reap, backoff := o.TTL.Seconds(), cfg.ReapInterval.Seconds(), firstBackoffCap.Seconds()
+	// The reaper delays a retry by a draw from the default backoff after the job's
+	// attempt, which is the first, so the ceiling of that draw is the part of the bound.
+	ttl, reap, backoff := o.TTL.Seconds(), cfg.ReapInterval.Seconds(), job.DefaultBackoff.Ceiling(1).Seconds()
 	bound := ttl + reap + backoff + dispatch.Seconds()
 	deadline := time.After(time.Duration(2*bound*float64(time.Second)) + restartSlack)
 	tick := time.NewTicker(5 * time.Millisecond)
@@ -378,6 +377,20 @@ func (e *errObserver) intercept(ctx context.Context, method string, req, reply a
 	return err
 }
 
+// brokerKillMode is what the E4 broker experiment kills, in the words of its
+// result: a broker cannot be stopped abruptly from here, so the connections to it
+// are cut.
+const brokerKillMode = "connections reset through a proxy; broker process stays up"
+
+// brokerParams are the params of the result of killing a broker.
+func (o RecoveryOptions) brokerParams() map[string]string {
+	return map[string]string{
+		"kill": "broker", "mode": brokerKillMode, "brokers": strconv.Itoa(o.brokers()),
+		"rate": formatRate(o.Rate), "duration": o.Duration.String(),
+		"workers": strconv.Itoa(DefaultWorkers), "concurrency": strconv.Itoa(DefaultConcurrency),
+	}
+}
+
 func (r *rig) killBroker(ctx context.Context, o RecoveryOptions) (Result, error) {
 	queue := r.nextQueue()
 	defer r.cleanup(queue)
@@ -480,10 +493,7 @@ func (r *rig) killBroker(ctx context.Context, o RecoveryOptions) (Result, error)
 	}
 	return Result{
 		Experiment: "recovery",
-		Params: map[string]string{
-			"kill": "broker", "brokers": strconv.Itoa(o.brokers()), "rate": formatRate(o.Rate), "duration": o.Duration.String(),
-			"workers": strconv.Itoa(DefaultWorkers), "concurrency": strconv.Itoa(DefaultConcurrency),
-		},
-		Metrics: metrics, Quantiles: out.Hist.Quantiles(), Env: r.env, Started: began, Duration: time.Since(began),
+		Params:     o.brokerParams(),
+		Metrics:    metrics, Quantiles: out.Hist.Quantiles(), Env: r.env, Started: began, Duration: time.Since(began),
 	}, nil
 }

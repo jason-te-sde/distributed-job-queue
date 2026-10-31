@@ -6,8 +6,10 @@ import (
 	"testing"
 	"time"
 
-	jobqueuev1 "github.com/jason-te-sde/distributed-job-queue/internal/gen/jobqueue/v1"
 	"google.golang.org/grpc"
+
+	"github.com/jason-te-sde/distributed-job-queue/internal/broker"
+	jobqueuev1 "github.com/jason-te-sde/distributed-job-queue/internal/gen/jobqueue/v1"
 )
 
 func discard(Result) {}
@@ -180,5 +182,33 @@ func TestSDKProbeKeepsTheWorkerSpecOfTheVariant(t *testing.T) {
 	p := (&rig{}).sdkProbeFor(o, workerSpec{LeaseMaxJobs: 1, AckBatch: 1})
 	if p.spec.Count != 3 || p.spec.Concurrency != 7 || p.spec.LeaseMaxJobs != 1 || p.spec.AckBatch != 1 || p.payloadBytes != 100 {
 		t.Errorf("spec = %+v, payload %d; want the options' count and concurrency with the variant's cap and batch kept", p.spec, p.payloadBytes)
+	}
+}
+
+// postgresDefaultMaxConnections is max_connections of a PostgreSQL server that
+// nobody has tuned.
+const postgresDefaultMaxConnections = 100
+
+func TestMaxBrokersFitThePostgresDefaultConnectionLimit(t *testing.T) {
+	cfg, err := broker.ParseFlags(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Each broker holds a pool of MaxDBConns and one connection for its NOTIFY
+	// listener, and the harness holds a pool of its own.
+	perBroker := int(cfg.MaxDBConns) + 1
+	if got := maxBrokers*perBroker + benchPoolConns; got > postgresDefaultMaxConnections {
+		t.Errorf("%d brokers of %d connections and the harness's %d need %d connections, over the %d of a default PostgreSQL",
+			maxBrokers, perBroker, benchPoolConns, got, postgresDefaultMaxConnections)
+	}
+}
+
+func TestBrokerKillResultStatesWhatWasKilled(t *testing.T) {
+	p := RecoveryOptions{Kill: "broker", Rate: 100, Duration: 6 * time.Second}.withDefaults().brokerParams()
+	if got, want := p["mode"], "connections reset through a proxy; broker process stays up"; got != want {
+		t.Errorf("params[mode] = %q, want %q: the JSON must say that a proxy was cut and the broker was not stopped", got, want)
+	}
+	if p["kill"] != "broker" || p["brokers"] != "3" || p["rate"] != "100" || p["duration"] != "6s" {
+		t.Errorf("params = %v, want the kill, the three brokers and the load", p)
 	}
 }
