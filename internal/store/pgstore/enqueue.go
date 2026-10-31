@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/jason-te-sde/distributed-job-queue/internal/core/job"
+	"github.com/jason-te-sde/distributed-job-queue/internal/flaw"
 	"github.com/jason-te-sde/distributed-job-queue/internal/store"
 )
 
@@ -17,9 +18,14 @@ import (
 // the listeners of its queue and tenant. PostgreSQL delivers equal payloads
 // of one transaction once, so a batch for one queue and tenant wakes them once.
 //
+// The ON CONFLICT clause is what makes the key check atomic: two concurrent
+// inserts of one key cannot both succeed, and the loser inserts nothing.
+// Flaw F6 drops it and checks with a SELECT first instead; see
+// enqueueCheckThenInsert.
+//
 //	$1 queue, $2 tenant, $3 payload, $4 run_at or NULL, $5 delay in microseconds,
 //	$6 max_attempts, $7 idempotency key or NULL
-const insertSQL = `
+var insertSQL = without(flaw.F6, `
 WITH clock AS MATERIALIZED (SELECT jobqueue.now() AS now),
 ins AS (
     INSERT INTO jobqueue.jobs (queue, tenant, state, payload, run_at, attempts, max_attempts, idempotency_key, created_at)
@@ -31,11 +37,11 @@ ins AS (
     RETURNING id, queue, tenant, run_at
 ),
 wake AS (
-    SELECT pg_notify('` + NotifyChannel + `', ins.queue || chr(9) || ins.tenant)
+    SELECT pg_notify('`+NotifyChannel+`', ins.queue || chr(9) || ins.tenant)
     FROM ins, clock
     WHERE ins.run_at <= clock.now
 )
-SELECT ins.id FROM ins, (SELECT count(*) FROM wake) AS woken`
+SELECT ins.id FROM ins, (SELECT count(*) FROM wake) AS woken`, "ON CONFLICT (tenant, queue, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING\n    ")
 
 // resolveSQL finds the jobs that idempotency keys name.
 //
@@ -62,22 +68,14 @@ func (s *Store) Enqueue(ctx context.Context, specs []job.Spec) ([]store.EnqueueR
 		}
 	}
 
+	if flaw.On(flaw.F6) {
+		return s.enqueueCheckThenInsert(ctx, specs)
+	}
+
 	batch := &pgx.Batch{}
 	var tenants, queues, keys []string
 	for _, sp := range specs {
-		payload := sp.Payload
-		if payload == nil {
-			payload = []byte{} // a nil slice would be stored as NULL
-		}
-		var runAt any
-		if !sp.RunAt.IsZero() {
-			runAt = job.NormalizeTime(sp.RunAt)
-		}
-		maxAttempts := sp.MaxAttempts
-		if maxAttempts == 0 {
-			maxAttempts = job.DefaultMaxAttempts
-		}
-		batch.Queue(insertSQL, sp.Queue, sp.Tenant, payload, runAt, micros(sp.Delay), maxAttempts, nullable(sp.IdempotencyKey))
+		batch.Queue(insertSQL, insertArgs(sp)...)
 		if sp.IdempotencyKey != "" {
 			tenants, queues, keys = append(tenants, sp.Tenant), append(queues, sp.Queue), append(keys, sp.IdempotencyKey)
 		}
@@ -96,6 +94,61 @@ func (s *Store) Enqueue(ctx context.Context, specs []job.Spec) ([]store.EnqueueR
 		}
 	}
 	return results, nil
+}
+
+// insertArgs returns the parameters of insertSQL for a spec that has passed
+// validation.
+func insertArgs(sp job.Spec) []any {
+	payload := sp.Payload
+	if payload == nil {
+		payload = []byte{} // a nil slice would be stored as NULL
+	}
+	var runAt any
+	if !sp.RunAt.IsZero() {
+		runAt = job.NormalizeTime(sp.RunAt)
+	}
+	maxAttempts := sp.MaxAttempts
+	if maxAttempts == 0 {
+		maxAttempts = job.DefaultMaxAttempts
+	}
+	return []any{sp.Queue, sp.Tenant, payload, runAt, micros(sp.Delay), maxAttempts, nullable(sp.IdempotencyKey)}
+}
+
+// findSQL looks up the job that an idempotency key names, for flaw F6.
+//
+//	$1 tenant, $2 queue, $3 key
+const findSQL = `SELECT id FROM jobqueue.jobs WHERE (tenant, queue, idempotency_key) = ($1, $2, $3)`
+
+// enqueueCheckThenInsert is Enqueue as flaw F6 has it: for an item with a key
+// it first asks whether a job holds the key, and only if none does it inserts,
+// with a plain INSERT (insertSQL without its ON CONFLICT clause). Between the
+// SELECT and the INSERT another caller can insert the same key, so concurrent
+// enqueues of one key do not all find the first job: the losers fail on the
+// unique index instead.
+func (s *Store) enqueueCheckThenInsert(ctx context.Context, specs []job.Spec) ([]store.EnqueueResult, error) {
+	out := make([]store.EnqueueResult, len(specs))
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		for i, sp := range specs {
+			if sp.IdempotencyKey != "" {
+				var id int64
+				switch err := tx.QueryRow(ctx, findSQL, sp.Tenant, sp.Queue, sp.IdempotencyKey).Scan(&id); {
+				case err == nil:
+					out[i] = store.EnqueueResult{ID: id, Deduplicated: true}
+					continue
+				case !errors.Is(err, pgx.ErrNoRows):
+					return err
+				}
+			}
+			if err := tx.QueryRow(ctx, insertSQL, insertArgs(sp)...).Scan(&out[i].ID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, classify("enqueue", err)
+	}
+	return out, nil
 }
 
 // runEnqueue sends the batch and reads its results. The batch has been applied

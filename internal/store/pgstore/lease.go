@@ -30,12 +30,14 @@ import (
 // it hashes the pick and scans the whole table; the array is evaluated first
 // and is always a primary-key lookup, in ascending id.
 //
-// Two planted flaws live here, each as the removal of one clause: F9PG drops
+// Three planted flaws live here, each as the removal of one clause: F9PG drops
 // the run_at bound of the pick, so that jobs that are not yet due are leased;
-// F2PG drops the epoch increment, so that a lease keeps the previous holder's
-// fencing token.
+// F7 drops the pick's row locks, so that two concurrent leases can choose the
+// same rows; F2PG drops the epoch increment, so that a lease keeps the previous
+// holder's fencing token.
 func leaseSQL(pick string, ttl, worker int) string {
 	pick = without(flaw.F9PG, pick, " AND j.run_at <= (SELECT now FROM clock)")
+	pick = without(flaw.F7, pick, "FOR UPDATE OF j SKIP LOCKED")
 	return without(flaw.F2PG, fmt.Sprintf(`
 WITH clock AS MATERIALIZED (SELECT jobqueue.now() AS now),
 picked AS MATERIALIZED (%s)
