@@ -938,8 +938,18 @@ func TestCtlVersionPrintsTheVersionOfTheBuild(t *testing.T) {
 	if !strings.Contains(r.stdout, "\n  version\n") {
 		t.Errorf("help does not list the version command:\n%s", r.stdout)
 	}
-	if !strings.Contains(r.stdout, "--version") {
-		t.Errorf("help does not list the --version flag:\n%s", r.stdout)
+	// --version is accepted in front of the command's name only, so the help
+	// lists it under a heading of its own and not with the global flags, which
+	// every command takes before and after its name.
+	global := strings.Index(r.stdout, "global flags, accepted before and after the command name:")
+	only := strings.Index(r.stdout, "accepted before the command name only:")
+	switch {
+	case global < 0 || only < global:
+		t.Errorf("help has no heading for a flag of the command line in front of the command, after the global flags:\n%s", r.stdout)
+	case strings.Contains(r.stdout[global:only], "--version"):
+		t.Errorf("help lists --version with the global flags, which every command takes:\n%s", r.stdout)
+	case !strings.Contains(r.stdout[only:], "--version"):
+		t.Errorf("help does not list the --version flag under its own heading:\n%s", r.stdout)
 	}
 }
 

@@ -185,24 +185,60 @@ expect_status commit-off-main-fails 1
 expect_output commit-off-main-fails "is not on main"
 pass commit-off-main-fails
 
-# (h) The commit must be the tip of main, not just on it: a release is cut from
-# the tip, and the lint of the preflight compares the proto files with the tip.
-# A detached HEAD at the tip passes; at an older commit of main it fails and
-# says that the commit is on main but is not its tip.
+# (h) The commit must be on main, and proto/ must be what main has. The lint of
+# the preflight compares proto/ with main using buf breaking, so a proto change
+# that landed on main after the tagged commit would fail it. A commit behind
+# the tip of main passes when nothing in proto/ has changed since, and fails,
+# naming proto/ and buf breaking, when something has. Releases are cut from the
+# tip, which always passes; the tip itself is not required, because main may
+# move while the release runs.
 repo="$(release_repo)"
+mkdir -p "$repo/proto"
+printf 'syntax = "proto3";\n' >"$repo/proto/a.proto"
+commit_all "$repo" "feat: add a proto file"
 tagged="$(git -C "$repo" rev-parse HEAD)"
 git -C "$repo" checkout -q --detach "$tagged"
 run_check "$repo" v0.1.0
 expect_status detached-head-at-the-tip-passes 0
 git -C "$repo" checkout -q main
 printf 'x\n' >"$repo/x.txt"
-commit_all "$repo" "feat: work after the release commit"
+commit_all "$repo" "feat: work that does not touch proto"
 git -C "$repo" checkout -q --detach "$tagged"
 run_check "$repo" v0.1.0
-expect_status commit-behind-the-tip-fails 1
-expect_output commit-behind-the-tip-fails "is on main but is not its tip"
-expect_no_output commit-behind-the-tip-fails "is not on main"
-pass detached-head-and-the-tip
+expect_status behind-the-tip-without-a-proto-change-passes 0
+expect_output behind-the-tip-without-a-proto-change-passes "release: ok"
+git -C "$repo" checkout -q main
+printf 'syntax = "proto3";\nmessage M {}\n' >"$repo/proto/a.proto"
+commit_all "$repo" "feat: change a proto file"
+git -C "$repo" checkout -q --detach "$tagged"
+run_check "$repo" v0.1.0
+expect_status behind-the-tip-with-a-proto-change-fails 1
+expect_output behind-the-tip-with-a-proto-change-fails "proto/"
+expect_output behind-the-tip-with-a-proto-change-fails "buf breaking"
+expect_no_output behind-the-tip-with-a-proto-change-fails "is not on main"
+git -C "$repo" checkout -q main
+run_check "$repo" v0.1.0
+expect_status tip-with-a-proto-change-passes 0
+pass commit-on-main-and-proto
+
+# A proto/ that main has gained since the commit counts as a change too, and a
+# change that main made and then undid does not.
+repo="$(release_repo)"
+tagged="$(git -C "$repo" rev-parse HEAD)"
+mkdir -p "$repo/proto"
+printf 'syntax = "proto3";\n' >"$repo/proto/a.proto"
+commit_all "$repo" "feat: add proto"
+git -C "$repo" checkout -q --detach "$tagged"
+run_check "$repo" v0.1.0
+expect_status proto-added-on-main-fails 1
+expect_output proto-added-on-main-fails "proto/"
+git -C "$repo" checkout -q main
+git -C "$repo" rm -q -r proto
+commit_all "$repo" "revert: remove proto again"
+git -C "$repo" checkout -q --detach "$tagged"
+run_check "$repo" v0.1.0
+expect_status proto-added-and-removed-passes 0
+pass proto-added-on-main
 
 # (i) The newest release heading counts, and Unreleased is not one. The older
 # 0.0.9 in the same file does not satisfy a v0.0.9 tag.
@@ -266,14 +302,15 @@ expect_status missing-main-ref-is-an-error 2
 expect_output missing-main-ref-is-an-error "cannot find origin/main"
 pass missing-main-ref-is-an-error
 
-# (o) A shallow clone at the tip passes: the check compares two commit ids and
-# needs no history.
+# (o) A shallow clone cannot say whether a commit is on main, so it is an
+# error, also at the tip.
 repo="$(release_repo)"
 shallow="$workdir/shallow"
 git clone -q --depth 1 "file://$repo" "$shallow"
 run_check "$shallow" v0.1.0
-expect_status shallow-clone-at-the-tip-passes 0
-pass shallow-clone-at-the-tip-passes
+expect_status shallow-clone-is-an-error 2
+expect_output shallow-clone-is-an-error "shallow"
+pass shallow-clone-is-an-error
 
 # (p) A call without a tag, or with a path that is no repository, is a usage
 # error.
@@ -297,9 +334,13 @@ expect_status default-repository-is-the-scripts-own 0
 pass default-repository-is-the-scripts-own
 
 # (r) The shape of CI: a full clone with a real origin, a detached HEAD at the
-# tag's commit, and the default ref, origin/main. When that commit is the tip
-# of origin/main the check passes; once origin/main has moved on it fails.
+# tag's commit, and the default ref, origin/main. The check passes at the tip of
+# origin/main, and after origin/main has moved on, as long as the move did not
+# touch proto/; a move that did fails it.
 repo="$(release_repo)"
+mkdir -p "$repo/proto"
+printf 'syntax = "proto3";\n' >"$repo/proto/a.proto"
+commit_all "$repo" "feat: add a proto file"
 upstream="$workdir/upstream.git"
 git clone -q --bare "$repo" "$upstream"
 full="$workdir/full"
@@ -310,14 +351,21 @@ out="$(env -u RELEASE_MAIN_REF bash "$check" v0.1.0 "$full" 2>&1)" || status=$?
 expect_status ci-shape-at-the-tip-passes 0
 expect_output ci-shape-at-the-tip-passes "release: ok"
 printf 'x\n' >"$repo/x.txt"
-commit_all "$repo" "feat: work after the release commit"
+commit_all "$repo" "feat: work that does not touch proto"
 git -C "$repo" push -q "$upstream" main
 git -C "$full" fetch -q origin
 status=0
 out="$(env -u RELEASE_MAIN_REF bash "$check" v0.1.0 "$full" 2>&1)" || status=$?
-expect_status ci-shape-behind-origin-main-fails 1
-expect_output ci-shape-behind-origin-main-fails "is on main but is not its tip"
-expect_output ci-shape-behind-origin-main-fails "origin/main"
+expect_status ci-shape-behind-origin-main-passes 0
+printf 'syntax = "proto3";\nmessage M {}\n' >"$repo/proto/a.proto"
+commit_all "$repo" "feat: change a proto file"
+git -C "$repo" push -q "$upstream" main
+git -C "$full" fetch -q origin
+status=0
+out="$(env -u RELEASE_MAIN_REF bash "$check" v0.1.0 "$full" 2>&1)" || status=$?
+expect_status ci-shape-proto-moved-on-fails 1
+expect_output ci-shape-proto-moved-on-fails "proto/"
+expect_output ci-shape-proto-moved-on-fails "origin/main"
 pass ci-shape
 
 # run_latest <repo> <tag>: run is-latest-release.sh on the repository.
@@ -338,8 +386,9 @@ tag_repo() {
   printf '%s' "$dir"
 }
 
-# (s) The highest release tag is the latest, compared as numbers: 0.10.0 is
-# above 0.9.0 and 1.2.10 above 1.2.9, which a text sort gets wrong.
+# (s) The highest release tag is the latest, compared as numbers: 10.0.0 is
+# above 9.0.0, 0.10.0 above 0.9.0 and 1.2.10 above 1.2.9, which a text sort of
+# any of the three parts gets wrong.
 repo="$(tag_repo v0.2.0 v0.9.0 v0.10.0 v1.2.9 v1.2.10 v0.1.0)"
 run_latest "$repo" v1.2.10
 expect_status highest-tag-is-latest 0
@@ -354,6 +403,11 @@ run_latest "$repo" v0.10.0
 [ "$out" = true ] || { printf 'FAIL numeric-order: v0.10.0 got %q\n' "$out" >&2; exit 1; }
 run_latest "$repo" v0.9.0
 [ "$out" = false ] || { printf 'FAIL numeric-order: v0.9.0 got %q\n' "$out" >&2; exit 1; }
+repo="$(tag_repo v9.0.0 v10.0.0)"
+run_latest "$repo" v10.0.0
+[ "$out" = true ] || { printf 'FAIL numeric-order: v10.0.0 got %q\n' "$out" >&2; exit 1; }
+run_latest "$repo" v9.0.0
+[ "$out" = false ] || { printf 'FAIL numeric-order: v9.0.0 got %q\n' "$out" >&2; exit 1; }
 pass latest-is-the-highest-tag-by-number
 
 # (t) Tags that are not releases do not count: a higher pre-release tag, a bare

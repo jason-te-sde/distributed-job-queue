@@ -377,8 +377,13 @@ func usageText() string {
 	fs := newFlagSet("jobqueuectl")
 	// Defaults are shown as they are without an environment.
 	newGlobals(func(string) string { return "" }).register(fs)
-	registerVersionFlag(fs, new(bool))
 	b.WriteString(defaults(fs))
+	// --version is not a global flag: no command takes it, so it is listed
+	// apart, and says where it is accepted.
+	b.WriteString("\nflag accepted before the command name only:\n")
+	vfs := newFlagSet("jobqueuectl")
+	registerVersionFlag(vfs, new(bool))
+	b.WriteString(defaults(vfs))
 	return b.String()
 }
 

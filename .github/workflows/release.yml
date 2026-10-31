@@ -1,8 +1,8 @@
 name: release
 
 # A release is made here, from a tag, and nowhere else: nothing is built or
-# published from a developer machine. Pushing a tag such as v0.1.0 to the tip of
-# main runs two jobs.
+# published from a developer machine. Pushing a tag such as v0.1.0 to a commit
+# of main runs two jobs.
 #
 #   build    checks the tag, runs the preflight, builds the binaries, packages
 #            the chart and writes the checksums and the release notes. It can
@@ -14,7 +14,8 @@ name: release
 #
 # The release is created as a draft, gets all its files, and is published only
 # then, so a failed upload never leaves a public release with files missing. A
-# failed run can leave the draft behind; delete it before running the job again.
+# failed run can leave the draft behind; the publish job refuses to run while a
+# release or a draft exists for the tag, so delete it before running again.
 
 on:
   push:
@@ -83,7 +84,12 @@ jobs:
       # release of an older line does not take it from a newer one.
       - name: Find out whether this is the latest release
         id: latest
-        run: echo "latest=$(scripts/is-latest-release.sh "$GITHUB_REF_NAME")" >>"$GITHUB_OUTPUT"
+        # The value is assigned first, so that a failing script fails the step:
+        # the exit status of echo would hide it.
+        run: |
+          set -euo pipefail
+          latest="$(scripts/is-latest-release.sh "$GITHUB_REF_NAME")"
+          echo "latest=$latest" >>"$GITHUB_OUTPUT"
       - uses: actions/setup-go@v7
         with:
           go-version: 1.27.x
@@ -95,7 +101,8 @@ jobs:
           set -euo pipefail
           go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
           go install github.com/bufbuild/buf/cmd/buf@v1.75.0
-          echo "$(go env GOPATH)/bin" >>"$GITHUB_PATH"
+          gopath="$(go env GOPATH)"
+          echo "$gopath/bin" >>"$GITHUB_PATH"
       # Everything CI runs, with the database: the Postgres tests, and every
       # row of the flaw check. The database is the service above, and only
       # this step is given its address.
@@ -182,6 +189,8 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 7
+          # "Re-run all jobs" uploads the artifact again under the same name.
+          overwrite: true
 
   publish:
     needs: build
@@ -196,6 +205,28 @@ jobs:
       VERSION: ${{ needs.build.outputs.version }}
       LATEST: ${{ needs.build.outputs.latest }}
     steps:
+      # Fail if a release or a draft already exists for the tag, before
+      # anything is pushed. gh release create skips its own check when it makes
+      # a draft, so a re-run after a failed publish would create a second draft
+      # and the edit below could publish the stale one, with half its files.
+      # gh release view exits 1 both when there is no such release, when it
+      # prints exactly "release not found", and for any other failure, such as
+      # a bad token or no network; only that line means it is safe to go on.
+      - name: Refuse to publish over an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          status=0
+          out="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" 2>&1)" || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "a release or draft for $GITHUB_REF_NAME already exists: delete it first (gh release delete $GITHUB_REF_NAME --repo $GITHUB_REPOSITORY, or the draft on the Releases page), then run this job again" >&2
+            exit 1
+          fi
+          if [ "$out" != "release not found" ]; then
+            echo "cannot tell whether a release for $GITHUB_REF_NAME exists (gh release view exited $status): $out" >&2
+            exit 1
+          fi
       # Only for the Docker build context. No token is left in the repository.
       - uses: actions/checkout@v7
         with:
@@ -244,7 +275,8 @@ jobs:
             org.opencontainers.image.version=${{ env.VERSION }}
             org.opencontainers.image.licenses=Apache-2.0
       # A draft first, with every file attached, and published only after that.
-      # --verify-tag stops the run if the tag is not in the repository.
+      # --verify-tag stops the run if the tag is not in the repository, and
+      # --target names the commit that was built.
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -252,7 +284,7 @@ jobs:
           set -euo pipefail
           dir="$RUNNER_TEMP/release"
           gh release create "$GITHUB_REF_NAME" "$dir"/*.tar.gz "$dir"/*.tgz "$dir"/SHA256SUMS \
-            --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --draft --target "$GITHUB_SHA" \
             --title "$GITHUB_REF_NAME" --notes-file "$dir/release-notes.md"
           gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --draft=false --latest="$LATEST"
