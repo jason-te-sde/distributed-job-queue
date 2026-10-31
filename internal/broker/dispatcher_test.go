@@ -784,7 +784,11 @@ func TestDispatcherShortPlannedFetchChainsTheNextWaiter(t *testing.T) {
 
 	hs.hold()
 	first := e.leaseAsync("q", 16, 30*time.Second)
-	<-hs.entered
+	select {
+	case <-hs.entered:
+	case <-time.After(quickly):
+		t.Fatalf("the fetch of the first waiter did not reach the store within %v", quickly)
+	}
 	second := e.leaseAsync("q", 16, 30*time.Second)
 	e.waitWaiters("q", 2)
 	hs.release()

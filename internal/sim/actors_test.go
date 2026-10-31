@@ -630,8 +630,7 @@ func TestShortTenantTakeDoesNotStallTheFlood(t *testing.T) {
 	// Tenant A has a flood of ready jobs and tenant B has a single one. The
 	// ring holds both, so the batches are planned as takes for each in turn,
 	// and B's take comes back short because B ran dry: that says nothing about
-	// A. Nothing
-	// else may stand in for the chained fetch that serves A: every
+	// A. Nothing else may stand in for the chained fetch that serves A: every
 	// notification is lost, the refresh is ten minutes away and the poll is
 	// thirty seconds away, so a broker that takes the queue for empty leaves
 	// the long polls parked, and A's jobs wait for the poll.
