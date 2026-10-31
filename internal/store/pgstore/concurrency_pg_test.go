@@ -312,6 +312,11 @@ func TestPGConcurrentAckRacesReap(t *testing.T) {
 			t.Errorf("job %d: Complete returned %s, want applied or fenced", id, out)
 		}
 	}
+	// The test races two sides. If the completers took every job, or the
+	// reapers did, nothing was raced and the checks above held vacuously.
+	if applied == 0 || reaped.Load() == 0 {
+		t.Errorf("%d completions applied and %d jobs reaped, want some of each: the two sides did not race", applied, reaped.Load())
+	}
 	if total := int64(applied) + reaped.Load(); total != jobs {
 		t.Errorf("%d completions applied and %d jobs reaped make %d, want %d", applied, reaped.Load(), total, jobs)
 	}
@@ -621,6 +626,10 @@ func TestPGConcurrentConservation(t *testing.T) {
 			t.Errorf("job %d has %d attempts of at most %d", id, j.Attempts, j.MaxAttempts)
 		}
 		leased += int(j.Epoch)
+	}
+	// If the goroutines did nothing, every check above held vacuously.
+	if len(rows) == 0 || leased == 0 {
+		t.Errorf("%d jobs and %d leases, want some of each: the goroutines did no work to check", len(rows), leased)
 	}
 	t.Logf("%d jobs, %d leases", len(rows), leased)
 }
