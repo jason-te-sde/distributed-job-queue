@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/jason-te-sde/distributed-job-queue/internal/core/job"
+	"github.com/jason-te-sde/distributed-job-queue/internal/flaw"
 	"github.com/jason-te-sde/distributed-job-queue/internal/store"
 )
 
@@ -206,10 +207,11 @@ func (s *Store) Fail(ctx context.Context, reqs []store.FailRequest) ([]job.Outco
 }
 
 // heartbeatSQL extends the leases that are held under the caller's token and
-// have not run out, and returns the time left on each.
+// have not run out, and returns the time left on each. Flaw F4PG drops the
+// token comparison.
 //
 //	$1 ids, $2 queues, $3 tokens, $4 TTL in microseconds
-const heartbeatSQL = `
+var heartbeatSQL = without(flaw.F4PG, `
 WITH clock AS MATERIALIZED (SELECT jobqueue.now() AS now),
 r AS (
     SELECT * FROM unnest($1::int8[], $2::text[], $3::int8[]) WITH ORDINALITY AS r(id, queue, token, ord)
@@ -219,7 +221,7 @@ SET lease_expires_at = clock.now + $4::int8 * interval '1 microsecond'
 FROM r, clock
 WHERE j.id = r.id AND j.queue = r.queue AND j.state = 'leased' AND j.lease_epoch = r.token
   AND j.lease_expires_at > clock.now
-RETURNING r.ord, j.lease_expires_at - clock.now`
+RETURNING r.ord, j.lease_expires_at - clock.now`, " AND j.lease_epoch = r.token")
 
 // validateRefs checks the refs of a Heartbeat or Release call.
 func validateRefs(refs []store.Ref) error {
@@ -287,10 +289,10 @@ func (s *Store) Heartbeat(ctx context.Context, refs []store.Ref, ttl time.Durati
 // completeSQL records the leased jobs whose lease epoch is the caller's token
 // as succeeded. It does not look at the lease's expiry: finished work is kept
 // as long as nobody else has leased the job since. A result of no bytes
-// arrives as NULL.
+// arrives as NULL. Flaw F1PG drops the token comparison.
 //
 //	$1 ids, $2 queues, $3 tokens, $4 results
-const completeSQL = `
+var completeSQL = without(flaw.F1PG, `
 WITH clock AS MATERIALIZED (SELECT jobqueue.now() AS now),
 r AS (
     SELECT * FROM unnest($1::int8[], $2::text[], $3::int8[], $4::bytea[]) WITH ORDINALITY AS r(id, queue, token, result, ord)
@@ -299,7 +301,7 @@ UPDATE jobqueue.jobs AS j
 SET state = 'succeeded', result = r.result, finished_at = clock.now, lease_expires_at = NULL, leased_by = NULL
 FROM r, clock
 WHERE j.id = r.id AND j.queue = r.queue AND j.state = 'leased' AND j.lease_epoch = r.token
-RETURNING r.ord`
+RETURNING r.ord`, " AND j.lease_epoch = r.token")
 
 // Complete implements store.Store.
 func (s *Store) Complete(ctx context.Context, reqs []store.CompleteRequest) ([]job.Outcome, error) {

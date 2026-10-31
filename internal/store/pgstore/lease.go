@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/jason-te-sde/distributed-job-queue/internal/core/job"
+	"github.com/jason-te-sde/distributed-job-queue/internal/flaw"
 	"github.com/jason-te-sde/distributed-job-queue/internal/store"
 )
 
@@ -22,8 +23,14 @@ import (
 // clock: the subquery is evaluated once and the planner can use it as the upper
 // bound of the index range, whereas a join would read every scheduled job of
 // the queue, in run_at order, and filter them one by one.
+//
+// Two planted flaws live here, each as the removal of one clause: F9PG drops
+// the run_at bound of the pick, so that jobs that are not yet due are leased;
+// F2PG drops the epoch increment, so that a lease keeps the previous holder's
+// fencing token.
 func leaseSQL(pick string, ttl, worker int) string {
-	return fmt.Sprintf(`
+	pick = without(flaw.F9PG, pick, " AND j.run_at <= (SELECT now FROM clock)")
+	return without(flaw.F2PG, fmt.Sprintf(`
 WITH clock AS MATERIALIZED (SELECT jobqueue.now() AS now),
 picked AS MATERIALIZED (%s)
 UPDATE jobqueue.jobs AS j
@@ -31,7 +38,7 @@ SET state = 'leased', lease_epoch = j.lease_epoch + 1, attempts = j.attempts + 1
     lease_expires_at = clock.now + $%d::int8 * interval '1 microsecond', leased_by = $%d::text
 FROM picked, clock
 WHERE j.id = picked.id
-RETURNING %s, j.lease_expires_at - clock.now`, pick, ttl, worker, jobCols)
+RETURNING %s, j.lease_expires_at - clock.now`, pick, ttl, worker, jobCols), "lease_epoch = j.lease_epoch + 1, ")
 }
 
 // tenantLeaseSQL leases for named tenants: for each, the oldest due jobs up to

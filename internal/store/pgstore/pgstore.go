@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jason-te-sde/distributed-job-queue/internal/core/job"
+	"github.com/jason-te-sde/distributed-job-queue/internal/flaw"
 	"github.com/jason-te-sde/distributed-job-queue/internal/store"
 )
 
@@ -147,4 +148,20 @@ func errUnresolved(item int) error {
 	return fmt.Errorf("%w: item %d was neither inserted nor found under its idempotency key, "+
 		"because the job that held the key was deleted in between; retry",
 		store.ErrUnavailable, item)
+}
+
+// without returns sql, or sql with the first occurrence of clause removed when
+// the planted flaw id is on. That is how the flaw sites in the statements
+// work: each names the one clause whose absence is the defect. Without the
+// jobqueue_flaws build tag no flaw is ever on and sql comes back unchanged. A
+// clause that sql does not contain panics, so that a site that has drifted
+// from its statement cannot quietly stop testing anything.
+func without(id flaw.ID, sql, clause string) string {
+	if !flaw.On(id) {
+		return sql
+	}
+	if !strings.Contains(sql, clause) {
+		panic("pgstore: flaw " + string(id) + ": the statement has no clause " + strconv.Quote(clause))
+	}
+	return strings.Replace(sql, clause, "", 1)
 }

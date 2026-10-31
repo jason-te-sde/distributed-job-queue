@@ -7,6 +7,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/jason-te-sde/distributed-job-queue/internal/core/job"
+	"github.com/jason-te-sde/distributed-job-queue/internal/flaw"
 	"github.com/jason-te-sde/distributed-job-queue/internal/store"
 )
 
@@ -82,7 +83,13 @@ func (s *Store) Reap(ctx context.Context, limit int, backoff store.BackoffFunc) 
 			if err := job.ValidateDelay("backoff", delay); err != nil {
 				return err
 			}
-			next, outcome := job.Reap(before, now, delay)
+			in := before
+			// Flaw F3PG decides as if the job had an attempt left. The update
+			// never writes max_attempts, so the stored budget stays as it was.
+			if flaw.On(flaw.F3PG) {
+				in.MaxAttempts = in.Attempts + 1
+			}
+			next, outcome := job.Reap(in, now, delay)
 			if outcome != job.Applied {
 				return &store.InternalError{ID: before.ID, State: before.State, Msg: "an expired lease was not reaped: " + outcome.String()}
 			}
