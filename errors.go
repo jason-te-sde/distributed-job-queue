@@ -18,6 +18,17 @@ var (
 	// refused, whether by this package or by the broker. Retrying the same
 	// call cannot succeed.
 	ErrInvalid = errors.New("jobqueue: invalid argument")
+
+	// ErrAlreadyRunning is returned by a Worker's Run and Handle after Run
+	// has been called: a Worker runs once. The error names the call of Run
+	// that came first.
+	ErrAlreadyRunning = errors.New("jobqueue: worker already running")
+
+	// ErrInternal is wrapped by the error of Run when the worker found that
+	// the broker, or the worker itself, broke the protocol between them: a
+	// bug, not a condition to handle. The message names the job and the
+	// lease token involved.
+	ErrInternal = errors.New("jobqueue: internal invariant broken")
 )
 
 // IsRetryable reports whether err came from a call that may succeed if it is

@@ -110,7 +110,7 @@ func NewProducer(conn grpc.ClientConnInterface, opts ProducerOptions) *Producer 
 		tenant:  opts.Tenant,
 		retry:   opts.Retry.withDefaults(),
 		timeout: opts.PerCallTimeout,
-		rng:     newRand(),
+		rng:     rand.New(rand.NewPCG(randomSeed())),
 	}
 	if p.timeout <= 0 {
 		p.timeout = defaultPerCallTimeout
@@ -118,17 +118,16 @@ func NewProducer(conn grpc.ClientConnInterface, opts ProducerOptions) *Producer 
 	return p
 }
 
-// newRand returns a generator seeded from the operating system's randomness.
-// If that is unavailable the clock seeds it: jitter needs to differ between
-// processes, not to be unpredictable.
-func newRand() *rand.Rand {
+// randomSeed returns two words of the operating system's randomness. If that
+// is unavailable the clock stands in: the jitter of retries and the backoff of
+// a worker need to differ between processes, not to be unpredictable.
+func randomSeed() (s1, s2 uint64) {
 	var seed [16]byte
 	if _, err := crand.Read(seed[:]); err != nil {
 		now := uint64(time.Now().UnixNano())
-		return rand.New(rand.NewPCG(now, now^0x9e3779b97f4a7c15))
+		return now, now ^ 0x9e3779b97f4a7c15
 	}
-	s1, s2 := binary.LittleEndian.Uint64(seed[:8]), binary.LittleEndian.Uint64(seed[8:])
-	return rand.New(rand.NewPCG(s1, s2))
+	return binary.LittleEndian.Uint64(seed[:8]), binary.LittleEndian.Uint64(seed[8:])
 }
 
 // Enqueue creates a job. It retries retryable failures, which is safe because
