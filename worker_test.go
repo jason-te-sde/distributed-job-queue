@@ -23,6 +23,7 @@ import (
 	jobqueue "github.com/jason-te-sde/distributed-job-queue"
 	"github.com/jason-te-sde/distributed-job-queue/internal/core/job"
 	jobqueuev1 "github.com/jason-te-sde/distributed-job-queue/internal/gen/jobqueue/v1"
+	"github.com/jason-te-sde/distributed-job-queue/internal/store/memstore"
 )
 
 // within is how long a test waits for something that should take a few
@@ -148,22 +149,39 @@ func TestWorkerRetryAfterAndPermanent(t *testing.T) {
 
 func TestWorkerPanicIsRetryableFailure(t *testing.T) {
 	c := newCluster(t, clusterOpts{})
-	// One attempt, so that the retry the panic asks for is the end of the job
-	// and its last error can be read without the job being leased again.
-	boom := c.addSpec(job.Spec{MaxAttempts: 1})
+	// The job has the default attempts, so a panic that is treated as the
+	// retryable failure it should be leaves it ready, where a permanent one
+	// would leave it dead. It panics on its first attempt only, so that
+	// nothing churns after the failure has been looked at.
+	boom := c.addSpec(job.Spec{})
 	after := c.addSpec(job.Spec{})
 
 	c.startWorker(jobqueue.WorkerOptions{}, func(_ context.Context, j *jobqueue.Job) error {
-		if j.ID == boom {
+		if j.ID == boom && j.Attempt == 1 {
 			panic("kaboom")
 		}
 		return nil
 	})
 
-	c.await("the panicking job and the one after it", within, func() bool {
-		return c.get(boom).State == job.StateDead && c.get(after).State == job.StateSucceeded
+	// The failure the panic reported is read from the change the store made
+	// for it: by the time a test looks at the row, the retry may have run.
+	failure := func() (memstore.Change, bool) {
+		for _, ch := range c.changesOf(boom) {
+			if ch.Op == memstore.OpFail {
+				return ch, true
+			}
+		}
+		return memstore.Change{}, false
+	}
+	c.await("the panic to be reported and the other job to finish", within, func() bool {
+		_, reported := failure()
+		return reported && c.get(after).State == job.StateSucceeded
 	})
-	if got := c.get(boom).LastError; !strings.HasPrefix(got, "panic: kaboom\n") || !strings.Contains(got, "goroutine") {
+	ch, _ := failure()
+	if ch.After.State != job.StateReady || ch.After.Attempts != 1 {
+		t.Errorf("after the panic the job is %v with %d attempts, want ready with 1: a panic is a retryable failure", ch.After.State, ch.After.Attempts)
+	}
+	if got := ch.After.LastError; !strings.HasPrefix(got, "panic: kaboom\n") || !strings.Contains(got, "goroutine") {
 		t.Errorf("LastError = %q, want %q followed by the stack", got, "panic: kaboom")
 	}
 }
@@ -731,5 +749,297 @@ func TestWorkerFailsWithErrInternalWhenTheBrokerBreaksTheProtocol(t *testing.T) 
 		}
 	case <-time.After(within):
 		t.Fatal("Run did not fail")
+	}
+}
+
+// The tracker measures a lease from the instant its request was sent, never
+// from the instant the answer came, because the answer may have waited in the
+// network for any time. These two tests hold an answer back after the broker
+// has given it, which is what a slow network does, and check that the worker
+// counts from the send.
+
+func TestWorkerDiscardsAGrantThatArrivedPastItsLocalDeadline(t *testing.T) {
+	c := newCluster(t, clusterOpts{})
+	c.add("q", 1)
+
+	// The first Lease answer that carries a job reaches the worker 900ms
+	// after the broker gave it. The lease is 1s with a margin of 200ms, so
+	// the worker must give up on it 800ms after the request left: the grant
+	// arrives past its own deadline.
+	var delayed atomic.Bool
+	slowAnswer := jobqueue.WithGRPCOptions(grpc.WithChainUnaryInterceptor(
+		func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+			err := invoker(ctx, method, req, reply, cc, opts...)
+			if resp, ok := reply.(*jobqueuev1.LeaseResponse); ok && err == nil && len(resp.GetJobs()) > 0 && !delayed.Swap(true) {
+				time.Sleep(900 * time.Millisecond)
+			}
+			return err
+		}))
+	// The broker holds the Release it gets, so that nothing can run the job
+	// again while the test looks.
+	released := make(chan struct{})
+	proceed := make(chan struct{})
+	var once sync.Once
+	c.brokers[0].setFault(func(ctx context.Context, method string) error {
+		if method == "Release" {
+			once.Do(func() { close(released) })
+			select {
+			case <-proceed:
+			case <-ctx.Done():
+			}
+		}
+		return nil
+	})
+	ran := make(chan int64, 4)
+	c.startWorker(jobqueue.WorkerOptions{}, func(_ context.Context, j *jobqueue.Job) error {
+		ran <- j.ID
+		return nil
+	}, slowAnswer)
+
+	select {
+	case <-released:
+	case id := <-ran:
+		t.Fatalf("the handler ran for job %d, whose grant arrived after its local deadline", id)
+	case <-time.After(within):
+		t.Fatal("the worker never released the grant that arrived past its deadline")
+	}
+	select {
+	case id := <-ran:
+		t.Fatalf("the handler ran for job %d, whose grant arrived after its local deadline", id)
+	default:
+	}
+	if got := c.brokers[0].callCount("Release"); got < 1 {
+		t.Errorf("Release calls = %d, want at least 1", got)
+	}
+
+	// Released, the job is an ordinary ready job again.
+	close(proceed)
+	select {
+	case <-ran:
+	case <-time.After(within):
+		t.Fatal("the released job never ran")
+	}
+}
+
+func TestWorkerHeartbeatDeadlineIsAnchoredAtTheSendTime(t *testing.T) {
+	c := newCluster(t, clusterOpts{})
+	c.add("q", 1)
+
+	// The first heartbeat is answered at once by the broker, which extends the
+	// lease to a full second from then, but the answer reaches the worker
+	// 500ms later. Every later heartbeat is lost. The lease then lasts until
+	// the first heartbeat's send time plus 1s, less the 200ms margin: counting
+	// from the arrival instead would add the 500ms of delay.
+	var calls atomic.Int32
+	sent := make(chan time.Time, 1)
+	slowAnswer := jobqueue.WithGRPCOptions(grpc.WithChainUnaryInterceptor(
+		func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+			if !strings.HasSuffix(method, "/Heartbeat") {
+				return invoker(ctx, method, req, reply, cc, opts...)
+			}
+			if calls.Add(1) > 1 {
+				return status.Error(codes.Unavailable, "lost")
+			}
+			sent <- time.Now()
+			err := invoker(ctx, method, req, reply, cc, opts...)
+			time.Sleep(500 * time.Millisecond)
+			return err
+		}))
+	type ended struct {
+		at    time.Time
+		cause error
+	}
+	cancelled := make(chan ended, 1)
+	c.startWorker(jobqueue.WorkerOptions{}, func(ctx context.Context, _ *jobqueue.Job) error {
+		<-ctx.Done()
+		cancelled <- ended{time.Now(), context.Cause(ctx)}
+		return ctx.Err()
+	}, slowAnswer)
+
+	var heartbeatSent time.Time
+	select {
+	case heartbeatSent = <-sent:
+	case <-time.After(within):
+		t.Fatal("no heartbeat was sent")
+	}
+	select {
+	case e := <-cancelled:
+		got := e.at.Sub(heartbeatSent)
+		if got < 750*time.Millisecond || got > 1050*time.Millisecond {
+			t.Errorf("the handler was cancelled %v after the heartbeat was sent, want about 800ms (send time + 1s - 200ms); 1.3s would mean the 500ms of delay was added", got)
+		}
+		if !strings.Contains(e.cause.Error(), "lease deadline reached") {
+			t.Errorf("context.Cause = %q, want it to say the deadline was reached", e.cause)
+		}
+	case <-time.After(within):
+		t.Fatal("the handler was never cancelled")
+	}
+}
+
+func TestWorkerRunStartedDirectlyWithGoNamesNoAssemblyFile(t *testing.T) {
+	c := newCluster(t, clusterOpts{})
+	c.add("q", 1)
+	stopped := newSignalWriter("worker stopped")
+	w := jobqueue.NewWorker(c.dial(), fast(jobqueue.WorkerOptions{Logger: slog.New(slog.NewTextHandler(stopped, nil))}))
+	started := make(chan struct{})
+	var once sync.Once
+	if err := w.Handle(func(context.Context, *jobqueue.Job) error {
+		once.Do(func() { close(started) })
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// With the goroutine's first function Run itself, the caller that the
+	// runtime reports is its own assembly stub, runtime.goexit.
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go w.Run(ctx) //nolint:errcheck // what the test is about is the call site of Run, not its result
+	<-started
+
+	const want = "a goroutine started with go"
+	err := w.Run(ctx)
+	if !errors.Is(err, jobqueue.ErrAlreadyRunning) || !strings.Contains(err.Error(), want) {
+		t.Errorf("second Run = %v, want ErrAlreadyRunning naming %q", err, want)
+	}
+	if err != nil && (strings.Contains(err.Error(), ".s:") || strings.Contains(err.Error(), "goexit")) {
+		t.Errorf("second Run = %q, want no assembly file or runtime function in it", err)
+	}
+	if err := w.Handle(noop); !errors.Is(err, jobqueue.ErrAlreadyRunning) || !strings.Contains(err.Error(), want) {
+		t.Errorf("Handle after Run = %v, want ErrAlreadyRunning naming %q", err, want)
+	}
+	cancel()
+	select {
+	case <-stopped.seen:
+	case <-time.After(within):
+		t.Fatal("Run did not stop")
+	}
+}
+
+// A refusal that no retry can undo ends the worker: it drains, which lets the
+// handlers that are running finish and be reported, and then Run returns the
+// refusal. The retryable errors keep the worker backing off and asking again.
+
+func TestWorkerStopsOnLeaseErrorsThatRetryingCannotFix(t *testing.T) {
+	for _, code := range []codes.Code{codes.Unauthenticated, codes.PermissionDenied, codes.InvalidArgument} {
+		t.Run(code.String(), func(t *testing.T) {
+			c := newCluster(t, clusterOpts{})
+			c.brokers[0].setFault(func(_ context.Context, method string) error {
+				if method == "Lease" {
+					return status.Error(code, "refused")
+				}
+				return nil
+			})
+			rw := c.startWorker(jobqueue.WorkerOptions{}, noop)
+
+			select {
+			case <-rw.done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Run did not return: it keeps retrying a request that was refused for good")
+			}
+			if got := status.Code(rw.err); got != code {
+				t.Errorf("Run = %v, want an error carrying the status %v", rw.err, code)
+			}
+			if code == codes.InvalidArgument && !errors.Is(rw.err, jobqueue.ErrInvalid) {
+				t.Errorf("Run = %v, want an InvalidArgument to wrap ErrInvalid", rw.err)
+			}
+			if got := c.brokers[0].callCount("Lease"); got != 1 {
+				t.Errorf("the worker made %d Lease calls, want 1", got)
+			}
+		})
+	}
+}
+
+func TestWorkerWithABadTokenStops(t *testing.T) {
+	c := newCluster(t, clusterOpts{auth: tokensFor(t, "acme", "s3cret")})
+	for name, tc := range map[string]struct {
+		token string
+		code  codes.Code
+	}{
+		"unknown token": {"wrong", codes.Unauthenticated},
+		"token of a producer, a role that may not lease": {"s3cret", codes.PermissionDenied},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rw := c.startWorker(jobqueue.WorkerOptions{}, noop, jobqueue.WithToken(tc.token))
+			select {
+			case <-rw.done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Run did not return")
+			}
+			if got := status.Code(rw.err); got != tc.code {
+				t.Errorf("Run = %v, want an error carrying the status %v", rw.err, tc.code)
+			}
+		})
+	}
+}
+
+func TestWorkerDrainsRunningHandlersBeforeReturningARefusal(t *testing.T) {
+	c := newCluster(t, clusterOpts{})
+	id := c.add("q", 1)[0]
+	var leases atomic.Int32
+	c.brokers[0].setFault(func(_ context.Context, method string) error {
+		// The first Lease gets the job. The worker has a free slot left, so it
+		// asks again at once, and that call is refused.
+		if method == "Lease" && leases.Add(1) > 1 {
+			return status.Error(codes.PermissionDenied, "token revoked")
+		}
+		return nil
+	})
+	draining := newSignalWriter("worker draining")
+	started := make(chan struct{})
+	finish := make(chan struct{})
+	rw := c.startWorker(jobqueue.WorkerOptions{Concurrency: 2, DrainTimeout: 5 * time.Second, Logger: slog.New(slog.NewTextHandler(draining, nil))},
+		func(ctx context.Context, _ *jobqueue.Job) error {
+			close(started)
+			<-finish
+			return ctx.Err()
+		})
+
+	<-started
+	select {
+	case <-draining.seen:
+	case <-time.After(within):
+		t.Fatal("the worker did not start to drain after its Lease call was refused")
+	}
+	select {
+	case <-rw.done:
+		t.Fatalf("Run returned %v while a handler was still running", rw.err)
+	default:
+	}
+	close(finish)
+	select {
+	case <-rw.done:
+	case <-time.After(within):
+		t.Fatal("Run did not return after the handler did")
+	}
+	if status.Code(rw.err) != codes.PermissionDenied {
+		t.Errorf("Run = %v, want the refusal", rw.err)
+	}
+	if j := c.get(id); j.State != job.StateSucceeded {
+		t.Errorf("job = state %v, want succeeded: the drain reports the handler's result", j.State)
+	}
+}
+
+func TestWorkerKeepsBackingOffOnRetryableLeaseErrors(t *testing.T) {
+	for _, code := range []codes.Code{codes.Unavailable, codes.ResourceExhausted, codes.Aborted, codes.DeadlineExceeded, codes.Internal, codes.Unknown} {
+		t.Run(code.String(), func(t *testing.T) {
+			c := newCluster(t, clusterOpts{})
+			id := c.add("q", 1)[0]
+			var calls atomic.Int32
+			c.brokers[0].setFault(func(_ context.Context, method string) error {
+				if method == "Lease" && calls.Add(1) <= 2 {
+					return status.Error(code, "try later")
+				}
+				return nil
+			})
+			rw := c.startWorker(jobqueue.WorkerOptions{}, noop)
+
+			c.await("the job to succeed after two refused Lease calls", within, func() bool { return c.get(id).State == job.StateSucceeded })
+			select {
+			case <-rw.done:
+				t.Fatalf("Run returned %v: %v is no reason to stop", rw.err, code)
+			default:
+			}
+		})
 	}
 }

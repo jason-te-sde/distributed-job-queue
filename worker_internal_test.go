@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -118,6 +119,26 @@ func TestPanicOutcome(t *testing.T) {
 	}
 	if !strings.HasPrefix(got.Error, "panic: wrapped: kaboom\n") || !strings.Contains(got.Error, "goroutine") {
 		t.Errorf("Error = %q, want %q and the stack", got.Error, "panic: wrapped: kaboom")
+	}
+}
+
+func TestSiteOf(t *testing.T) {
+	for name, tc := range map[string]struct {
+		frame runtime.Frame
+		ok    bool
+		want  string
+	}{
+		"a function of the caller": {runtime.Frame{Function: "example.com/app.main", File: "/home/me/app/main.go", Line: 42}, true, "main.go:42"},
+		"a goroutine's entry":      {runtime.Frame{Function: "runtime.goexit", File: "/usr/local/go/src/runtime/asm_arm64.s", Line: 1039}, true, "a goroutine started with go"},
+		"any runtime frame":        {runtime.Frame{Function: "runtime.main", File: "/usr/local/go/src/runtime/proc.go", Line: 283}, true, "a goroutine started with go"},
+		"an assembly file":         {runtime.Frame{Function: "example.com/app.stub", File: "/home/me/app/stub_amd64.s", Line: 7}, true, "a goroutine started with go"},
+		"no frame":                 {runtime.Frame{}, false, "an unknown call site"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := siteOf(tc.frame, tc.ok); got != tc.want {
+				t.Errorf("siteOf = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

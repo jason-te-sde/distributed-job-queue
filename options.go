@@ -94,6 +94,21 @@ func (r RetryPolicy) withDefaults() RetryPolicy {
 	return r
 }
 
+// ceiling is the upper bound of the wait after failed attempt n, counting from
+// 1: Base doubled n-1 times, but never more than Cap. It expects a policy that
+// withDefaults has been applied to, so 1 <= Base <= Cap. Doubling stops short
+// of a value that would pass Cap, which also keeps it from overflowing.
+func (r RetryPolicy) ceiling(n int) time.Duration {
+	d := r.Base
+	for i := 1; i < n; i++ {
+		if d > r.Cap/2 {
+			return r.Cap
+		}
+		d *= 2
+	}
+	return min(d, r.Cap)
+}
+
 // ProducerOptions configures a Producer.
 type ProducerOptions struct {
 	// Tenant is the tenant of every job whose EnqueueParams name none. Empty

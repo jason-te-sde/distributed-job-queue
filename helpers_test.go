@@ -48,17 +48,20 @@ func (w *signalWriter) Write(p []byte) (int, error) {
 
 // feed wakes whoever waits on the store: it is told about every row change
 // and replaces its channel each time, so a waiter that took the channel
-// before looking at the store cannot miss a change.
+// before looking at the store cannot miss a change. It also keeps the changes,
+// for tests that need to know what a call did, not only what the row is now.
 type feed struct {
-	mu sync.Mutex
-	ch chan struct{}
+	mu  sync.Mutex
+	ch  chan struct{}
+	log []memstore.Change
 }
 
 func newFeed() *feed { return &feed{ch: make(chan struct{})} }
 
-func (f *feed) changed(memstore.Change) {
+func (f *feed) changed(c memstore.Change) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.log = append(f.log, c)
 	close(f.ch)
 	f.ch = make(chan struct{})
 }
@@ -273,6 +276,20 @@ func (c *cluster) count(queue string, state job.State) int {
 		}
 	}
 	return n
+}
+
+// changesOf returns every change the store made to the job so far, oldest
+// first.
+func (c *cluster) changesOf(id int64) []memstore.Change {
+	c.feed.mu.Lock()
+	defer c.feed.mu.Unlock()
+	var out []memstore.Change
+	for _, ch := range c.feed.log {
+		if ch.After.ID == id || ch.Before.ID == id {
+			out = append(out, ch)
+		}
+	}
+	return out
 }
 
 // await blocks until cond holds, looking again at every change of the store,

@@ -129,14 +129,30 @@ func (w *Worker) Handle(h Handler) error {
 // Run cancels the handlers and returns an error that wraps ErrInternal;
 // leases that were still held run out on their own.
 //
-// Handlers run on goroutines of their own, and their contexts do not end
-// when ctx does: the drain is what ends them.
+// If the broker refuses a request for work in a way that asking again cannot
+// change (the status Unauthenticated, PermissionDenied or InvalidArgument:
+// a token that is wrong, a role that may not lease from the queue, a request
+// that is malformed), the worker drains as if ctx had been cancelled, and then
+// Run returns the refusal, an error that carries the gRPC status. The other
+// failures, such as an unavailable broker, are waited out with a growing,
+// jittered delay for as long as ctx lives.
+//
+// Handlers run on goroutines of their own, and their contexts do not end when
+// ctx does: the drain is what ends them. A handler that ignores its context
+// can therefore still be running after Run has returned: when the drain
+// timeout passed, its job was given back to the broker, which may have given
+// it to another worker by then, and what the handler does from then on is
+// fenced by the lease token (see Job.Token). Run does not wait for such a
+// handler, and its result is dropped.
 func (w *Worker) Run(ctx context.Context) error {
-	site := "an unknown call site"
-	if _, file, line, ok := runtime.Caller(1); ok {
-		site = fmt.Sprintf("%s:%d", filepath.Base(file), line)
+	// The caller of Run is two frames up from the call that reads it here.
+	var pcs [1]uintptr
+	n := runtime.Callers(2, pcs[:])
+	var frame runtime.Frame
+	if n > 0 {
+		frame, _ = runtime.CallersFrames(pcs[:n]).Next() // the second result says whether more follow
 	}
-	cfg, handler, err := w.begin(site)
+	cfg, handler, err := w.begin(siteOf(frame, n > 0))
 	if err != nil {
 		return err
 	}
@@ -149,6 +165,21 @@ func (w *Worker) Run(ctx context.Context) error {
 		return fmt.Errorf("%w: %w", ErrInvalid, err) // begin has validated cfg
 	}
 	return newWorkerLoop(w.conn, w.opts, handler, tracker).run(ctx)
+}
+
+// siteOf names the place a call was made from, as "file.go:line". When the
+// caller is not code of the user's, which is what the runtime reports for a
+// goroutine whose first function is Run itself ("go w.Run(ctx)"), the
+// frame is the runtime's assembly stub, runtime.goexit, and its file and line
+// say nothing a user can use: the site is then "a goroutine started with go".
+func siteOf(frame runtime.Frame, ok bool) string {
+	switch {
+	case !ok:
+		return "an unknown call site"
+	case strings.HasPrefix(frame.Function, "runtime."), strings.HasSuffix(frame.File, ".s"):
+		return "a goroutine started with go"
+	}
+	return fmt.Sprintf("%s:%d", filepath.Base(frame.File), frame.Line)
 }
 
 // begin checks that the worker may run, with the options it has and a

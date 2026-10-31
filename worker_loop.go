@@ -139,8 +139,12 @@ type workerLoop struct {
 	// calls counts the Lease and Release calls in flight. After the tracker
 	// has stopped the loop waits for them, because the answer to a Lease
 	// call that arrives late holds jobs that must be given back.
-	calls   int
-	stopped bool
+	calls    int
+	stopped  bool
+	draining bool
+	// refused is why the worker is draining when the broker refused it for
+	// good, and nil otherwise. Run returns it once the drain is over.
+	refused error
 }
 
 func newWorkerLoop(conn grpc.ClientConnInterface, opts WorkerOptions, handler Handler, tracker *lease.Tracker) *workerLoop {
@@ -177,7 +181,8 @@ func (l *workerLoop) enter() {
 // the loop was built.
 func (l *workerLoop) now() lease.Mono { return time.Since(l.start) }
 
-// run is the loop. It returns nil when the drain is complete, and otherwise an
+// run is the loop. It returns nil when the drain is complete, the refusal that
+// started the drain if the broker refused the worker for good, and otherwise an
 // error that wraps ErrInternal.
 func (l *workerLoop) run(ctx context.Context) error {
 	l.enter()
@@ -195,7 +200,7 @@ func (l *workerLoop) run(ctx context.Context) error {
 	}()
 	l.log.Info("worker started")
 
-	draining := ctx.Done()
+	shutdown := ctx.Done()
 	effects := l.tracker.Start(l.now())
 	for {
 		if err := l.perform(effects); err != nil {
@@ -203,27 +208,44 @@ func (l *workerLoop) run(ctx context.Context) error {
 		}
 		if l.stopped && l.calls == 0 {
 			l.log.Info("worker stopped")
-			return nil
+			return l.refused
 		}
 
 		var err error
 		select {
 		case ev := <-l.events:
-			l.enter()
-			effects, err = ev.apply(l, l.now())
+			effects, err = l.handle(ev)
 		case <-l.timer.C:
-			l.enter()
-			effects = l.tracker.Tick(l.now())
-		case <-draining:
-			l.enter()
-			draining = nil
-			l.log.Info("worker draining")
-			effects = l.tracker.Drain(l.now())
+			effects = l.tick()
+		case <-shutdown:
+			shutdown = nil
+			effects = l.drain()
 		}
 		if err != nil {
 			return l.fail(err)
 		}
 	}
+}
+
+// handle applies the end of a call or handler to the tracker.
+func (l *workerLoop) handle(ev event) ([]lease.Effect, error) {
+	l.enter()
+	return ev.apply(l, l.now())
+}
+
+// tick lets the tracker do what is due now.
+func (l *workerLoop) tick() []lease.Effect {
+	l.enter()
+	return l.tracker.Tick(l.now())
+}
+
+// drain starts the shutdown: no more work is asked for, the handlers that run
+// get the drain timeout, and the loop ends when the tracker says it is done.
+func (l *workerLoop) drain() []lease.Effect {
+	l.enter()
+	l.draining = true
+	l.log.Info("worker draining")
+	return l.tracker.Drain(l.now())
 }
 
 // fail ends the loop on a broken invariant. The error is internal whatever
@@ -305,6 +327,14 @@ func (e leaseAnswer) apply(l *workerLoop, now lease.Mono) ([]lease.Effect, error
 	}
 	if e.err != nil {
 		l.logCallFailed("lease", e.err)
+		if refusedForGood(e.err) && !l.draining {
+			// Asking again cannot help: the same request would be refused the
+			// same way. Stop asking, as a shutdown does, so that the handlers
+			// that run are finished and reported, and then return the refusal.
+			l.refused = fmt.Errorf("%w (the worker drained and stopped: the same request would be refused again)", callFailed("lease", e.err, nil))
+			l.log.Error("the broker refuses this worker's lease requests, stopping", slog.Any("err", e.err))
+			return l.drain(), nil
+		}
 		return l.tracker.LeasesFailed(now, e.seq), nil
 	}
 
@@ -327,6 +357,16 @@ func (e leaseAnswer) apply(l *workerLoop, now lease.Mono) ([]lease.Effect, error
 		return nil, err
 	}
 	return effects, nil
+}
+
+// refusedForGood reports whether err, the failure of a Lease call, is a refusal
+// that no retry can undo: the request is not valid, the token is not known, or
+// the token's role may not lease from the queue. Every other failure, the
+// broker being unavailable or out of capacity first among them, may pass, and
+// the tracker backs off and asks again.
+func refusedForGood(err error) bool {
+	code := status.Code(err)
+	return code == codes.Unauthenticated || code == codes.PermissionDenied || code == codes.InvalidArgument
 }
 
 // startHandler runs the handler of a grant on a goroutine of its own.

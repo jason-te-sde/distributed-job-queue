@@ -307,13 +307,10 @@ func (p *Producer) call(ctx context.Context, op string, attempt func(context.Con
 // sleep waits the jittered delay after failed attempt n, or until ctx ends, in
 // which case it returns the context's error.
 func (p *Producer) sleep(ctx context.Context, n int) error {
-	ceiling := p.retry.Base
-	for i := 1; i < n && ceiling < p.retry.Cap; i++ {
-		ceiling *= 2
-	}
-	ceiling = min(ceiling, p.retry.Cap)
+	// The draw is over [0, ceiling], which has ceiling+1 values: that count is
+	// held in a uint64 because ceiling may be the largest Duration.
 	p.mu.Lock()
-	d := time.Duration(p.rng.Int64N(int64(ceiling) + 1))
+	d := time.Duration(p.rng.Uint64N(uint64(p.retry.ceiling(n)) + 1))
 	p.mu.Unlock()
 
 	timer := time.NewTimer(d)

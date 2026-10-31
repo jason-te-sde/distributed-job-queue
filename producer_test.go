@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"math"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -250,6 +251,24 @@ func TestProducerStopsRetryingWhenTheCallersContextEnds(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Errorf("Enqueue took %v after its context ended", elapsed)
+	}
+}
+
+func TestProducerSurvivesAHugeRetryBase(t *testing.T) {
+	c := newCluster(t, clusterOpts{})
+	c.brokers[0].setFault(func(context.Context, string) error { return status.Error(codes.Unavailable, "down") })
+	// The wait after the first failure is drawn from [0, Base]. A base this
+	// large used to overflow the draw and panic; the wait is now as long as
+	// asked, so the caller's deadline is what ends the call.
+	p := jobqueue.NewProducer(c.dial(), jobqueue.ProducerOptions{
+		Retry: jobqueue.RetryPolicy{Attempts: 5, Base: math.MaxInt64, Cap: math.MaxInt64},
+	})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	_, err := p.Enqueue(ctx, jobqueue.EnqueueParams{Queue: "q"})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Enqueue = %v, want an error that wraps the context's", err)
 	}
 }
 
