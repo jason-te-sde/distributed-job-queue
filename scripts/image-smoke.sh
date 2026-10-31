@@ -11,7 +11,7 @@
 #
 # Every container and the network carry a name that is unique to the run, and
 # they are removed when the script ends, however it ends. When a run fails, the
-# broker's log is printed first.
+# logs of the broker, of the migration and of PostgreSQL are printed first.
 #
 # Output: "smoke: ok", or "smoke: FAIL: <what went wrong>".
 # Exit status: 0 ok, 1 a check failed, 2 usage or environment error.
@@ -48,19 +48,30 @@ run_id="jq-smoke-$$-$RANDOM"
 network="$run_id"
 postgres="$run_id-postgres"
 broker="$run_id-broker"
+# The migration container is kept (no --rm) until the teardown, so that its log
+# can be printed when a later step fails.
+migrate="$run_id-migrate"
 database_url="postgres://postgres:smoke@db:5432/postgres?sslmode=disable"
 
+# show_log <container> <label>: print the log of a container, if it exists.
+show_log() {
+  docker inspect "$1" >/dev/null 2>&1 || return 0
+  printf 'smoke: the %s log:\n' "$2" >&2
+  docker logs "$1" >&2 2>&1 || true
+}
+
 # cleanup runs on every exit. It keeps the exit status of the script, prints the
-# broker's log when the run failed, and never fails itself: a container that
-# was never started is not an error.
+# logs when the run failed, and never fails itself: a container that was never
+# started is not an error.
 cleanup() {
   local status=$?
   trap - EXIT INT TERM HUP
-  if [ "$status" -ne 0 ] && docker inspect "$broker" >/dev/null 2>&1; then
-    printf 'smoke: the broker log:\n' >&2
-    docker logs "$broker" >&2 2>&1 || true
+  if [ "$status" -ne 0 ]; then
+    show_log "$broker" broker
+    show_log "$migrate" migrate
+    show_log "$postgres" PostgreSQL
   fi
-  docker rm -f "$broker" "$postgres" >/dev/null 2>&1 || true
+  docker rm -f "$broker" "$migrate" "$postgres" >/dev/null 2>&1 || true
   docker network rm "$network" >/dev/null 2>&1 || true
   exit "$status"
 }
@@ -105,8 +116,17 @@ until docker exec "$postgres" pg_isready -q -h 127.0.0.1 -U postgres; do
   sleep 1
 done
 
-out="$(ctl migrate --database-url "$database_url" 2>&1)" || fail "migrate exited with an error: $out"
-expect "migrate" '^applied=1( |$)' "$out"
+# The database is fresh, so every migration is applied and the schema version
+# is the number applied. Neither is a fixed number: a later migration file must
+# not break this check.
+out="$(docker run --name "$migrate" --network "$network" --entrypoint /jobqueuectl "$image" \
+  migrate --database-url "$database_url" 2>&1)" || fail "migrate exited with an error: $out"
+line="$(printf '%s\n' "$out" | grep -E '^applied=[0-9]+ version=[0-9]+$' || true)"
+[ -n "$line" ] || fail "migrate: expected a line 'applied=N version=N', got: $out"
+applied="${line#applied=}"
+applied="${applied%% *}"
+[ "$applied" -ge 1 ] && [ "${line##*version=}" = "$applied" ] ||
+  fail "migrate on a fresh database: want applied >= 1 and version equal to applied, got: $line"
 
 docker run -d --name "$broker" --network "$network" --network-alias jq "$image" \
   --insecure --grpc-addr :7070 --http-addr :7071 --database-url "$database_url" >/dev/null

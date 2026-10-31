@@ -23,10 +23,14 @@ ARG VERSION=dev
 
 WORKDIR /src
 
-# The module files alone, so that the download is cached until a dependency
-# changes. The cache mounts are the Go module cache and the Go build cache; they
-# keep downloads and compiled packages between builds without ending up in a
-# layer.
+# The module files alone, then a download. The modules go into a cache mount, and
+# a cache mount is not part of any layer: a cache hit on this step restores
+# nothing. The build below finds the modules because it mounts the same cache on
+# the same builder, and it downloads them again when that cache is gone, for
+# example on a fresh CI builder. The step is here to fail early, before the
+# source is copied, on an unreachable module or a go.sum mismatch, and to warm
+# the cache. The two cache mounts are the Go module cache and the Go build
+# cache; neither ends up in the image.
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download

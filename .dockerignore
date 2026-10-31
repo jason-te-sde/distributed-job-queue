@@ -27,3 +27,12 @@ pg.json
 **/*.test
 **/*.out
 **/testdata/rapid
+
+# Credentials that a developer may keep in the working tree: nothing in the
+# image should be able to contain them. tokens* is anchored to the top of the
+# context on purpose, because ** would also drop a Go source file named
+# tokens.go from the build.
+**/.env*
+**/*.pem
+**/*.key
+tokens*

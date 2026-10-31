@@ -193,16 +193,40 @@ jobs:
       - uses: docker/setup-buildx-action@v4
       # Nothing is pushed. The build stage runs on the runner's own architecture
       # and cross-compiles, and the final stage only copies files, so building
-      # arm64 needs no emulation and no setup-qemu-action.
+      # arm64 needs no emulation and no setup-qemu-action. The result stays in
+      # the builder's cache, which the next steps reuse.
       - name: Build for linux/amd64 and linux/arm64
         uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: false
+          outputs: type=cacheonly
+      # The arm64 binaries cannot run on this runner, so a wrong-architecture
+      # build would pass everything else. Export the image and read the ELF
+      # header of both binaries.
+      - name: Export the linux/arm64 image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/arm64
+          push: false
+          outputs: type=local,dest=${{ runner.temp }}/image-arm64
+      - name: Assert the arm64 binaries are arm64
+        run: |
+          set -euo pipefail
+          for bin in jobqueue-server jobqueuectl; do
+            description="$(file -b "$RUNNER_TEMP/image-arm64/$bin")"
+            echo "$bin: $description"
+            case "$description" in
+              ELF*"ARM aarch64"*) ;;
+              *) echo "$bin is not an ELF arm64 binary" >&2; exit 1 ;;
+            esac
+          done
       # A multi-platform result cannot be loaded into the Docker daemon, so the
       # smoke test gets the amd64 image. The builder keeps the layers of the
-      # build above, so this one compiles nothing again.
+      # builds above, so this one compiles nothing again. The amd64 binaries run
+      # in the smoke test, which is their architecture check.
       - name: Build for linux/amd64 and load it
         uses: docker/build-push-action@v7
         with:
