@@ -1,24 +1,5 @@
 //go:build e2e
 
-// Package e2e runs the job queue on a Kubernetes cluster: the image, the Helm
-// chart, the example worker and the KEDA scaler, together, under the faults
-// that a cluster brings (a pod that is deleted, a rolling restart) and under
-// the autoscaler's own scaling.
-//
-// The tests need a kind cluster with KEDA installed in the namespace keda, a
-// kubectl whose current context is that cluster, helm, and the image already
-// loaded into the cluster. They do not create any of these. CI sets them up
-// in the k8s-e2e job of .github/workflows/ci.yml; a local run is
-//
-//	kind create cluster --name jq-e2e --config deploy/kind/kind-config.yaml
-//	helm repo add kedacore https://kedacore.github.io/charts
-//	helm install keda kedacore/keda --version 2.21.0 --namespace keda --create-namespace --wait
-//	docker build -t jq:e2e . && kind load docker-image jq:e2e --name jq-e2e
-//	JOBQUEUE_E2E_IMAGE=jq:e2e go test -tags e2e -count=1 -timeout 40m ./test/e2e/
-//
-// A missing piece fails the run: nothing here skips. The run leaves its
-// namespace behind, so that the objects can be inspected after a failure, and
-// refuses to start where the namespace already exists.
 package e2e
 
 import (
@@ -68,12 +49,16 @@ const (
 )
 
 // Source edges, in pixels, of the pictures that the jobs ask the worker to
-// draw. The cost of a job grows with the square of the edge: on an Apple M2 one
-// job takes about 2 ms at 256, 14 ms at 1024 and 52 ms at 2048.
+// draw. The cost of a job grows with the square of the edge. Measured on an
+// Apple M2 with a benchmark of the thumbnail function alone, one job took 2.2 ms
+// at 256, 5 ms at 512, 14 ms at 1024 and 52 ms at 2048. Nothing was measured on
+// a CI runner.
 const (
-	// sizeLight is for the subtest that is about the brokers: the worker must
-	// keep far ahead of 40 jobs a second, so that a late job is the brokers'
-	// doing and not the worker's.
+	// sizeLight is for the subtest about the brokers. At 2.2 ms a job, one
+	// worker thread does about 450 jobs a second on an M2, more than ten times
+	// the 40 a second that the subtest enqueues, so a late job is unlikely to be
+	// the worker's doing. A runner that is five times slower still has more than
+	// twice the rate it needs.
 	sizeLight = 256
 	// sizeDefault is the edge that `thumbnail produce` uses.
 	sizeDefault = 1024
@@ -83,15 +68,16 @@ const (
 	sizeHeavy = 2048
 )
 
-// workerConcurrency is how many jobs a worker pod runs at once. The chart's
-// default is 4, and with it one pod would drain 500 jobs of the heavy size in
-// about 7 seconds on an idle M2 (500 jobs of 52 ms, four at a time). That is
-// less than the 15 seconds between two looks of the HPA, so the backlog could be
-// gone before the autoscaler sees it, and whether the scaling subtest passed
-// would depend on the speed of the machine. With 1 the pod needs 29 seconds, as
-// measured with the replicas capped at one, and the autoscaler must scale out
-// for the backlog to clear sooner.
-const workerConcurrency = 1
+// scalingConcurrency is how many jobs a worker pod runs at once in the scaling
+// subtest, which sets it with helm upgrade before it starts; the other
+// subtests run with the chart's default of 4. With 4, one pod would drain 500
+// jobs of the heavy size in about 7 seconds on an idle M2 (500 jobs of 52 ms,
+// four at a time). That is less than the 15 seconds between two looks of the
+// HPA, so the backlog could be gone before the autoscaler sees it, and whether
+// the subtest passed would depend on the speed of the machine. With 1 the pod
+// needs 29 seconds, as measured with the replicas capped at one, and the
+// autoscaler must scale out for the backlog to clear sooner.
+const scalingConcurrency = 1
 
 // fixture is what the subtests hand to each other.
 type fixture struct {
@@ -110,7 +96,7 @@ func TestE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%s=%q: %v", imageEnv, image, err)
 	}
-	requireKindCluster(t)
+	pinKindCluster(t)
 	requireKEDA(t)
 	t.Cleanup(func() {
 		if t.Failed() {
@@ -143,29 +129,6 @@ func splitImage(image string) (repository, tag string, err error) {
 		return "", "", errors.New("want name:tag, as the chart takes a repository and a tag; digests are not supported")
 	}
 	return image[:i], image[i+1:], nil
-}
-
-// requireKindCluster fails unless the current kubectl context is a kind
-// cluster. The run installs a release and creates a namespace, and that must
-// never happen on a cluster that somebody cares about.
-func requireKindCluster(t *testing.T) {
-	t.Helper()
-	ctx, err := execute(commandTimeout, "kubectl", "config", "current-context")
-	if err != nil {
-		t.Fatalf("no current kubectl context: %v", err)
-	}
-	if !strings.HasPrefix(ctx, "kind-") {
-		t.Fatalf("the current kubectl context is %q, not a kind cluster (kind-...): the run installs and deletes things, so it refuses to run elsewhere", ctx)
-	}
-}
-
-// requireKEDA fails unless the KEDA custom resources exist: the chart's
-// ScaledObject cannot be installed without them.
-func requireKEDA(t *testing.T) {
-	t.Helper()
-	if _, err := execute(commandTimeout, "kubectl", "get", "crd", "scaledobjects.keda.sh"); err != nil {
-		t.Fatalf("KEDA is not installed in the cluster (install the kedacore/keda chart into the namespace keda first): %v", err)
-	}
 }
 
 // install puts PostgreSQL, the Secrets and the chart in a new namespace and
@@ -203,7 +166,6 @@ func (f *fixture) install(t *testing.T, repository, tag string) {
 		"tokens.secretName="+tokensSecret,
 		"scaler.enabled=true",
 		"example.enabled=true",
-		"example.concurrency="+strconv.Itoa(workerConcurrency),
 		"example.tokenSecret="+workerTokenSecret,
 		"example.tokenKey=token",
 		"example.keda.enabled=true",
@@ -395,7 +357,11 @@ func requireNoDeadJobs(t *testing.T) {
 // specReplicas is the number of replicas that a Deployment is asked to have.
 func specReplicas(t *testing.T, deploy string) int {
 	t.Helper()
-	return int(mustInt(t, kubectl(t, "get", "deployment", deploy, "-o", "jsonpath={.spec.replicas}")))
+	desired, _, err := replicaCounts(deploy)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	return desired
 }
 
 // processesJobs enqueues 300 jobs while the example worker is at zero
@@ -465,8 +431,12 @@ func sleepUntil(ctx context.Context, at time.Time) bool {
 
 // brokerPodDeletionAndRollingRestartUnderLoad enqueues 40 jobs a second for a
 // minute. At 20s it deletes one broker pod, and at 40s it restarts the broker
-// Deployment. Brokers drain on SIGTERM, so no lease may be left to expire: no
-// job dies, none is late by the lease TTL of 30s, and none is lost.
+// Deployment. What it asserts is the outcome: every one of the 2400 jobs
+// succeeded, none is dead, none took 30s or more from enqueue to finish, and
+// the faults happened. It does not prove that brokers drain cleanly: killing a
+// broker pod with no grace period did not break these assertions in an
+// experiment, because a broker holds few leases in memory and workers
+// acknowledge through any broker.
 func (f *fixture) brokerPodDeletionAndRollingRestartUnderLoad(t *testing.T) {
 	const (
 		rate      = 40 // jobs per second
@@ -479,9 +449,9 @@ func (f *fixture) brokerPodDeletionAndRollingRestartUnderLoad(t *testing.T) {
 		restartAt = 40 * time.Second
 		// drainFor is how long after the load ends the jobs may take to finish.
 		drainFor = 120 * time.Second
-		// maxLatency bounds finished_at - created_at of every job. The lease TTL
-		// is 30s: a job whose broker vanished without releasing its lease would
-		// wait that long for the reaper, and would break the bound.
+		// maxLatency bounds finished_at - created_at of every job, as the brief
+		// does. It is also the lease TTL, so a lease left to expire would show
+		// as a job at or above the bound.
 		maxLatency = 30 * time.Second
 	)
 	before := brokerPods(t)
@@ -547,7 +517,7 @@ func (f *fixture) brokerPodDeletionAndRollingRestartUnderLoad(t *testing.T) {
 		"SELECT coalesce(max(extract(epoch FROM finished_at - created_at)), 0) FROM jobqueue.jobs WHERE id > %d", base)))
 	t.Logf("the slowest of the %d jobs took %.2fs from enqueue to finish", jobs, late)
 	if late >= maxLatency.Seconds() {
-		t.Fatalf("a job took %.2fs from enqueue to finish; a drained broker leaves no lease to expire, so every job must take less than %s", late, maxLatency)
+		t.Fatalf("a job took %.2fs from enqueue to finish; every job must take less than %s", late, maxLatency)
 	}
 
 	// The faults really happened: the rolling restart replaced every pod that
@@ -588,6 +558,16 @@ func cooldownPeriod(t *testing.T) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
+// requireWorkerConcurrency checks that the example worker Deployment runs n
+// jobs at once, from the --concurrency argument of its container.
+func requireWorkerConcurrency(t *testing.T, n int) {
+	t.Helper()
+	args := kubectl(t, "get", "deployment", workerDeploy, "-o", "jsonpath={.spec.template.spec.containers[0].args}")
+	if want := fmt.Sprintf(`"--concurrency","%d"`, n); !strings.Contains(args, want) {
+		t.Fatalf("the example worker runs with %s, want %s", args, want)
+	}
+}
+
 // kedaScalesToZeroAndBack checks the whole cycle of the example worker: with
 // nothing to do it is at zero replicas; a backlog of 500 jobs brings it up,
 // and to more than one replica; and once the backlog is gone it returns to
@@ -600,11 +580,16 @@ func (f *fixture) kedaScalesToZeroAndBack(t *testing.T) {
 		// downSlack is what the scale-down may take beyond the cooldown: KEDA's
 		// polling, the termination of the pods, and the controller's own delay.
 		downSlack = 90 * time.Second
+		// processWithin is how long the 500 jobs may take, from the enqueue to
+		// the last one. The brief gives no bound for it; this one is the 180s of
+		// ProcessesJobs, and the jobs took between 12s and 20s in the local runs.
+		processWithin = 180 * time.Second
 	)
 	settle := cooldownPeriod(t) + downSlack
 
 	toZero := func(what string) {
 		t.Helper()
+		start := time.Now()
 		eventually(t, settle, 2*time.Second, what, func() (bool, string) {
 			n, err := readyReplicas(workerDeploy)
 			if err != nil {
@@ -612,8 +597,15 @@ func (f *fixture) kedaScalesToZeroAndBack(t *testing.T) {
 			}
 			return n == 0, fmt.Sprintf("%d ready replicas", n)
 		})
+		t.Logf("%s: zero ready replicas after %s (bound %s)", what, time.Since(start).Round(time.Second), settle)
 	}
 	toZero("the worker has no backlog and scales to zero")
+
+	// Only this subtest needs the worker to be slow (see scalingConcurrency).
+	// The worker is at zero replicas, so the upgrade has no pod to restart; the
+	// check below shows that it took effect.
+	helmUpgrade(t, release, "example.concurrency="+strconv.Itoa(scalingConcurrency))
+	requireWorkerConcurrency(t, scalingConcurrency)
 
 	base := maxJobID(t)
 	p := f.connect(t)
@@ -621,7 +613,10 @@ func (f *fixture) kedaScalesToZeroAndBack(t *testing.T) {
 	enqueued := time.Now()
 
 	// The sampler looks every 250ms, much more often than the subtest does
-	// anything else, so that a scale-out is seen however short it is.
+	// anything else, so that a scale-out is seen however short it is. It records
+	// the replicas that the Deployment was asked for as well as the ready ones:
+	// if the ready count stays at one, the first tells an autoscaler that never
+	// scaled from pods that started too late.
 	stopSampling := sampleReplicas(t.Context(), workerDeploy, 250*time.Millisecond)
 	eventually(t, upWithin, 500*time.Millisecond, "the backlog scales the worker up", func() (bool, string) {
 		n, err := readyReplicas(workerDeploy)
@@ -632,11 +627,17 @@ func (f *fixture) kedaScalesToZeroAndBack(t *testing.T) {
 	})
 	t.Logf("the worker had a ready replica %s after the jobs were enqueued", time.Since(enqueued).Round(time.Second))
 
-	waitSucceeded(t, base, jobs, 180*time.Second)
-	peak := stopSampling()
-	t.Logf("all %d jobs succeeded %s after they were enqueued; at most %d replicas were ready", jobs, time.Since(enqueued).Round(time.Second), peak)
-	if peak <= 1 {
-		t.Fatalf("the worker never had more than %d ready replica(s) while %d jobs were processed; a backlog of %d with a target of 10 per replica must scale it out", peak, jobs, jobs)
+	waitSucceeded(t, base, jobs, processWithin)
+	peaks := stopSampling()
+	t.Logf("all %d jobs succeeded %s after they were enqueued; the Deployment was asked for at most %d replicas and at most %d were ready",
+		jobs, time.Since(enqueued).Round(time.Second), peaks.Desired, peaks.Ready)
+	if peaks.Ready <= 1 {
+		why := "the autoscaler never asked for a second replica"
+		if peaks.Desired > 1 {
+			why = fmt.Sprintf("the autoscaler asked for %d replicas, but the pods were not ready before the jobs were done", peaks.Desired)
+		}
+		t.Fatalf("the worker never had more than %d ready replica(s) while %d jobs were processed, and a backlog of %d with a target of 10 per replica must scale it out: %s",
+			peaks.Ready, jobs, jobs, why)
 	}
 	requireThumbnails(t, base, jobs)
 

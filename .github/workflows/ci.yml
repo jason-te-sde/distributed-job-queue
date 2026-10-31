@@ -343,10 +343,14 @@ jobs:
         with:
           go-version: 1.27.x
       # kind-action checks the kind and kubectl binaries it downloads against the
-      # checksums published with their releases.
+      # checksums published with their releases. Its default kubectl is v1.35.0,
+      # two minor versions behind the Kubernetes 1.37 that kind v0.33.0 runs, and
+      # kubectl supports one, so the version is named here. Keep it within one
+      # minor version of the node image of the kind release above.
       - uses: helm/kind-action@v1
         with:
           version: v0.33.0
+          kubectl_version: v1.37.1
           cluster_name: ${{ env.KIND_CLUSTER }}
           config: deploy/kind/kind-config.yaml
           wait: 120s
@@ -370,7 +374,7 @@ jobs:
         run: go test -tags e2e -count=1 -timeout 40m -v ./test/e2e/
       # The test leaves its namespace in place, so the objects are still there.
       - name: Collect the state of the cluster
-        if: failure()
+        if: failure() || cancelled()
         run: |
           set +e
           mkdir -p cluster-dump
@@ -390,7 +394,7 @@ jobs:
           kubectl logs --namespace keda --selector app.kubernetes.io/name=keda-operator \
             --all-containers --prefix --tail=-1 --ignore-errors > cluster-dump/keda-operator.log 2>&1
       - name: Upload the state of the cluster
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v7
         with:
           name: k8s-e2e-cluster-dump
