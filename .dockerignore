@@ -1,0 +1,38 @@
+# What the image build never reads. Keeping it out of the build context makes
+# the context small and keeps edits to it from invalidating the layer that
+# copies the source.
+#
+# Not excluded on purpose: internal/store/pgstore/migrate/sql, which the
+# jobqueuectl binary embeds, and internal/gen, which is generated and committed.
+
+# Version control and the CI configuration.
+.git
+.github
+
+# Benchmarks (a separate module), the documentation and the chaos test output.
+bench
+docs
+test/chaos/artifacts
+
+# Deployment files and scripts: the build runs none of them.
+deploy
+scripts
+
+# Local build output and test artifacts. A pattern without ** matches at the top
+# of the context only.
+bin
+dist
+coverage*
+pg.json
+**/*.test
+**/*.out
+**/testdata/rapid
+
+# Credentials that a developer may keep in the working tree: nothing in the
+# image should be able to contain them. tokens* is anchored to the top of the
+# context on purpose, because ** would also drop a Go source file named
+# tokens.go from the build.
+**/.env*
+**/*.pem
+**/*.key
+tokens*
