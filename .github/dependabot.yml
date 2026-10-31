@@ -8,6 +8,13 @@ updates:
     groups:
       go-minor-and-patch:
         update-types: [minor, patch]
+    ignore:
+      # Ruling 35: the chaos test uses the Toxiproxy Go client at v2.12.0.
+      # From v2.13.0 on, the module declares go 1.27.0, and taking it would
+      # raise the go directive of go.mod past the 1.26.0 that the 1.26.x leg
+      # of CI builds with. Lift this when the module's go floor reaches 1.27.
+      - dependency-name: github.com/Shopify/toxiproxy/v2
+        versions: [">=2.13.0"]
 
   - package-ecosystem: gomod
     directory: /bench

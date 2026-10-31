@@ -22,18 +22,14 @@
 package chaos
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -98,28 +94,29 @@ func TestChaos(t *testing.T) {
 		}
 		seed = s
 	}
-	toxiproxyAddr := os.Getenv("JOBQUEUE_CHAOS_TOXIPROXY_ADDR")
-	if toxiproxyAddr == "" {
-		toxiproxyAddr = "127.0.0.1:8474"
-	}
 	t.Logf("seed %d, fault phase %s, %d jobs", seed, phase, jobs)
 
-	c := StartCluster(t, ClusterConfig{
-		Brokers: numBrokers, Workers: numWorkers, Concurrency: handlersPerWorker,
-		TTL: leaseTTL, Margin: leaseMargin,
-		PGContainer:   requireEnv(t, "JOBQUEUE_CHAOS_PG_CONTAINER"),
-		PGDSN:         requireEnv(t, "JOBQUEUE_CHAOS_PG_DSN"),
-		ToxiproxyAddr: toxiproxyAddr,
-		Seed:          seed,
-	})
+	cfg := clusterConfig(t, seed)
+	cfg.Brokers, cfg.Workers = numBrokers, numWorkers
+	c := StartCluster(t, cfg)
 
 	// The producer outlives the fault phase if it fell behind, but not the
 	// drain budget.
 	start := time.Now()
 	prodCtx, stopProducer := context.WithDeadline(context.Background(), start.Add(phase+drainBudget))
-	defer stopProducer()
 	prodDone := make(chan producerStats, 1)
-	go func() { prodDone <- runProducer(prodCtx, t, c, seed, jobs, phase) }()
+	prodExited := make(chan struct{})
+	go func() {
+		defer close(prodExited)
+		prodDone <- runProducer(prodCtx, t, c, seed, jobs, phase)
+	}()
+	// Registered after the cluster's cleanup, so it runs before it. A test
+	// that stops early, on a Fatalf, must not leave the producer logging
+	// after the test has ended.
+	t.Cleanup(func() {
+		stopProducer()
+		<-prodExited
+	})
 
 	faultCtx, stopFaults := context.WithTimeout(context.Background(), phase)
 	runFaults(faultCtx, t, c, seed)
@@ -152,10 +149,16 @@ func TestChaos(t *testing.T) {
 			fenced++
 		}
 	}
-	summary := fmt.Sprintf("seed %d\nfaults %v\nstates %v\nevents %v\nduplicate deliveries %d\nfenced sink writes %d\nviolations %d\n",
-		seed, c.FaultCounts(), states, rep.Counts, rep.DuplicateDeliveries, fenced, len(rep.Violations))
+	excused := c.Excused()
+	summary := fmt.Sprintf("seed %d\nfaults %v\nstates %v\nevents %v\nduplicate deliveries %d\nfenced sink writes %d\n"+
+		"failed producer calls %d\nbroker start failures that were started again %d\nviolations %d\n",
+		seed, c.FaultCounts(), states, rep.Counts, rep.DuplicateDeliveries, fenced,
+		stats.failedCalls, len(excused), len(rep.Violations))
 	c.SaveExtra("result.txt", []byte(summary))
 	t.Log("result:\n" + summary)
+	for _, e := range excused {
+		t.Logf("excused: %s", e)
+	}
 
 	for i, v := range rep.Violations {
 		if i == 25 {
@@ -184,6 +187,40 @@ func TestChaos(t *testing.T) {
 	}
 	for _, u := range c.Unexpected() {
 		t.Errorf("process crash: %s", u)
+	}
+
+	// Whether the run met a stale handler, and whether a call of the producer
+	// failed past the SDK's own retries, depends on timing: no fault of the
+	// schedule guarantees either. A stall or a partition produces a stale
+	// write only when the worker had a handler in flight at that moment, and
+	// the SDK's retries absorb a call that lands on a cut broker. An
+	// assertion would flake, so a run that missed them says so, and a reader
+	// of the log knows that the fence, or the producer's retry loop, was not
+	// exercised by that run. Runs of seeds 1 to 3 had 2 to 13 fenced writes.
+	if fenced == 0 {
+		t.Log("chaos: warning: no fenced writes: no handler wrote under a stale token, so the sink's fence and the S4 order check were not exercised by this run")
+	}
+	if stats.failedCalls == 0 {
+		t.Log("chaos: warning: no producer call failed after the SDK's own retries, so the producer's retry loop was not exercised by this run")
+	}
+}
+
+// clusterConfig returns the configuration of a cluster from the environment:
+// where PostgreSQL and toxiproxy-server are, the lease settings, and the seed.
+// The caller sets the number of brokers and of workers.
+func clusterConfig(t *testing.T, seed uint64) ClusterConfig {
+	t.Helper()
+	toxiproxyAddr := os.Getenv("JOBQUEUE_CHAOS_TOXIPROXY_ADDR")
+	if toxiproxyAddr == "" {
+		toxiproxyAddr = "127.0.0.1:8474"
+	}
+	return ClusterConfig{
+		Concurrency: handlersPerWorker,
+		TTL:         leaseTTL, Margin: leaseMargin,
+		PGContainer:   requireEnv(t, "JOBQUEUE_CHAOS_PG_CONTAINER"),
+		PGDSN:         requireEnv(t, "JOBQUEUE_CHAOS_PG_DSN"),
+		ToxiproxyAddr: toxiproxyAddr,
+		Seed:          seed,
 	}
 }
 
@@ -527,94 +564,23 @@ func readFinalState(pool *pgxpool.Pool) ([]history.FinalJob, []history.SinkRow, 
 // A worker that was killed with SIGKILL may have died in the middle of a
 // write, which leaves its file without a final newline and with half a line.
 // Each start of a worker has a file of its own, so that can only be the last
-// line of a file. That line is dropped, and counted, because the event it
-// would have been was never seen by anything else. Nothing else is repaired:
-// an unreadable line anywhere else, or a torn line in the file of a process
-// that was not killed, fails the test, as does more torn lines than there
-// were workers killed.
+// line of a file, and the cluster knows the file of every worker it killed.
+// A torn tail in one of those files is dropped and logged, because the event
+// it would have been was never seen by anything else. A torn tail in any
+// other file, the producer's or that of a worker that was not killed, has no
+// explanation: the test fails and names the file. Nothing else is repaired: a
+// line that does not parse anywhere else fails the test too.
 func readHistory(t *testing.T, c *Cluster) []history.Event {
 	t.Helper()
-	paths, err := filepath.Glob(filepath.Join(c.HistoryDir(), "*.jsonl"))
+	events, tolerated, refused, err := loadHistory(c.HistoryDir(), c.KilledHistoryFiles())
+	for _, tt := range tolerated {
+		t.Logf("%s ends in a torn line of %d bytes, which the SIGKILL of its worker left; dropped it", tt.File, tt.Bytes)
+	}
+	for _, tt := range refused {
+		t.Errorf("%s ends in a torn line of %d bytes, but its process was not killed: nothing explains the tear", tt.File, tt.Bytes)
+	}
 	if err != nil {
-		t.Fatalf("list the history files: %v", err)
-	}
-	slices.Sort(paths)
-	var (
-		readers []io.Reader
-		torn    []string
-	)
-	for _, path := range paths {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		if kept, dropped := dropTornTail(data); dropped > 0 {
-			t.Logf("%s ends in a torn line of %d bytes, which a killed worker left; dropped it", filepath.Base(path), dropped)
-			torn = append(torn, filepath.Base(path))
-			data = kept
-		}
-		readers = append(readers, bytes.NewReader(data))
-	}
-	events, err := history.ReadAll(readers...)
-	if err != nil {
-		t.Fatalf("read the history: %v (files in order: %s)", err, strings.Join(baseNames(paths), ", "))
-	}
-	if kills := c.WorkerKills(); len(torn) > kills {
-		t.Errorf("%d history files end in a torn line (%v) but only %d workers were killed", len(torn), torn, kills)
-	}
-	for _, name := range torn {
-		if strings.HasPrefix(name, "producer") {
-			t.Errorf("the producer's history %s has a torn line, but the test never kills the producer", name)
-		}
+		t.Fatalf("%v", err)
 	}
 	return events
-}
-
-// TestDropTornTail pins what readHistory repairs: an unfinished last line
-// goes, and nothing else does.
-func TestDropTornTail(t *testing.T) {
-	const whole = `{"at":"2026-10-31T00:00:00Z","kind":"handler_start","id":1}`
-	for _, tc := range []struct {
-		name        string
-		in          string
-		wantKept    string
-		wantDropped int
-	}{
-		{"empty file", "", "", 0},
-		{"ends in a newline", whole + "\n", whole + "\n", 0},
-		{"one torn line", `{"at":"2026-10`, "", len(`{"at":"2026-10`)},
-		{"torn line after whole lines", whole + "\n" + whole + "\n" + `{"at":`, whole + "\n" + whole + "\n", len(`{"at":`)},
-		{"whole last line without a newline", whole, whole, 0},
-		{"whole last line without a newline after others", whole + "\n" + whole, whole + "\n" + whole, 0},
-		{"a torn line in the middle is not repaired", `{"at":` + "\n" + whole + "\n", `{"at":` + "\n" + whole + "\n", 0},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			kept, dropped := dropTornTail([]byte(tc.in))
-			if string(kept) != tc.wantKept || dropped != tc.wantDropped {
-				t.Errorf("dropTornTail(%q) = (%q, %d), want (%q, %d)", tc.in, kept, dropped, tc.wantKept, tc.wantDropped)
-			}
-		})
-	}
-}
-
-// dropTornTail removes an unfinished last line from data and returns the
-// rest and the size of what it removed. A last line without its newline that
-// is a whole JSON value is kept: a reader can parse it.
-func dropTornTail(data []byte) (kept []byte, dropped int) {
-	if len(data) == 0 || data[len(data)-1] == '\n' {
-		return data, 0
-	}
-	cut := bytes.LastIndexByte(data, '\n') + 1
-	if json.Valid(data[cut:]) {
-		return data, 0
-	}
-	return data[:cut], len(data) - cut
-}
-
-func baseNames(paths []string) []string {
-	out := make([]string, len(paths))
-	for i, p := range paths {
-		out[i] = filepath.Base(p)
-	}
-	return out
 }

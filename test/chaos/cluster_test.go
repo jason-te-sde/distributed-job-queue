@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -25,8 +26,6 @@ import (
 	toxiproxy "github.com/Shopify/toxiproxy/v2/client"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	"github.com/jason-te-sde/distributed-job-queue/internal/store/pgstore/migrate"
 )
 
 // The kinds of fault, which are the keys of FaultCounts.
@@ -94,11 +93,16 @@ type instance struct {
 	// done is closed after the process has exited and the cluster has
 	// recorded that.
 	done chan struct{}
-	// ready is set once a broker answers /readyz with 200.
+	// ready is set once a broker has answered /readyz with 200. It records
+	// that the broker got as far as serving, which tells a failure at boot
+	// from a crash; it does not say that the broker is ready now.
 	ready atomic.Bool
 	// expected is set before the cluster ends the process on purpose, so
 	// that its exit is not reported as a crash.
 	expected atomic.Bool
+	// history is the history file of a worker, by its base name, and empty for
+	// a broker.
+	history string
 	// stopped says that the process is frozen with SIGSTOP. Guarded by the
 	// cluster's mutex.
 	stopped bool
@@ -136,6 +140,7 @@ type Cluster struct {
 	pkgDir     string // the directory of the test; artifacts go below it
 	serverBin  string
 	workerBin  string
+	ctlBin     string
 	dbName     string
 	directDSN  string   // the run's database, not through a proxy
 	brokerDSN  string   // the run's database, through the pg proxy
@@ -151,15 +156,19 @@ type Cluster struct {
 	stopOnce sync.Once
 	bg       sync.WaitGroup
 
-	mu         sync.Mutex // guards the fields below
-	brokers    []*node
-	workers    []*node
-	faults     map[string]int
-	toxicSeq   int
-	sigkills   int // workers ended with SIGKILL, by a fault or by the shutdown
-	unexpected []string
-	healed     bool
-	closed     bool
+	mu       sync.Mutex // guards the fields below
+	brokers  []*node
+	workers  []*node
+	faults   map[string]int
+	toxicSeq int
+	// killedHistory holds the history file, by base name, of every worker
+	// that was ended with SIGKILL, by a fault or by the shutdown: the only
+	// files in which a torn last line is explained.
+	killedHistory map[string]bool
+	unexpected    []string
+	excused       []string
+	healed        bool
+	closed        bool
 }
 
 // StartCluster builds the broker and the worker, creates a database of its own
@@ -175,10 +184,11 @@ func StartCluster(t *testing.T, cfg ClusterConfig) *Cluster {
 	}
 	c := &Cluster{
 		t: t, cfg: cfg, pkgDir: pkgDir, dir: t.TempDir(),
-		proxies:    map[string]*toxiproxy.Proxy{},
-		faults:     map[string]int{},
-		stop:       make(chan struct{}),
-		httpClient: &http.Client{Timeout: time.Second},
+		proxies:       map[string]*toxiproxy.Proxy{},
+		faults:        map[string]int{},
+		stop:          make(chan struct{}),
+		killedHistory: map[string]bool{},
+		httpClient:    &http.Client{Timeout: time.Second},
 	}
 	t.Cleanup(c.cleanup)
 	for _, sub := range []string{"bin", "logs", "history", "extra"} {
@@ -266,6 +276,15 @@ func (c *Cluster) Up() (brokers, workers []int) {
 	return brokers, workers
 }
 
+// Ready reports whether broker i is running and answers /readyz with 200 now.
+func (c *Cluster) Ready(i int) bool {
+	c.mu.Lock()
+	n := c.brokers[i]
+	up := n.inst != nil
+	c.mu.Unlock()
+	return up && c.readyNow(n)
+}
+
 // FaultCounts returns how many faults of each kind have been fired.
 func (c *Cluster) FaultCounts() map[string]int {
 	c.mu.Lock()
@@ -278,21 +297,35 @@ func (c *Cluster) FaultCounts() map[string]int {
 }
 
 // Unexpected lists the processes that exited without the cluster having
-// ended them, apart from a broker that failed to start: a broker started
-// while PostgreSQL is out fails and is started again, as an orchestrator
-// restarts a pod that crashes at boot. Anything else is a crash.
+// ended them: a crash. A broker that failed at boot with an ordinary error
+// exit is not one, see Excused. Anything else is: a signal, a panic, an exit
+// of a worker, and any exit of a broker that had been serving.
 func (c *Cluster) Unexpected() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return slices.Clone(c.unexpected)
 }
 
-// WorkerKills is how many worker processes the cluster ended with SIGKILL.
-// Each of them can leave one torn last line in its history file.
-func (c *Cluster) WorkerKills() int {
+// Excused lists the exits of brokers that failed before they were ever ready,
+// with the exit status and the last line of the broker's log. A broker started
+// while PostgreSQL is out fails, with the status 1 that the server uses for an
+// error at start, and is started again after a pause, as an orchestrator
+// restarts a pod that crashes at boot. Each such exit is also written to
+// extra/excused-exits.txt, which a failed run keeps.
+func (c *Cluster) Excused() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.sigkills
+	return slices.Clone(c.excused)
+}
+
+// KilledHistoryFiles is the set of history files, by base name, of the workers
+// that the cluster ended with SIGKILL. Such a worker can have died in the
+// middle of a write, so a torn last line is explained in these files and in no
+// other.
+func (c *Cluster) KilledHistoryFiles() map[string]bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return maps.Clone(c.killedHistory)
 }
 
 // SaveExtra stores data under name in the run's extra files, which a failed
@@ -342,10 +375,15 @@ func (c *Cluster) StallWorker(i int, d time.Duration) {
 
 // Partition cuts the proxy named proxy for d: no data passes in either
 // direction, and the connections stay open, which is how a partition looks to
-// the two ends. It returns at once, and after d the toxics are removed. The
-// connections that went through the cut have lost data, so the proxy is
-// then switched off and on to reset them, which is how such connections end
-// in practice (a timeout or a reset), rather than staying wedged.
+// the two ends. It returns at once, and after d the toxics are removed.
+//
+// Toxiproxy's timeout toxic drops the data it is given, so a connection that
+// went through the cut has lost bytes and could not be used again. It does not
+// have to be: removing the toxic closes the connection (the toxic's Cleanup
+// closes its stub), which is how such a connection ends in practice, with a
+// reset. TestPartitionEndsWithTheConnectionsClosed and
+// TestHealEndsAPartitionThatIsStillActive pin that, for the end of a partition
+// and for Heal, so that an explicit reset of the proxy is not needed.
 func (c *Cluster) Partition(proxy string, d time.Duration) {
 	c.mu.Lock()
 	p, ok := c.proxies[proxy]
@@ -363,7 +401,7 @@ func (c *Cluster) Partition(proxy string, d time.Duration) {
 	}
 	c.faults[kind]++
 	c.mu.Unlock()
-	c.after(d, func() { c.removeToxics(p, names, true) })
+	c.after(d, func() { c.removeToxics(p, names) })
 }
 
 // Latency adds latency and jitter to every call through the proxy named proxy
@@ -384,7 +422,7 @@ func (c *Cluster) Latency(proxy string, latency, jitter time.Duration, d time.Du
 	})
 	c.faults[FaultLatency]++
 	c.mu.Unlock()
-	c.after(d, func() { c.removeToxics(p, names, false) })
+	c.after(d, func() { c.removeToxics(p, names) })
 }
 
 // RestartPostgres restarts the PostgreSQL container with docker restart and
@@ -410,10 +448,14 @@ func (c *Cluster) RestartPostgres() {
 }
 
 // Heal ends every fault: it cancels what faults have scheduled, removes every
-// toxic and resets the proxies, thaws every frozen worker, waits for
-// PostgreSQL to accept connections, and starts every process that is down. It
-// returns when the brokers are ready, and fails the test if they do not
-// become so. No fault may be fired after it.
+// toxic, thaws every frozen worker, waits for PostgreSQL to accept
+// connections, and starts every process that is down. A partition that is
+// still on when Heal comes ends the way one that ran its course does: Heal
+// removes its toxics itself, because the removal that Partition scheduled has
+// been cancelled with the rest, and that closes the connections that went
+// through it. Heal returns when every broker answers /readyz with 200 at that
+// moment, and fails the test if they do not within a minute. No fault may be
+// fired after it.
 func (c *Cluster) Heal() {
 	c.t.Helper()
 	c.mu.Lock()
@@ -430,14 +472,11 @@ func (c *Cluster) Heal() {
 			c.t.Errorf("list the toxics of %s: %v", name, err)
 			continue
 		}
+		var names []string
 		for _, tx := range toxics {
-			if err := p.RemoveToxic(tx.Name); err != nil {
-				c.t.Errorf("remove toxic %s of %s: %v", tx.Name, name, err)
-			}
+			names = append(names, tx.Name)
 		}
-		if err := p.Enable(); err != nil {
-			c.t.Errorf("enable %s: %v", name, err)
-		}
+		c.removeToxicsLocked(p, names)
 	}
 	for _, n := range c.workers {
 		c.thawLocked(n.inst)
@@ -494,8 +533,8 @@ func (c *Cluster) StopProcesses(grace time.Duration) {
 		default:
 		}
 		c.mu.Lock()
-		if runsIn(c.workers, inst) {
-			c.sigkills++
+		if inst.history != "" {
+			c.killedHistory[inst.history] = true
 		}
 		_ = inst.cmd.Process.Kill()
 		c.mu.Unlock()
@@ -507,11 +546,6 @@ func (c *Cluster) StopProcesses(grace time.Duration) {
 			c.t.Errorf("a process did not exit after SIGKILL")
 		}
 	}
-}
-
-// runsIn reports whether inst is the running instance of one of nodes.
-func runsIn(nodes []*node, inst *instance) bool {
-	return slices.ContainsFunc(nodes, func(n *node) bool { return n.inst == inst })
 }
 
 // canFaultLocked reports whether a fault may be fired now. A fault after Heal
@@ -556,8 +590,8 @@ func (c *Cluster) kill(n *node, fault string) {
 		return
 	}
 	c.faults[fault]++
-	if n.kind == kindWorker {
-		c.sigkills++
+	if inst.history != "" {
+		c.killedHistory[inst.history] = true
 	}
 	c.mu.Unlock()
 	select {
@@ -608,31 +642,25 @@ func (c *Cluster) addToxicsLocked(p *toxiproxy.Proxy, typ string, attrs toxiprox
 	return names
 }
 
-// removeToxics removes the toxics names from p and, when reset is set, drops
-// the connections of p by switching it off and on.
-func (c *Cluster) removeToxics(p *toxiproxy.Proxy, names []string, reset bool) {
+// removeToxics removes the toxics names from p.
+func (c *Cluster) removeToxics(p *toxiproxy.Proxy, names []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.removeToxicsLocked(p, names)
+}
+
+func (c *Cluster) removeToxicsLocked(p *toxiproxy.Proxy, names []string) {
 	for _, name := range names {
 		if err := p.RemoveToxic(name); err != nil {
 			c.t.Errorf("remove toxic %s of %s: %v", name, p.Name, err)
 		}
-	}
-	if !reset {
-		return
-	}
-	if err := p.Disable(); err != nil {
-		c.t.Errorf("disable %s: %v", p.Name, err)
-	}
-	if err := p.Enable(); err != nil {
-		c.t.Errorf("enable %s: %v", p.Name, err)
 	}
 }
 
 // startLocked starts a new instance of n.
 func (c *Cluster) startLocked(n *node) {
 	n.starts++
-	bin, args := c.command(n)
+	bin, args, hist := c.command(n)
 	logFile, err := os.OpenFile(n.logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		c.t.Errorf("open the log of %s: %v", n.name(), err)
@@ -646,7 +674,7 @@ func (c *Cluster) startLocked(n *node) {
 		c.t.Errorf("start %s: %v", n.name(), err)
 		return
 	}
-	inst := &instance{cmd: cmd, done: make(chan struct{})}
+	inst := &instance{cmd: cmd, done: make(chan struct{}), history: hist}
 	n.inst = inst
 	go func() {
 		err := cmd.Wait()
@@ -660,9 +688,13 @@ func (c *Cluster) startLocked(n *node) {
 }
 
 // exited records the end of inst. A process that ended on its own is a crash,
-// except for a broker that failed before it was ready, which is started again
-// after a pause, as an orchestrator would; a crash is started again too, so
-// that the run goes on, but it is reported.
+// except for a broker that failed before it had ever been ready with the
+// ordinary error exit, status 1, which the server uses for an error at start
+// (the database is out, for one). That broker is excused and recorded in
+// Excused and in extra/excused-exits.txt; a signal, a panic (status 2) or any
+// other status is a crash. A broker or a worker that ended on its own is
+// started again after a pause so that the run goes on, but a crash is
+// reported.
 func (c *Cluster) exited(n *node, inst *instance, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -672,56 +704,83 @@ func (c *Cluster) exited(n *node, inst *instance, err error) {
 	if inst.expected.Load() || c.closed {
 		return
 	}
-	if n.kind != kindBroker || inst.ready.Load() {
-		c.unexpected = append(c.unexpected, fmt.Sprintf("%s (start %d) exited by itself: %v", n.name(), n.starts, err))
+	what := fmt.Sprintf("%s (start %d) exited by itself: %s", n.name(), n.starts, describeExit(err))
+	if excusedExit(n.kind == kindBroker, inst.ready.Load(), err) {
+		line := fmt.Sprintf("%s %s; last line of its log: %s", time.Now().UTC().Format(time.RFC3339Nano), what, lastLine(n.logPath))
+		c.excused = append(c.excused, line)
+		extra, ferr := os.OpenFile(filepath.Join(c.dir, "extra", "excused-exits.txt"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if ferr == nil {
+			_, _ = fmt.Fprintln(extra, line)
+			_ = extra.Close()
+		}
+	} else {
+		c.unexpected = append(c.unexpected, what)
 	}
 	if !c.healed {
 		c.after(2*time.Second, func() { c.ensure(n) })
 	}
 }
 
-// watchReady polls /readyz of a broker until it answers 200 or the process
-// is gone.
-func (c *Cluster) watchReady(n *node, inst *instance) {
+// readyNow asks a broker whether it is ready at this moment: /readyz answers
+// 200 only while the broker is not draining and its latest check of the
+// database succeeded.
+func (c *Cluster) readyNow(n *node) bool {
 	readyz := fmt.Sprintf("http://127.0.0.1:%d/readyz", n.httpPort)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, readyz, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+// watchReady polls a broker until it is ready for the first time, which it
+// records in inst.ready, or until the process is gone.
+func (c *Cluster) watchReady(n *node, inst *instance) {
 	for {
 		select {
 		case <-inst.done:
 			return
 		case <-time.After(200 * time.Millisecond):
 		}
-		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, readyz, nil)
-		if err != nil {
-			return
-		}
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			continue
-		}
-		_ = resp.Body.Close()
-		if resp.StatusCode == http.StatusOK {
+		if c.readyNow(n) {
 			inst.ready.Store(true)
 			return
 		}
 	}
 }
 
-// waitBrokersReady waits until every broker is running and ready, starting
-// those that are down, and reports whether that happened within timeout.
+// waitBrokersReady waits until every broker is running and answers /readyz
+// with 200 now, starting those that are down, and reports whether that
+// happened within timeout. It asks the brokers again on every round: a broker
+// that was ready before the faults, and has not recovered from them yet, does
+// not count.
 func (c *Cluster) waitBrokersReady(timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		all := true
+		var up []*node
 		c.mu.Lock()
 		for _, n := range c.brokers {
 			if n.inst == nil {
 				c.startLocked(n)
 			}
-			if n.inst == nil || !n.inst.ready.Load() {
+			if n.inst == nil {
+				all = false
+				continue
+			}
+			up = append(up, n)
+		}
+		c.mu.Unlock()
+		for _, n := range up {
+			if !c.readyNow(n) {
 				all = false
 			}
 		}
-		c.mu.Unlock()
 		if all {
 			return true
 		}
@@ -748,8 +807,10 @@ func (c *Cluster) waitPostgres(timeout time.Duration) error {
 	return errors.Join(ctx.Err(), last)
 }
 
-// command returns the executable and the arguments of the next instance of n.
-func (c *Cluster) command(n *node) (string, []string) {
+// command returns the executable and the arguments of the next instance of n,
+// and the base name of the history file that it will write, which is empty for
+// a broker.
+func (c *Cluster) command(n *node) (bin string, args []string, history string) {
 	if n.kind == kindBroker {
 		return c.serverBin, []string{
 			"--grpc-addr", "127.0.0.1:" + strconv.Itoa(n.grpcPort),
@@ -760,9 +821,12 @@ func (c *Cluster) command(n *node) (string, []string) {
 			"--retention-done", "24h",
 			"--max-db-conns", "12",
 			"--log-level", "info",
-		}
+		}, ""
 	}
 	id := fmt.Sprintf("w%d-g%d", n.index, n.starts)
+	// One file for each start: a killed process can tear the last line of its
+	// file, and a later start must not append to a torn line.
+	history = "worker-" + id + ".jsonl"
 	return c.workerBin, []string{
 		"--addr", strings.Join(c.addrs, ","),
 		"--queue", queueName,
@@ -770,23 +834,24 @@ func (c *Cluster) command(n *node) (string, []string) {
 		"--concurrency", strconv.Itoa(c.cfg.Concurrency),
 		"--ttl", c.cfg.TTL.String(),
 		"--margin", c.cfg.Margin.String(),
-		// One file for each start: a killed process can tear the last line of
-		// its file, and a later start must not append to a torn line.
-		"--history", filepath.Join(c.HistoryDir(), "worker-"+id+".jsonl"),
+		"--history", filepath.Join(c.HistoryDir(), history),
 		"--sink-dsn", c.directDSN,
 		"--seed", strconv.FormatUint(c.cfg.Seed*1000+uint64(n.index)*100+uint64(n.starts), 10),
-	}
+	}, history
 }
 
-// build compiles the broker and the worker into the scratch directory.
+// build compiles the broker, the worker and jobqueuectl into the scratch
+// directory.
 func (c *Cluster) build() {
 	c.t.Helper()
 	root := moduleRoot(c.t)
 	c.serverBin = filepath.Join(c.dir, "bin", "jobqueue-server")
 	c.workerBin = filepath.Join(c.dir, "bin", "chaosworker")
+	c.ctlBin = filepath.Join(c.dir, "bin", "jobqueuectl")
 	for _, b := range []struct{ out, pkg string }{
 		{c.serverBin, "./cmd/jobqueue-server"},
 		{c.workerBin, "./test/chaos/chaosworker"},
+		{c.ctlBin, "./cmd/jobqueuectl"},
 	} {
 		ctx, cancel := context.WithTimeout(context.Background(), buildTimeout)
 		cmd := exec.CommandContext(ctx, "go", "build", "-o", b.out, b.pkg)
@@ -835,10 +900,14 @@ func (c *Cluster) createDatabase() {
 	}
 	c.pool = pool
 
-	// jobqueuectl migrate does the same; the chaos test applies the
-	// embedded migrations itself so that it needs no third binary.
-	if _, err := migrate.Up(ctx, pool); err != nil {
-		c.t.Fatalf("migrate: %v", err)
+	// The URL goes in the environment, not on the command line, where a
+	// process list would show its password.
+	ctl := exec.CommandContext(ctx, c.ctlBin, "migrate", "--timeout", "1m")
+	ctl.Env = append(os.Environ(), "JOBQUEUE_DATABASE_URL="+c.directDSN)
+	if out, err := ctl.CombinedOutput(); err != nil {
+		c.t.Fatalf("jobqueuectl migrate: %v\n%s", err, out)
+	} else {
+		c.t.Logf("jobqueuectl migrate: %s", strings.TrimSpace(string(out)))
 	}
 	if _, err := pool.Exec(ctx, `CREATE TABLE chaos_sink (
 		job_id bigint PRIMARY KEY, token bigint NOT NULL, worker text NOT NULL)`); err != nil {
@@ -957,8 +1026,10 @@ func (c *Cluster) saveArtifacts() {
 			c.t.Logf("save the %s artifacts: %v", sub, err)
 		}
 	}
-	summary := fmt.Sprintf("seed: %d\nfaults: %v\nworker kills: %d\nunexpected exits: %q\n",
-		c.cfg.Seed, c.faults, c.sigkills, c.unexpected)
+	c.mu.Lock()
+	summary := fmt.Sprintf("seed: %d\nfaults: %v\nhistory files of killed workers: %v\nunexpected exits: %q\nexcused exits: %q\n",
+		c.cfg.Seed, c.faults, slices.Sorted(maps.Keys(c.killedHistory)), c.unexpected, c.excused)
+	c.mu.Unlock()
 	if err := os.WriteFile(filepath.Join(dst, "summary.txt"), []byte(summary), 0o644); err != nil {
 		c.t.Logf("save the summary: %v", err)
 	}
