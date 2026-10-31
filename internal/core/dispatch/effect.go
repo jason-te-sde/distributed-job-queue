@@ -24,7 +24,8 @@ type Effect interface {
 }
 
 // Fetch tells the shell to lease jobs from the store for a waiter. The shell
-// keeps the jobs it gets, and reports how many through FetchDone.
+// keeps the jobs it gets, and reports how many, and what the fetch asked for,
+// through FetchDone.
 type Fetch struct {
 	// Waiter is the waiter the fetch serves.
 	Waiter WaiterID

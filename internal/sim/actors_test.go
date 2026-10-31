@@ -625,6 +625,44 @@ func TestDroppedNotificationsStillBringTheSmallTenantIntoTheRing(t *testing.T) {
 	}
 }
 
+func TestShortTenantTakeDoesNotStallTheFlood(t *testing.T) {
+	r := newRig(t, 201)
+	// Tenant A has a flood of ready jobs and tenant B has a single one. The
+	// ring holds both, so the batches are planned as takes for each in turn,
+	// and B's take comes back short because B ran dry: that says nothing about
+	// A. Nothing else may stand in for the chained fetch that serves A: every
+	// notification is lost, the refresh is ten minutes away and the poll is
+	// thirty seconds away, so a broker that takes the queue for empty leaves
+	// the long polls parked, and A's jobs wait for the poll.
+	r.addBroker("b1", func(c *sim.BrokerConfig) {
+		c.NotifyDropP = 1
+		c.PollInterval = 30 * time.Second
+		c.ActivityInterval = 10 * time.Minute
+	})
+	r.producer("pa", func(c *sim.ProducerConfig) { c.Jobs, c.Tenants = 300, []string{"A"} }, nil, nil)
+	r.producer("pb", func(c *sim.ProducerConfig) { c.Jobs, c.Tenants = 1, []string{"B"} }, nil, nil)
+	// The worker arrives after every job is in the store.
+	r.w.At(time.Second, "worker starts", func() {
+		r.addWorker("w1", func(c *sim.WorkerConfig) {
+			c.Lease.Concurrency = 8
+			c.Handler = sim.HandlerModel{Duration: [2]time.Duration{300 * time.Millisecond, 300 * time.Millisecond}}
+		})
+	})
+
+	if !r.runUntil(5*time.Minute, func() bool { return len(r.changesOf(memstore.OpLease)) >= 301 }) {
+		t.Fatalf("only %d of 301 jobs were leased by %v", len(r.changesOf(memstore.OpLease)), r.w.Now)
+	}
+	var gap time.Duration
+	leases := r.changesOf(memstore.OpLease)
+	for i := 1; i < len(leases); i++ {
+		gap = max(gap, leases[i].Now.Sub(leases[i-1].Now))
+	}
+	t.Logf("all 301 jobs were leased by %v, and the longest pause between leases was %v", r.w.Now, gap)
+	if gap > 5*time.Second {
+		t.Errorf("the flood paused for %v between two leases, want no pause beyond 5s: a short take of one tenant must not close the queue", gap)
+	}
+}
+
 func TestHeartbeatExtendedDeadlineIsAnchoredAtTheSend(t *testing.T) {
 	r := newRig(t, 181)
 	r.addBroker("b1", nil)

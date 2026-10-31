@@ -170,7 +170,9 @@ type TenantStats struct {
 // Activity says where a queue has work.
 type Activity struct {
 	// Tenants lists, in ascending order, the tenants that have at least one
-	// Ready job.
+	// Ready job whose run_at has come. A Lease for such a tenant at the same
+	// instant gets a job, and it gets none for a tenant that is not listed,
+	// unless a writer intervenes.
 	Tenants []string
 	// NextDueIn is the time from now to the earliest run_at among the
 	// queue's Scheduled jobs. It is meaningful only when HasNextDue is true.

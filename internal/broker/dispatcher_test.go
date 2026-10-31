@@ -704,6 +704,165 @@ func TestDispatcherActivityFindsReadyJobForParkedWaiter(t *testing.T) {
 	wantGrants(t, recv(t, res, quickly), 1)
 }
 
+// holdStore passes Lease calls through until hold is called, and from then
+// on keeps each one until release is called.
+type holdStore struct {
+	store.Store
+	entered chan struct{}
+
+	mu   sync.Mutex
+	gate chan struct{} // nil while Lease calls pass
+}
+
+func newHoldStore(inner store.Store) *holdStore {
+	return &holdStore{Store: inner, entered: make(chan struct{}, 64)}
+}
+
+func (h *holdStore) hold() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.gate = make(chan struct{})
+}
+
+func (h *holdStore) release() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	close(h.gate)
+	h.gate = nil
+}
+
+func (h *holdStore) Lease(ctx context.Context, req store.LeaseRequest) ([]store.Grant, error) {
+	h.mu.Lock()
+	gate := h.gate
+	h.mu.Unlock()
+	if gate != nil {
+		select {
+		case h.entered <- struct{}{}:
+		default:
+		}
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return h.Store.Lease(ctx, req)
+}
+
+// seedRing leases one job, which fills the ring of the queue from the
+// activity, and returns once the answer is in. The read that fills the ring
+// raises a notification, which keeps the queue dirty until the next fetch
+// starts, and a dirty queue chains after any fetch: the tests below would
+// pass for that reason, and not for the one they are about.
+func (e *dispEnv) seedRing(queue string) {
+	e.t.Helper()
+	ans, err := e.lease(queue, 1, 0)
+	if err != nil || len(ans.Grants) != 1 {
+		e.t.Fatalf("the seeding Lease = %v, %v; want one job", ans, err)
+	}
+}
+
+// addFloodAndOne puts 200 ready jobs of tenant a on the queue, then one of
+// tenant b, and fills the ring with both. A batch of 16 from then on is
+// planned as 8 jobs for each tenant and comes back with 9: tenant b ran dry,
+// and tenant a still has 190 jobs.
+func (e *dispEnv) addFloodAndOne(queue string) {
+	e.t.Helper()
+	e.add(queue, "a", 200)
+	e.add(queue, "b", 1)
+	e.seedRing(queue)
+}
+
+func TestDispatcherShortPlannedFetchChainsTheNextWaiter(t *testing.T) {
+	// The second waiter is parked behind the only fetch slot, and nothing can
+	// wake it but the fetch that chains: the poll and the activity interval
+	// are an hour, and no notification arrives. The first fetch is short, but
+	// only because tenant b ran dry.
+	var hs *holdStore
+	e := newDispEnv(t, DispatcherConfig{MaxInFlight: 1}, func(s store.Store) store.Store { hs = newHoldStore(s); return hs })
+	e.addFloodAndOne("q")
+
+	hs.hold()
+	first := e.leaseAsync("q", 16, 30*time.Second)
+	select {
+	case <-hs.entered:
+	case <-time.After(quickly):
+		t.Fatalf("the fetch of the first waiter did not reach the store within %v", quickly)
+	}
+	second := e.leaseAsync("q", 16, 30*time.Second)
+	e.waitWaiters("q", 2)
+	hs.release()
+
+	var fromB int
+	for _, g := range wantGrants(t, recv(t, first, quickly), 9) {
+		if g.Job.Tenant == "b" {
+			fromB++
+		}
+	}
+	if fromB != 1 {
+		t.Fatalf("the first batch holds %d jobs of tenant b, want its only job", fromB)
+	}
+	for _, g := range wantGrants(t, recv(t, second, quickly), 16) {
+		if g.Job.Tenant != "a" {
+			t.Errorf("the second batch holds a job of tenant %q, want only tenant a: b has no more", g.Job.Tenant)
+		}
+	}
+}
+
+func TestDispatcherShortPlannedFetchDoesNotMarkTheQueueEmpty(t *testing.T) {
+	// A waiter that arrives after the short fetch must fetch for itself. If
+	// the queue were taken for empty it would wait for a wakeup that never
+	// comes: the poll and the activity interval are an hour.
+	e := newDispEnv(t, DispatcherConfig{}, nil)
+	e.addFloodAndOne("q")
+
+	ans, err := e.lease("q", 16, 0)
+	wantGrants(t, leaseResult{ans, err}, 9)
+	res := e.leaseAsync("q", 16, 30*time.Second)
+	wantGrants(t, recv(t, res, quickly), 16)
+}
+
+func TestDispatcherShortFetchAcrossTenantsStillMarksTheQueueEmpty(t *testing.T) {
+	// A fetch that was not shared between tenants did look at all of them, so
+	// a short answer is the end of the queue: no fetch chains, and a waiter
+	// that arrives next parks without one. The poll and the activity interval
+	// are an hour, so a fetch that did start would be one the dispatcher made
+	// up.
+	for _, tc := range []struct {
+		name      string
+		scheduler string
+		jobs      int      // ready jobs of tenant t
+		want      []string // the store calls, and no more
+	}{
+		{"fifo, fewer jobs than asked", "fifo", 3, []string{"lease:*=8"}},
+		{"drr, an empty ring and no jobs", "drr", 0, []string{"activity", "lease:*=8"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var ops *opsStore
+			e := newDispEnv(t, DispatcherConfig{Scheduler: tc.scheduler},
+				func(s store.Store) store.Store { ops = &opsStore{Store: s}; return ops })
+			if tc.jobs > 0 {
+				e.add("q", "t", tc.jobs)
+			}
+			ans, err := e.lease("q", 8, 0)
+			if err != nil || len(ans.Grants) != tc.jobs {
+				t.Fatalf("first Lease = %d jobs, %v; want %d", len(ans.Grants), err, tc.jobs)
+			}
+			res := e.leaseAsync("q", 8, 30*time.Second)
+			e.waitWaiters("q", 1)
+			select {
+			case r := <-res:
+				t.Fatalf("a waiter on a queue known to be empty was answered: %+v, %v", r.ans, r.err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			if got := ops.seen(); !slices.Equal(got, tc.want) {
+				// A dispatcher that chains here fetches in a loop, so the list is cut.
+				t.Errorf("store calls = %v of %d, want %v", got[:min(len(got), len(tc.want)+4)], len(got), tc.want)
+			}
+		})
+	}
+}
+
 func TestDispatcherQueueLabelsStayWithinTheCap(t *testing.T) {
 	// More queues than the cap, each leased once through the dispatcher: the
 	// series of its fetches, leases and waiters must stop at the cap, and the

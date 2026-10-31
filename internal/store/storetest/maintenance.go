@@ -37,6 +37,7 @@ func RunMaintenance(t *testing.T, nh NewHarness) {
 	run(t, nh, "StatsCountsPerTenant", statsCountsPerTenant)
 	run(t, nh, "ActivityListsTenantsWithDueWork", activityListsTenantsWithDueWork)
 	run(t, nh, "ActivityNextDueCoversTenantsWithDueWork", activityNextDueCoversTenantsWithDueWork)
+	run(t, nh, "ActivityListsOnlyTenantsThatLeaseCanServe", activityListsOnlyTenantsThatLeaseCanServe)
 	run(t, nh, "MaintenanceRejectsInvalidArguments", maintenanceRejectsInvalidArguments)
 }
 
@@ -606,6 +607,76 @@ func activityNextDueCoversTenantsWithDueWork(t *testing.T, h Harness) {
 	if got := activity("when b's scheduled job is due"); !slices.Equal(got.Tenants, []string{"b"}) || !got.HasNextDue || got.NextDueIn != 20*time.Second {
 		t.Errorf("Activity 10s later = %+v, want tenants [b] and the next job due in 20s", got)
 	}
+}
+
+// activityListsOnlyTenantsThatLeaseCanServe pins the agreement that the
+// dispatcher's fair sharing relies on. It plans a fetch as one take per tenant
+// that Activity lists, and treats a short answer as proof that the short
+// tenants ran dry. That chain of fetches ends only if a listed tenant has
+// something to give: with no concurrent writer, every tenant that Activity
+// lists must get a grant from a per-tenant Lease at the same instant, and a
+// tenant that it does not list must get none.
+func activityListsOnlyTenantsThatLeaseCanServe(t *testing.T, h Harness) {
+	const delay = 20 * time.Second
+	scheduled := func(tenant string) job.Spec {
+		s := newSpec("q1", tenant)
+		s.Delay = delay
+		return s
+	}
+	// a has two due jobs; b has one that is not yet due; c has a due job and
+	// one that is not; d has one that is leased below; f has one that is
+	// cancelled below; e has a due job in another queue.
+	id := enqueue(t, h,
+		newSpec("q1", "a"), newSpec("q1", "a"),
+		scheduled("b"),
+		newSpec("q1", "c"), scheduled("c"),
+		newSpec("q1", "d"),
+		newSpec("q1", "f"),
+		newSpec("q2", "e"),
+	)
+	if g := leaseFrom(t, h, "q1", "d", 1); len(g) != 1 {
+		t.Fatalf("leasing tenant d's job returned %d grants, want 1", len(g))
+	}
+	if out := cancelOne(t, h, id[6], "f"); out != job.Applied {
+		t.Fatalf("Cancel of tenant f's job = %v, want applied", out)
+	}
+
+	// One take of one job for every tenant, listed or not.
+	var takes []store.TenantTake
+	for _, tenant := range []string{"a", "b", "c", "d", "e", "f"} {
+		takes = append(takes, store.TenantTake{Tenant: tenant, Limit: 1})
+	}
+	check := func(when string, want ...string) {
+		t.Helper()
+		act, err := h.Store().Activity(t.Context(), "q1")
+		if err != nil {
+			t.Fatalf("Activity %s: %v", when, err)
+		}
+		var served []string
+		for _, g := range leaseTakes(t, h, "q1", takes...) {
+			served = append(served, g.Job.Tenant)
+		}
+		slices.Sort(served)
+		if !slices.Equal(act.Tenants, want) {
+			t.Errorf("%s: Activity lists %v, want %v", when, act.Tenants, want)
+		}
+		for _, tenant := range act.Tenants {
+			if !slices.Contains(served, tenant) {
+				t.Errorf("%s: Activity lists tenant %s, but a per-tenant Lease at the same instant served none of its jobs (it served %v)", when, tenant, served)
+			}
+		}
+		for _, tenant := range served {
+			if !slices.Contains(act.Tenants, tenant) {
+				t.Errorf("%s: a per-tenant Lease served tenant %s, which Activity does not list (%v)", when, tenant, act.Tenants)
+			}
+		}
+	}
+	check("at the start", "a", "c")
+	h.Advance(delay - time.Microsecond)
+	check("one microsecond before b's job and c's second job are due", "a")
+	h.Advance(time.Microsecond)
+	check("when b's job and c's second job are due exactly now", "b", "c")
+	check("when nothing is left")
 }
 
 func maintenanceRejectsInvalidArguments(t *testing.T, h Harness) {
