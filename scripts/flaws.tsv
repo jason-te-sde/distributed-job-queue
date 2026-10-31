@@ -1,0 +1,48 @@
+# Planted flaws and the tests that must catch them. scripts/check-flaws.sh
+# runs each row with JOBQUEUE_FLAW=<id> and the jobqueue_flaws build tag, and
+# requires a test to go red. Columns, separated by tabs:
+#
+#   id       the flaw (internal/flaw/flaw.go); every flaw needs at least one row
+#   package  the package to run
+#   regex    the test that must fail, as go test -run takes it
+#   tags     - or pg (adds the pg tag and needs JOBQUEUE_TEST_DSN)
+#   expect   - or text that the failing output must contain
+#
+# expect is set where a failure could have another cause. A flaw clause that
+# has drifted from its statement panics the whole package in init, and a pg
+# test without a database fails too; neither is the flaw being noticed. The
+# differential rows name "reference store", which every divergence message of
+# TestPGDifferential contains and neither of those can. The simulator rows
+# name the invariant that the flaw must break (a violation reads "S4 violated
+# for job ..."), which also shows the flaw is caught by the check that is meant
+# to catch it. A flaw with a row in two packages needs both caught.
+#
+# Memory store: caught by the conformance suite.
+F1-mem	./internal/store/memstore	^TestConformance$/^CompleteStaleTokenFenced$	-	-
+F2-mem	./internal/store/memstore	^TestConformance$/^LeaseIncrementsEpochAndAttempts$	-	-
+F3-mem	./internal/store/memstore	^TestConformance$/^ReapExhaustedGoesDead$	-	-
+F4-mem	./internal/store/memstore	^TestConformance$/^HeartbeatStaleTokenIsFenced$	-	-
+F9-mem	./internal/store/memstore	^TestConformance$/^LeaseRespectsRunAt$	-	-
+# Pure cores.
+F5	./internal/core/lease	^TestDeadlineIgnoresResponseLatency$	-	-
+F8	./internal/core/fair	^TestPlanBatchIndependence$	-	-
+F8	./internal/core/fair	^TestPlanShareBound$	-	-
+# Simulator: the sweep of 500 seeds finds each memory-store flaw and F5 through
+# the invariant named in expect. The seed count must stay at its default: F1-mem
+# is the rarest, found by 17 of 500 seeds.
+F1-mem	./internal/sim	^TestSimSeeds$	-	S4 violated
+F2-mem	./internal/sim	^TestSimSeeds$	-	S3 violated
+F3-mem	./internal/sim	^TestSimSeeds$	-	S6 violated
+F4-mem	./internal/sim	^TestSimSeeds$	-	S4 violated
+F5	./internal/sim	^TestSimSeeds$	-	S5 violated
+F9-mem	./internal/sim	^TestSimSeeds$	-	S8 violated
+# Postgres store: caught by the differential test, which holds pgstore to the
+# memory store, and by the concurrency tests for the two flaws that only show
+# under contention.
+F1-pg	./internal/store/pgstore	^TestPGDifferential$	pg	reference store
+F2-pg	./internal/store/pgstore	^TestPGDifferential$	pg	reference store
+F3-pg	./internal/store/pgstore	^TestPGDifferential$	pg	reference store
+F4-pg	./internal/store/pgstore	^TestPGDifferential$	pg	reference store
+F9-pg	./internal/store/pgstore	^TestPGDifferential$	pg	reference store
+F6	./internal/store/pgstore	^TestPGConcurrentEnqueueSameKey$	pg	key k
+F7	./internal/store/pgstore	^TestPGConcurrentLeaseNoDoubleGrant$	pg	granted
