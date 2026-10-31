@@ -323,3 +323,76 @@ jobs:
           tags: jq:ci
       - name: Smoke test
         run: scripts/image-smoke.sh jq:ci
+
+  # The chart, the image, the example worker and the KEDA scaler on a real
+  # cluster (test/e2e).
+  k8s-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      KIND_CLUSTER: jq-e2e
+      # KEDA chart 2.21.0 ships KEDA 2.21.0: the chart index of
+      # https://kedacore.github.io/charts lists both versions as 2.21.0 (checked
+      # on 2026-10-31). The chart and the app have not always shared a number,
+      # so look again when raising it.
+      KEDA_CHART_VERSION: 2.21.0
+      E2E_NAMESPACE: jobqueue-e2e
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.x
+      # kind-action checks the kind and kubectl binaries it downloads against the
+      # checksums published with their releases.
+      - uses: helm/kind-action@v1
+        with:
+          version: v0.33.0
+          cluster_name: ${{ env.KIND_CLUSTER }}
+          config: deploy/kind/kind-config.yaml
+          wait: 120s
+      - uses: ./.github/actions/setup-helm
+      - name: Build the image and load it into the cluster
+        run: |
+          set -euo pipefail
+          docker build -t jq:e2e .
+          kind load docker-image jq:e2e --name "$KIND_CLUSTER"
+      - name: Install KEDA
+        run: |
+          set -euo pipefail
+          helm repo add kedacore https://kedacore.github.io/charts
+          helm repo update
+          helm install keda kedacore/keda --version "$KEDA_CHART_VERSION" \
+            --namespace keda --create-namespace --wait --timeout 5m
+      - name: End-to-end tests
+        env:
+          JOBQUEUE_E2E_IMAGE: jq:e2e
+          JOBQUEUE_E2E_NAMESPACE: ${{ env.E2E_NAMESPACE }}
+        run: go test -tags e2e -count=1 -timeout 40m -v ./test/e2e/
+      # The test leaves its namespace in place, so the objects are still there.
+      - name: Collect the state of the cluster
+        if: failure()
+        run: |
+          set +e
+          mkdir -p cluster-dump
+          kubectl get all --all-namespaces --output wide > cluster-dump/get-all.txt 2>&1
+          kubectl get scaledobject,hpa --all-namespaces --output yaml > cluster-dump/autoscaling.yaml 2>&1
+          kubectl get events --all-namespaces --sort-by .lastTimestamp > cluster-dump/events.txt 2>&1
+          # Pods that are not ready, or not running.
+          kubectl get pods --all-namespaces --no-headers |
+            awk '$4 != "Completed" { split($3, ready, "/"); if (ready[1] != ready[2] || $4 != "Running") print $1, $2 }' |
+            while read -r ns pod; do
+              kubectl describe pod --namespace "$ns" "$pod"
+            done > cluster-dump/describe-failing-pods.txt 2>&1
+          kubectl logs --namespace "$E2E_NAMESPACE" --selector app.kubernetes.io/component=broker \
+            --all-containers --prefix --tail=-1 --ignore-errors > cluster-dump/broker.log 2>&1
+          kubectl logs --namespace "$E2E_NAMESPACE" --selector app.kubernetes.io/component=example-worker \
+            --all-containers --prefix --tail=-1 --ignore-errors > cluster-dump/example-worker.log 2>&1
+          kubectl logs --namespace keda --selector app.kubernetes.io/name=keda-operator \
+            --all-containers --prefix --tail=-1 --ignore-errors > cluster-dump/keda-operator.log 2>&1
+      - name: Upload the state of the cluster
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: k8s-e2e-cluster-dump
+          path: cluster-dump/
+          if-no-files-found: ignore
