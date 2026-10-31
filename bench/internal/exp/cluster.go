@@ -26,7 +26,10 @@ const (
 	// setup, clean-up and sampling.
 	benchPoolConns = 4
 	// clusterShutdownGrace is how long a broker waits for running calls when the
-	// cluster is closed. The workers have stopped by then, so nothing waits.
+	// cluster is stopped. The workers have stopped by then. A call that a client
+	// cancelled may still be waiting for its transaction to commit, and the
+	// broker's pool does not close until that connection is released, which is
+	// what Stop relies on.
 	clusterShutdownGrace = 2 * time.Second
 )
 
@@ -64,8 +67,9 @@ type Cluster struct {
 	proxies []*proxy
 	cancel  context.CancelFunc
 
+	stopOnce  sync.Once
+	stopErr   error
 	closeOnce sync.Once
-	closeErr  error
 }
 
 // quietLog is the logger of the brokers: errors only, to stderr, so that a
@@ -210,21 +214,35 @@ func (c *Cluster) KillBroker(i int) (int, error) {
 	return c.proxies[i].Kill(), nil
 }
 
-// Close stops the brokers, after they have drained, and releases the proxies and
-// the pool. It returns the first error a broker ended with, and may be called
-// more than once.
-func (c *Cluster) Close() error {
-	c.closeOnce.Do(func() {
+// Stop stops the brokers. They stop gracefully: each waits for the calls it is
+// running, and so for the database transactions of those calls, before it ends.
+// That is what lets a caller delete rows afterwards and be sure that none is on
+// its way in. A client that cancels a call does not stop the broker's transaction
+// for it: the call returns at once, and the transaction commits a moment later, so
+// whatever the client deletes when its call has returned can miss the row. Once
+// Stop has returned every transaction has ended.
+//
+// It returns the first error a broker ended with, and may be called more than
+// once.
+func (c *Cluster) Stop() error {
+	c.stopOnce.Do(func() {
 		for _, p := range c.proxies {
 			p.Close()
 		}
 		c.cancel()
 		for _, done := range c.done {
-			if err := <-done; err != nil && c.closeErr == nil {
-				c.closeErr = err
+			if err := <-done; err != nil && c.stopErr == nil {
+				c.stopErr = err
 			}
 		}
-		c.pool.Close()
 	})
-	return c.closeErr
+	return c.stopErr
+}
+
+// Close stops the cluster, as Stop does, and releases the pool. It may be
+// called more than once.
+func (c *Cluster) Close() error {
+	err := c.Stop()
+	c.closeOnce.Do(c.pool.Close)
+	return err
 }

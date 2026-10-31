@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -109,11 +110,37 @@ func openRig(ctx context.Context, s Setup, o ClusterOptions) (*rig, error) {
 		Setup:   s,
 		cluster: c,
 		env:     CaptureEnv(ctx, c.Pool()),
-		prefix:  "bench-" + strconv.FormatInt(time.Now().Unix(), 36),
+		// The process id is in the prefix so that two benchmarks started in the same
+		// second on one database do not sweep each other's queues.
+		prefix: "bench-" + strconv.FormatInt(time.Now().Unix(), 36) + "-" + strconv.FormatInt(int64(os.Getpid()), 36),
 	}, nil
 }
 
-func (r *rig) close() error { return r.cluster.Close() }
+// close stops the brokers, deletes whatever rows the run left in any of its
+// queues, and releases the pool. The rows are deleted after the brokers have
+// stopped, not before: a probe that stops while enqueues are in flight cancels
+// them, the calls return at once, and the brokers' transactions commit
+// afterwards, so a delete made as soon as the clients have returned misses
+// them. The brokers wait for those transactions when they stop.
+func (r *rig) close() error {
+	err := r.cluster.Stop()
+	r.sweep()
+	if cerr := r.cluster.Close(); cerr != nil && err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// sweep deletes every row of every queue that this run named. It runs once the
+// brokers have stopped, which is the first moment it can be sure that no row is
+// still on its way in.
+func (r *rig) sweep() {
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	if _, err := r.cluster.Pool().Exec(ctx, "DELETE FROM jobqueue.jobs WHERE starts_with(queue, $1)", r.prefix+"-"); err != nil {
+		r.logf("sweep the queues %s*: %v", r.prefix+"-", err)
+	}
+}
 
 // nextQueue returns a queue name that no earlier probe of this run, and no
 // earlier run, used, so that a probe never sees the jobs of another.
@@ -122,8 +149,10 @@ func (r *rig) nextQueue() string {
 	return r.prefix + "-" + strconv.Itoa(r.seq)
 }
 
-// cleanup deletes the rows of the queue. It does not stop when the experiment is
-// interrupted, because the rows would be left behind.
+// cleanup deletes the rows of the queue, to keep the table from growing from
+// probe to probe. It does not stop when the experiment is interrupted, because
+// the rows would be left behind. It cannot catch an enqueue that was cancelled
+// and commits later; close sweeps those up.
 func (r *rig) cleanup(queue string) {
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()

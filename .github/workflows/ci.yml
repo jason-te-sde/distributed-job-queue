@@ -311,7 +311,7 @@ jobs:
       # has two cores, and each test starts brokers, workers and a producer in one
       # process against the one database.
       - name: go test -tags pg (deterministic subset)
-        run: go test -race -count=1 -p 1 -tags pg -run 'TestPG(Cluster|StartWorkers|CaptureEnv|Throughput|Soak|River)' ./...
+        run: go test -race -count=1 -p 1 -tags pg -run 'TestPG(Cluster|StartWorkers|CaptureEnv|Throughput|Soak|River|NoisyCancelled)' ./...
       - name: Throughput smoke run
         run: go run ./cmd/jobqueue-bench throughput --duration 10s --rate 200
 

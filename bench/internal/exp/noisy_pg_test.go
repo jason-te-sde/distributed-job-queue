@@ -3,6 +3,8 @@
 package exp
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -45,5 +47,33 @@ func TestPGNoisyNeighborFIFOStarvesBAndDRRDoesNot(t *testing.T) {
 	}
 	if drr["p99"]*4 > fifo["p99"] {
 		t.Errorf("tenant B's p99 wait is %v under DRR and %v under FIFO, want DRR at least 4 times better", drr["p99"], fifo["p99"])
+	}
+}
+
+func TestPGNoisyCancelledMidFloodLeavesNoRows(t *testing.T) {
+	dsn, pool := testDatabase(t)
+	slowCommits(t, pool, 300*time.Millisecond)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- Noisy(ctx, NoisyOptions{
+			Setup: Setup{DatabaseURL: dsn}, Scheduler: "drr", Flood: 100000, BRate: 20, Duration: time.Minute,
+			ServiceTime: 2 * time.Millisecond, Workers: 1, Concurrency: 2,
+		}, func(Result) {})
+	}()
+	awaitRows(t, pool)
+	cancel() // batches of 64 are in flight, each committing 300ms from now at the latest
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Noisy error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("Noisy did not return within a minute of its context being cancelled")
+	}
+	if got := countRows(t, pool); got != 0 {
+		t.Errorf("%d rows in the jobs table after Noisy returned, want 0: the batches in flight at the cancel landed after the clean-up", got)
 	}
 }

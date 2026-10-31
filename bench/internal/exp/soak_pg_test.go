@@ -87,3 +87,30 @@ func TestPGSoakStopsAtOnceWhenASampleFails(t *testing.T) {
 		t.Errorf("%d rows left in the jobs table after the failed soak, want it cleaned up", got)
 	}
 }
+
+func TestPGSoakFailedSampleLeavesNoRowsWhenCommitsAreSlow(t *testing.T) {
+	// The enqueues that are in flight when the sample fails are cancelled, and the
+	// client returns at once, but their transactions go on and commit 300ms later.
+	// The rows are deleted when the run ends, after the brokers have stopped and
+	// with them the transactions, not when the clients have returned.
+	dsn, pool := testDatabase(t)
+	slowCommits(t, pool, 300*time.Millisecond)
+	boom := errors.New("the table cannot be read")
+	var calls atomic.Int32
+	err := Soak(t.Context(), SoakOptions{
+		Setup: Setup{DatabaseURL: dsn}, Rate: 50, Interval: 600 * time.Millisecond, Workers: 1, Concurrency: 8,
+		Duration: time.Minute,
+		statsFn: func(ctx context.Context, r *rig) (tableStats, error) {
+			if calls.Add(1) >= 2 {
+				return tableStats{}, boom
+			}
+			return r.tableStats(ctx)
+		},
+	}, func(Result) {})
+	if !errors.Is(err, boom) {
+		t.Fatalf("Soak error = %v, want the failure of the sample", err)
+	}
+	if got := countRows(t, pool); got != 0 {
+		t.Errorf("%d rows in the jobs table after Soak returned, want 0: commits that were in flight when the probe was cancelled landed after the clean-up", got)
+	}
+}
