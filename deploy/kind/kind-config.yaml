@@ -1,0 +1,10 @@
+# The cluster of the end-to-end tests (test/e2e): one control plane and two
+# workers, so that the broker pods and the example worker pods can land on
+# different nodes. The node image is left to kind, whose default is fixed by
+# the kind release; the CI job pins that release.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker
