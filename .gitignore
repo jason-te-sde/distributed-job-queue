@@ -11,3 +11,6 @@
 
 # Failing simulator seeds, written by TestSimSeeds.
 internal/sim/testdata/failures/
+
+# What a failed chaos run leaves behind: process logs and history files.
+/test/chaos/artifacts/

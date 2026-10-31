@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: Seed of the chaos test's fault schedule and workload
+        required: false
+        default: "1"
 
 permissions:
   contents: read
@@ -139,6 +145,70 @@ jobs:
         with:
           name: pg-events-postgres${{ matrix.postgres }}
           path: pg.json
+          if-no-files-found: ignore
+
+  chaos:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      TOXIPROXY_VERSION: 2.13.0
+      JOBQUEUE_CHAOS_PG_CONTAINER: jq-chaos-pg
+      JOBQUEUE_CHAOS_PG_DSN: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
+      JOBQUEUE_CHAOS_SEED: ${{ inputs.seed || '1' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.x
+      # The test restarts this container by name with docker restart, so it is
+      # started here under a fixed name; a services: container gets a name
+      # that Actions generates.
+      - name: Start PostgreSQL 18
+        run: |
+          set -euo pipefail
+          docker run -d --name jq-chaos-pg -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:18
+          for _ in $(seq 1 60); do
+            if docker exec jq-chaos-pg pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs jq-chaos-pg
+          echo "PostgreSQL did not become ready" >&2
+          exit 1
+      # The binary is verified against the checksum that the release itself
+      # publishes before anything runs it.
+      - name: Start Toxiproxy ${{ env.TOXIPROXY_VERSION }}
+        run: |
+          set -euo pipefail
+          base="https://github.com/Shopify/toxiproxy/releases/download/v${TOXIPROXY_VERSION}"
+          dir="$RUNNER_TEMP/toxiproxy"
+          mkdir -p "$dir"
+          cd "$dir"
+          curl -fsSL --retry 3 -o toxiproxy-server-linux-amd64 "$base/toxiproxy-server-linux-amd64"
+          curl -fsSL --retry 3 -o checksums.txt "$base/checksums.txt"
+          grep ' toxiproxy-server-linux-amd64$' checksums.txt | sha256sum --check --strict -
+          chmod +x toxiproxy-server-linux-amd64
+          nohup ./toxiproxy-server-linux-amd64 -host 127.0.0.1 -port 8474 >"$dir/toxiproxy.log" 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8474/version >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$dir/toxiproxy.log"
+          echo "toxiproxy-server did not start" >&2
+          exit 1
+      - name: Chaos test (seed ${{ env.JOBQUEUE_CHAOS_SEED }})
+        run: go test -tags chaos -count=1 -timeout 25m -v ./test/chaos/
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: chaos-failures-seed-${{ env.JOBQUEUE_CHAOS_SEED }}
+          path: |
+            test/chaos/artifacts/**
+            ${{ runner.temp }}/toxiproxy/toxiproxy.log
           if-no-files-found: ignore
 
   hygiene:
