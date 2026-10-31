@@ -21,10 +21,10 @@ import (
 // with another or could not be serialized, wrap store.ErrUnavailable, which the
 // caller may retry. A rollback applied nothing, but a connection that was lost
 // while the call ran may have committed it first, and the error cannot say
-// which. What makes a retry safe is that the call tolerates one (an
-// acknowledgement is fenced by its token, an Enqueue with an idempotency key is
-// deduplicated), not that nothing was applied. Anything else is wrapped
-// unchanged.
+// which. A retry is therefore safe only for a call that tolerates repetition:
+// an acknowledgement is fenced by its token and an Enqueue with an idempotency
+// key is deduplicated, but an Enqueue without a key may create the job twice.
+// Anything else is wrapped unchanged.
 func classify(op string, err error) error {
 	switch {
 	case err == nil:

@@ -34,8 +34,16 @@
 #   4. Exits 1 if any row was not caught or the inert run failed.
 #
 # --no-pg skips the pg rows, and builds the inert run without the pg tag, for a
-# machine without a database; it prints how many rows it skipped. CI never
-# passes it. Without the flag the pg rows need JOBQUEUE_TEST_DSN.
+# machine without a database; it prints how many rows it skipped. The script
+# refuses it when GITHUB_ACTIONS is set, because the flaws job of CI exists to
+# run those rows, and a flag that skips them would turn the job green without
+# them. Without the flag the pg rows need JOBQUEUE_TEST_DSN.
+#
+# JOBQUEUE_SIM_SEEDS and JOBQUEUE_SIM_SEED_START change how many seeds the
+# simulator sweeps and where it starts. They are unset for every run of the
+# script, so that a value exported in the shell cannot change what is tested:
+# the sim rows rely on the default 500 seeds to find F1-mem, which only 17 of
+# them do.
 #
 # A test binary that links pgregory.net/rapid is also started with
 # -rapid.nofailfile, so that a failing property test leaves no file under
@@ -63,16 +71,30 @@ failures_dir="$root/internal/sim/testdata/failures"
 # test goes red at the first case that finds the defect, and stops, so a large
 # number costs nothing when the flaw is found early and only buys certainty
 # when it is not. Measured against TestPGDifferential, whose rows are the
-# slowest to catch, one case in a run finds F1-pg 45% of the time (54 of 120
-# runs), F2-pg 85% (34 of 40), F3-pg 19% (58 of 300), F4-pg 27% (33 of 120) and
-# F9-pg 57% (23 of 40). rapid's own default is 100 cases, which would miss the
-# rarest of them about once in 10^7 runs if the rate is 15%; 300 makes it
-# vanish. rapid also shrinks a failure for up to 30 seconds by default, which
+# slowest to catch, with one case per run: F1-pg was found in 54 of 120 runs
+# (45%), F2-pg in 34 of 40 (85%), F3-pg in 111 of 600 (18.5%; two samples of
+# 300, which found it 58 and 53 times), F4-pg in 33 of 120 (27%) and F9-pg in
+# 23 of 40 (57%). F3-pg is the rarest. The 95% interval around its 18.5% runs
+# from 15.6% to 21.8%, so 15% is its low end. At that rate rapid's default of
+# 100 cases would miss it about once in 10^7 runs, and 300 cases about once in
+# 10^21. rapid also shrinks a failure for up to 30 seconds by default, which
 # says nothing here, so the time allowed for it is cut to a millisecond.
+#
+# F6 and F7 are not property tests, so no case count applies to them. Each is a
+# concurrency test that races goroutines against the database (F6 runs ten
+# rounds of 32 enqueues of one key, F7 leases 2000 jobs from 32 goroutines), and
+# each rests on a measurement: both were caught in 100 of 100 runs on the
+# development machine. That leaves up to a 3% chance of a miss per run at 95%
+# confidence, and says nothing about a runner with fewer cores; only CI can
+# show that.
 rapid_checks="${FLAWS_RAPID_CHECKS:-300}"
 
 TAB=$'\t'
 US=$'\x1f'
+
+# What every run of go test starts without: the simulator's seed count and
+# first seed, which a caller may have exported (see the header).
+unset_env=(-u JOBQUEUE_SIM_SEEDS -u JOBQUEUE_SIM_SEED_START)
 
 usage() {
   printf 'usage: check-flaws.sh [--no-pg]\n' >&2
@@ -90,6 +112,9 @@ case "$#" in
   1) if [ "$1" = "--no-pg" ]; then no_pg=1; else usage; fi ;;
   *) usage ;;
 esac
+if [ "$no_pg" -eq 1 ] && [ -n "${GITHUB_ACTIONS:-}" ]; then
+  die "--no-pg is refused when GITHUB_ACTIONS is set: the flaws job of CI has to run the pg rows"
+fi
 
 [ -f "$tsv" ] && [ -r "$tsv" ] || die "cannot read the table of flaws: $tsv"
 [ -f "$flaw_source" ] && [ -r "$flaw_source" ] || die "cannot read the list of flaws: $flaw_source"
@@ -226,7 +251,7 @@ for ((i = 0; i < rows; i++)); do
   fi
 
   status=0
-  out="$(JOBQUEUE_FLAW="$id" go test -count=1 -tags "${row_gotags[$i]}" -run "$regex" "$pkg" ${flags[@]+"${flags[@]}"} 2>&1)" || status=$?
+  out="$(env "${unset_env[@]}" JOBQUEUE_FLAW="$id" go test -count=1 -tags "${row_gotags[$i]}" -run "$regex" "$pkg" ${flags[@]+"${flags[@]}"} 2>&1)" || status=$?
 
   reason=""
   if [ "$status" -eq 0 ]; then
@@ -262,7 +287,7 @@ if [ "$no_pg" -eq 0 ]; then
   inert_tags=jobqueue_flaws,pg
 fi
 status=0
-out="$(env -u JOBQUEUE_FLAW go test -count=1 -tags "$inert_tags" ./... 2>&1)" || status=$?
+out="$(env "${unset_env[@]}" -u JOBQUEUE_FLAW go test -count=1 -tags "$inert_tags" ./... 2>&1)" || status=$?
 inert=ok
 if [ "$status" -eq 0 ]; then
   printf 'inert build passed: go test -tags %s ./... with no flaw selected\n' "$inert_tags"
