@@ -41,6 +41,9 @@ func ParseNotifyPayload(s string) (queue, tenant string, ok bool) {
 // Store is a store.Store on PostgreSQL. It is safe for concurrent use.
 type Store struct {
 	pool *pgxpool.Pool
+	// notifying bounds the connections that the calls that notify hold at once.
+	// See the comment of gate.
+	notifying *gate
 }
 
 var (
@@ -48,11 +51,54 @@ var (
 	_ store.Snapshotter = (*Store)(nil)
 )
 
+// Option configures a Store.
+type Option func(*options)
+
+type options struct{ maxNotifying int }
+
+// WithMaxNotifying sets the most connections of the pool that calls which
+// notify may hold at once: Enqueue, Release and Requeue, whose transactions
+// queue on the lock that PostgreSQL takes for every committing NOTIFY. A call
+// over the bound waits for another to finish before it takes a connection, so
+// the connections above the bound stay free for the calls that do not notify,
+// Lease and Activity among them.
+//
+// A value below 1 selects the default, all but a reserve of max(2, poolMax/4)
+// connections of the pool; see defaultMaxNotifying for the reasoning and for
+// what a small pool leaves over. A value that would leave no connection to the
+// calls that do not notify, the size of the pool or more, is lowered to the
+// pool size minus one, because a bound as large as the pool turns itself off. A
+// pool of one connection cannot spare one, and its bound is that connection. The
+// broker rejects such values instead of lowering them; MaxNotifying reports the
+// bound in effect.
+func WithMaxNotifying(n int) Option { return func(o *options) { o.maxNotifying = n } }
+
 // New returns a Store that runs its statements on pool. The pool is the
 // caller's: closing it is the caller's business too, and afterwards every
 // call fails with an error that wraps store.ErrUnavailable. The database must
 // already be migrated; see package migrate.
-func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
+//
+// The calls that notify hold at most a bounded share of the pool's
+// connections, so that the others always find one; see WithMaxNotifying. A call
+// that waits for its turn under the bound fails with its context's error if the
+// context ends first, as a call that waits for a connection does.
+func New(pool *pgxpool.Pool, opts ...Option) *Store {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+	poolMax := int(pool.Config().MaxConns)
+	n := o.maxNotifying
+	if n < 1 {
+		n = defaultMaxNotifying(poolMax)
+	}
+	return &Store{pool: pool, notifying: newGate(min(n, notifyingCeiling(poolMax)))}
+}
+
+// MaxNotifying returns the most connections of the pool that calls which
+// notify (Enqueue, Release and Requeue) may hold at once: the bound that
+// WithMaxNotifying set, or the default, after it was brought within the pool.
+func (s *Store) MaxNotifying() int { return s.notifying.capacity() }
 
 // Open connects to the database at url and returns a pool for New. It holds
 // at most maxConns connections, or pgxpool's default when maxConns is below 1,

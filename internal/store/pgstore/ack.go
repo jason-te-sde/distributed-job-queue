@@ -420,13 +420,19 @@ wake AS (
 )
 SELECT released.ord FROM released, (SELECT count(*) FROM wake) AS woken`
 
-// Release implements store.Store.
+// Release implements store.Store. It notifies, so it holds a permit of the
+// store's bound on notifying calls for as long as it holds a connection.
 func (s *Store) Release(ctx context.Context, refs []store.Ref) ([]job.Outcome, error) {
 	if err := validateRefs(refs); err != nil {
 		return nil, err
 	}
+	slot, err := s.notifying.acquire(ctx)
+	if err != nil {
+		return nil, classify("release", err)
+	}
+	defer slot.release() // runs after acks has finished with its connections
 	out := make([]job.Outcome, len(refs))
-	err := s.acks(ctx, "release", len(refs), func(i int) int64 { return refs[i].ID },
+	err = s.acks(ctx, "release", len(refs), func(i int) int64 { return refs[i].ID },
 		func(ctx context.Context, q querier, idx []int) error {
 			n := len(idx)
 			ids, queues, tokens := make([]int64, n), make([]string, n), make([]int64, n)
@@ -526,10 +532,12 @@ wake AS (
 )
 SELECT revived.id FROM revived, (SELECT count(*) FROM wake) AS woken`
 
-// Requeue implements store.Store.
+// Requeue implements store.Store. Its first statement notifies, so that one
+// runs under a permit of the store's bound on notifying calls; the read that
+// tells why nothing was requeued does not notify and does not need one.
 func (s *Store) Requeue(ctx context.Context, id int64) (job.Outcome, error) {
 	var hit int64
-	switch err := s.pool.QueryRow(ctx, requeueSQL, id).Scan(&hit); {
+	switch err := s.requeueNotifying(ctx, id, &hit); {
 	case err == nil:
 		return job.Applied, nil
 	case !errors.Is(err, pgx.ErrNoRows):
@@ -538,4 +546,15 @@ func (s *Store) Requeue(ctx context.Context, id int64) (job.Outcome, error) {
 	out, err := s.settleOne(ctx, id, "", job.WrongState,
 		func(j job.Job, now time.Time) job.Outcome { _, o := job.Requeue(j, now); return o })
 	return out, classify("requeue", err)
+}
+
+// requeueNotifying runs requeueSQL under a permit of the bound on notifying
+// calls.
+func (s *Store) requeueNotifying(ctx context.Context, id int64, hit *int64) error {
+	slot, err := s.notifying.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer slot.release() // runs after Scan has given the connection back
+	return s.pool.QueryRow(ctx, requeueSQL, id).Scan(hit)
 }

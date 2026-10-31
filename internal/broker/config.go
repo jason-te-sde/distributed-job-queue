@@ -45,6 +45,16 @@ type Config struct {
 	DatabaseURL string
 	// MaxDBConns is the size of the database connection pool.
 	MaxDBConns int32
+	// MaxNotifyConns is the most connections of that pool that the calls
+	// which notify (enqueue, release and requeue) may hold at once. Their
+	// transactions queue on the lock that PostgreSQL takes for each committing
+	// NOTIFY, and unbounded they would take every connection and leave none for
+	// leasing. Zero, the default, derives the bound from MaxDBConns: all but a
+	// reserve of max(2, MaxDBConns/4), which leaves at least 2 connections to
+	// the other calls from a pool of 3 up, 1 in a pool of 2, and none in a pool
+	// of 1. A set value must leave one connection to them, so it is at most
+	// MaxDBConns minus 1; in a pool of 1, which cannot spare one, it is 0 or 1.
+	MaxNotifyConns int32
 	// TokensFile names the file of token hashes that LoadTokens reads. TLSCert
 	// and TLSKey name the certificate and key of the gRPC listener.
 	TokensFile, TLSCert, TLSKey string
@@ -107,6 +117,7 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.StringVar(&c.DatabaseURL, "database-url", "", "PostgreSQL connection URL; defaults to $"+databaseURLEnv)
 	c.MaxDBConns = 20
 	fs.Var((*int32Value)(&c.MaxDBConns), "max-db-conns", "size of the database connection pool")
+	fs.Var((*int32Value)(&c.MaxNotifyConns), "max-notify-conns", "most pool connections that enqueue, release and requeue may hold at once, so that leasing finds one; 0 derives it, leaving a reserve of max(2, max-db-conns/4); at most max-db-conns minus 1, except that a pool of 1 allows 0 or 1")
 	fs.StringVar(&c.TokensFile, "tokens-file", "", "file of token hashes that authenticate callers")
 	fs.StringVar(&c.TLSCert, "tls-cert", "", "TLS certificate file of the gRPC listener")
 	fs.StringVar(&c.TLSKey, "tls-key", "", "TLS key file of the gRPC listener")
@@ -301,6 +312,13 @@ func (c Config) Validate() error {
 		if n.value < 1 {
 			return fmt.Errorf("--%s must be at least 1, got %d", n.flag, n.value)
 		}
+	}
+	// A bound as large as the pool would turn itself off, so it must leave one
+	// connection to the other calls. A pool of 1 cannot spare one: 0 and 1 are
+	// its only values.
+	if ceiling := max(1, c.MaxDBConns-1); c.MaxNotifyConns < 0 || c.MaxNotifyConns > ceiling {
+		return fmt.Errorf("--max-notify-conns must be 0 (derive it) or between 1 and %d, which leaves a connection of --max-db-conns=%d "+
+			"to the calls that do not notify (a pool of 1 allows 0 or 1), got %d", ceiling, c.MaxDBConns, c.MaxNotifyConns)
 	}
 
 	for _, tenant := range slices.Sorted(maps.Keys(c.TenantWeights)) {

@@ -79,6 +79,7 @@ func TestParseFlagsEveryFlag(t *testing.T) {
 		"--scaler-addr=127.0.0.1:3",
 		"--database-url=postgres://flag/db",
 		"--max-db-conns=7",
+		"--max-notify-conns=5",
 		"--tokens-file=/etc/tokens",
 		"--tls-cert=/etc/tls.crt",
 		"--tls-key=/etc/tls.key",
@@ -111,6 +112,7 @@ func TestParseFlagsEveryFlag(t *testing.T) {
 		ScalerAddr:            "127.0.0.1:3",
 		DatabaseURL:           "postgres://flag/db",
 		MaxDBConns:            7,
+		MaxNotifyConns:        5,
 		TokensFile:            "/etc/tokens",
 		TLSCert:               "/etc/tls.crt",
 		TLSKey:                "/etc/tls.key",
@@ -358,6 +360,11 @@ func TestValidateRejects(t *testing.T) {
 		{"no database URL", func(c *Config) { c.DatabaseURL = "" }, "database-url"},
 		{"zero max-db-conns", func(c *Config) { c.MaxDBConns = 0 }, "max-db-conns"},
 		{"negative max-db-conns", func(c *Config) { c.MaxDBConns = -1 }, "max-db-conns"},
+		{"negative max-notify-conns", func(c *Config) { c.MaxNotifyConns = -1 }, "max-notify-conns"},
+		{"max-notify-conns above the pool", func(c *Config) { c.MaxNotifyConns = c.MaxDBConns + 1 }, "max-notify-conns"},
+		{"max-notify-conns equal to the pool, which would turn the bound off", func(c *Config) { c.MaxNotifyConns = c.MaxDBConns }, "max-notify-conns"},
+		{"max-notify-conns equal to a pool of 2", func(c *Config) { c.MaxDBConns, c.MaxNotifyConns = 2, 2 }, "max-notify-conns"},
+		{"max-notify-conns above a pool of 1", func(c *Config) { c.MaxDBConns, c.MaxNotifyConns = 1, 2 }, "max-notify-conns"},
 		{"zero reap-interval", func(c *Config) { c.ReapInterval = 0 }, "reap-interval"},
 		{"negative prune-interval", func(c *Config) { c.PruneInterval = -time.Second }, "prune-interval"},
 		{"zero poll-interval", func(c *Config) { c.PollInterval = 0 }, "poll-interval"},
@@ -488,6 +495,9 @@ func checkConfigRules(t *testing.T, c Config) {
 			t.Errorf("%s = %d is below 1", name, n)
 		}
 	}
+	if c.MaxNotifyConns < 0 || c.MaxNotifyConns > max(1, c.MaxDBConns-1) {
+		t.Errorf("max-notify-conns = %d is outside [0, max(1, max-db-conns - 1)] for max-db-conns = %d", c.MaxNotifyConns, c.MaxDBConns)
+	}
 	for tenant, w := range c.TenantWeights {
 		if w < 1 || w > 1000 {
 			t.Errorf("weight of %q = %d is outside [1, 1000]", tenant, w)
@@ -517,5 +527,43 @@ func checkConfigRules(t *testing.T, c Config) {
 	case "json", "text":
 	default:
 		t.Errorf("log format %q is unknown", c.LogFormat)
+	}
+}
+
+// TestValidateMaxNotifyConns pins what --max-notify-conns accepts: 0, which
+// derives the bound, and any value that leaves at least one connection of the
+// pool to the calls that do not notify. A pool of 1 cannot spare one, so its
+// only values are 0 and 1.
+func TestValidateMaxNotifyConns(t *testing.T) {
+	for _, tc := range []struct {
+		pool, notify int32
+		ok           bool
+	}{
+		{20, 0, true}, {20, 1, true}, {20, 15, true}, {20, 19, true}, {20, 20, false}, {20, 21, false}, {20, -1, false},
+		{3, 2, true}, {3, 3, false},
+		{2, 0, true}, {2, 1, true}, {2, 2, false},
+		{1, 0, true}, {1, 1, true}, {1, 2, false},
+	} {
+		c := validConfig(t)
+		c.MaxDBConns, c.MaxNotifyConns = tc.pool, tc.notify
+		err := c.Validate()
+		switch {
+		case tc.ok && err != nil:
+			t.Errorf("max-db-conns=%d max-notify-conns=%d: Validate = %v, want it accepted", tc.pool, tc.notify, err)
+		case !tc.ok && (err == nil || !strings.Contains(err.Error(), "max-notify-conns")):
+			t.Errorf("max-db-conns=%d max-notify-conns=%d: Validate = %v, want max-notify-conns refused", tc.pool, tc.notify, err)
+		}
+	}
+}
+
+func TestMaxNotifyConnsHelpSaysWhatIsAccepted(t *testing.T) {
+	_, err := ParseFlags([]string{"-h"}, noEnv)
+	if err == nil {
+		t.Fatal("ParseFlags -h returned no error")
+	}
+	for _, want := range []string{"max-notify-conns", "0 derives", "pool of 1"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the usage text does not mention %q", want)
+		}
 	}
 }

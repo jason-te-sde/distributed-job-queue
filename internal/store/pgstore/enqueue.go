@@ -127,7 +127,12 @@ const findSQL = `SELECT id FROM jobqueue.jobs WHERE (tenant, queue, idempotency_
 // unique index instead.
 func (s *Store) enqueueCheckThenInsert(ctx context.Context, specs []job.Spec) ([]store.EnqueueResult, error) {
 	out := make([]store.EnqueueResult, len(specs))
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	slot, err := s.notifying.acquire(ctx)
+	if err != nil {
+		return nil, classify("enqueue", err)
+	}
+	defer slot.release() // runs after BeginFunc has ended the transaction and returned the connection
+	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		for i, sp := range specs {
 			if sp.IdempotencyKey != "" {
 				var id int64
@@ -155,7 +160,18 @@ func (s *Store) enqueueCheckThenInsert(ctx context.Context, specs []job.Spec) ([
 // when it returns without an error, because a batch commits as a whole when its
 // last result has been read. It also returns the items that were deduplicated
 // and whose job the batch's own read-back did not find.
+//
+// The batch notifies, so it takes a permit of the store's bound on notifying
+// calls before it takes a connection.
 func (s *Store) runEnqueue(ctx context.Context, batch *pgx.Batch, specs []job.Spec, resolve bool) (_ []store.EnqueueResult, _ []int, err error) {
+	slot, err := s.notifying.acquire(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Deferred first, so it runs last: after the deferred Close below has given
+	// the connection back to the pool. A permit then never stands for less than
+	// the connection it guards.
+	defer slot.release()
 	br := s.pool.SendBatch(ctx, batch)
 	defer func() {
 		// The batch commits when its last result has been read and the

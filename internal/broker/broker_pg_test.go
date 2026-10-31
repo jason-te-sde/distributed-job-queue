@@ -27,6 +27,7 @@ import (
 	"github.com/jason-te-sde/distributed-job-queue/internal/gen/externalscaler"
 	jobqueuev1 "github.com/jason-te-sde/distributed-job-queue/internal/gen/jobqueue/v1"
 	"github.com/jason-te-sde/distributed-job-queue/internal/pgtest"
+	"github.com/jason-te-sde/distributed-job-queue/internal/store/pgstore"
 	"github.com/jason-te-sde/distributed-job-queue/internal/store/pgstore/migrate"
 )
 
@@ -224,6 +225,35 @@ func TestPGBrokerRefusesSchemaMismatch(t *testing.T) {
 	}
 	if mismatch.Have != 0 || mismatch.Want != migrate.Version {
 		t.Errorf("mismatch = %+v, want have 0 and want %d", mismatch, migrate.Version)
+	}
+}
+
+// TestPGBrokerHandsTheNotifyBoundToTheStore checks that the broker's
+// --max-notify-conns reaches the store it builds: a change that stops passing it
+// leaves the store on the default and fails here.
+func TestPGBrokerHandsTheNotifyBoundToTheStore(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		tune   func(*Config)
+		wantIn int
+	}{
+		{"a set bound", func(c *Config) { c.MaxDBConns, c.MaxNotifyConns = 12, 4 }, 4},
+		{"the default for the pool", func(c *Config) { c.MaxDBConns, c.MaxNotifyConns = 12, 0 }, 9},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rb := startBroker(t, pgtest.NewDB(t), tc.tune)
+			timed, ok := rb.b.st.(timedStore)
+			if !ok {
+				t.Fatalf("the broker's store is a %T, want a timedStore", rb.b.st)
+			}
+			pg, ok := timed.Store.(*pgstore.Store)
+			if !ok {
+				t.Fatalf("the timed store wraps a %T, want a *pgstore.Store", timed.Store)
+			}
+			if got := pg.MaxNotifying(); got != tc.wantIn {
+				t.Errorf("the store's bound on notifying calls is %d, want %d", got, tc.wantIn)
+			}
+		})
 	}
 }
 

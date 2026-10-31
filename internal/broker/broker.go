@@ -143,7 +143,7 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*Broker, error) {
 	b.metrics = NewMetrics(b.reg)
 	b.metrics.SetBuildInfo("dev")
 	b.health.SetGatherer(b.reg)
-	b.st = timedStore{Store: pgstore.New(pool), m: b.metrics}
+	b.st = timedStore{Store: pgstore.New(pool, pgstore.WithMaxNotifying(int(cfg.MaxNotifyConns))), m: b.metrics}
 	b.dispatcher = NewDispatcher(b.st, DispatcherConfig{
 		Scheduler: cfg.Scheduler, Weights: cfg.TenantWeights, Quantum: cfg.Quantum,
 		MaxInFlight: cfg.MaxInFlight, PollInterval: cfg.PollInterval, ActivityInterval: cfg.ActivityInterval,
