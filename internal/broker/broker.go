@@ -174,6 +174,7 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*Broker, error) {
 		// is how KEDA dials an external scaler unless the trigger asks
 		// for TLS.
 		b.scaler = NewScaler(b.st, 0)
+		b.scaler.log = log
 		b.scalerServer = grpc.NewServer()
 		externalscaler.RegisterExternalScalerServer(b.scalerServer, b.scaler)
 	}

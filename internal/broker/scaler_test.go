@@ -3,9 +3,12 @@ package broker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -34,27 +37,56 @@ type scalerEnv struct {
 	mem    *memstore.Store
 	calls  atomic.Int64 // store calls that reached the Scaler
 	scaler *Scaler
+	logs   *syncBuffer // what the Scaler logged
 	client externalscaler.ExternalScalerClient
 }
 
-// newScalerEnv starts the Scaler with the push interval scalerPush. wrap, if
-// set, wraps the store the Scaler uses; the test's own handle stays the bare
-// memstore.
+// scalerOpts are the settings of a scalerEnv that a test may change.
+type scalerOpts struct {
+	// push is the push interval; zero means scalerPush.
+	push time.Duration
+	// cacheTTL is how long the Scaler reuses a backlog it has read. Zero turns
+	// the cache off, which is what most tests want: they change the store and
+	// ask again at once.
+	cacheTTL time.Duration
+	// maxCached is the most queues the cache holds; zero keeps the default.
+	maxCached int
+	// wrap, if set, wraps the store the Scaler uses; the test's own handle
+	// stays the bare memstore.
+	wrap func(store.Store) store.Store
+}
+
+// newScalerEnv starts a Scaler with the push interval scalerPush and no cache.
 func newScalerEnv(t *testing.T, wrap func(store.Store) store.Store) *scalerEnv {
 	t.Helper()
-	return newScalerEnvPush(t, scalerPush, wrap)
+	return startScalerEnv(t, scalerOpts{wrap: wrap})
 }
 
 // newScalerEnvPush is newScalerEnv with a push interval of its own.
 func newScalerEnvPush(t *testing.T, push time.Duration, wrap func(store.Store) store.Store) *scalerEnv {
 	t.Helper()
-	env := &scalerEnv{t: t, clock: &fakeClock{now: t0}}
+	return startScalerEnv(t, scalerOpts{push: push, wrap: wrap})
+}
+
+// startScalerEnv starts the Scaler with the given settings.
+func startScalerEnv(t *testing.T, o scalerOpts) *scalerEnv {
+	t.Helper()
+	if o.push == 0 {
+		o.push = scalerPush
+	}
+	env := &scalerEnv{t: t, clock: &fakeClock{now: t0}, logs: &syncBuffer{}}
 	env.mem = memstore.New(memstore.Options{Clock: env.clock.Now})
 	var inner store.Store = env.mem
-	if wrap != nil {
-		inner = wrap(inner)
+	if o.wrap != nil {
+		inner = o.wrap(inner)
 	}
-	env.scaler = NewScaler(spyStore{Store: inner, n: &env.calls}, push)
+	env.scaler = NewScaler(spyStore{Store: inner, n: &env.calls}, o.push)
+	// The fields are set before the server starts, so no call can race them.
+	env.scaler.cacheTTL = o.cacheTTL
+	if o.maxCached > 0 {
+		env.scaler.maxCached = o.maxCached
+	}
+	env.scaler.log = slog.New(slog.NewTextHandler(env.logs, nil))
 
 	gs := grpc.NewServer()
 	externalscaler.RegisterExternalScalerServer(gs, env.scaler)
@@ -569,5 +601,277 @@ func TestNewScalerDefaultsThePushInterval(t *testing.T) {
 	}
 	if got := NewScaler(mem, 3*time.Second).push; got != 3*time.Second {
 		t.Errorf("NewScaler(_, 3s).push = %v, want 3s", got)
+	}
+}
+
+func TestScalerIsActiveWhileALeaseIsHeld(t *testing.T) {
+	// A held lease means workers are running: the scaler is active whatever
+	// activationBacklog says, so that KEDA never scales to zero under them.
+	env := newScalerEnv(t, nil)
+	env.add("q", "t", 1)
+	grants := env.lease("q", "t", 1) // ready 0, leased 1
+	for _, activation := range []string{"0", "1", "5", "1000"} {
+		if !env.isActive(scaledRef("queue", "q", "activationBacklog", activation)) {
+			t.Errorf("IsActive with ready 0, leased 1 and activationBacklog %s = false, want true", activation)
+		}
+	}
+	s := env.openStream(scaledRef("queue", "q", "activationBacklog", "5"))
+	if !s.next(t, 5*time.Second, "the current state") {
+		t.Error("the stream said false with a lease held and activationBacklog 5, want true")
+	}
+
+	// The backlog of the metric is still ready plus leased.
+	env.wantBacklog("q", 1)
+
+	// Ready jobs alone must exceed the threshold; with no lease held the
+	// threshold applies as it always did.
+	env.add("r", "t", 3)
+	if env.isActive(scaledRef("queue", "r", "activationBacklog", "5")) {
+		t.Error("IsActive with ready 3, leased 0 and activationBacklog 5 = true, want false")
+	}
+	// Ready plus leased above the threshold is active, as before.
+	env.add("r", "t", 3)
+	env.lease("r", "t", 3) // ready 3, leased 3
+	if !env.isActive(scaledRef("queue", "r", "activationBacklog", "5")) {
+		t.Error("IsActive with ready 3, leased 3 and activationBacklog 5 = false, want true")
+	}
+
+	// Once the lease is gone the threshold decides again.
+	env.complete(grants)
+	if env.isActive(scaledRef("queue", "q", "activationBacklog", "5")) {
+		t.Error("IsActive after the lease finished = true, want false")
+	}
+}
+
+func TestScalerStreamIsActiveEndsWhenTheClientGoes(t *testing.T) {
+	// A stream whose client has gone must stop looking at the store: KEDA
+	// opens a new one at every reconnect, and a stream that lived on would
+	// cost a store call per push interval for ever.
+	env := newScalerEnv(t, nil)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	stream, err := env.client.StreamIsActive(ctx, scaledRef("queue", "q"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Recv(); err != nil {
+		t.Fatal(err)
+	}
+	// While the client is there the stream looks at the store every interval,
+	// so that the probe below can tell a stream that went on from one that did
+	// not.
+	before := env.calls.Load()
+	waitFor(t, "the stream to look at the store again", 5*time.Second, func() bool { return env.calls.Load() >= before+2 })
+
+	cancel()
+	waitFor(t, "the store calls to stop after the client went away", 5*time.Second, func() bool {
+		seen := env.calls.Load()
+		time.Sleep(4 * scalerPush) // a call that was under way has finished by now
+		return env.calls.Load() == seen
+	})
+}
+
+func TestScalerGetMetricsIgnoresTheRequestedMetricName(t *testing.T) {
+	// The ScaledObject names the queue and so the one metric; the name in the
+	// request is not consulted, as in KEDA's own sample scaler.
+	env := newScalerEnv(t, nil)
+	env.add("q", "t", 2)
+	for _, name := range []string{"", "something-else", "jobqueue-other-backlog"} {
+		resp, err := env.client.GetMetrics(t.Context(), &externalscaler.GetMetricsRequest{
+			ScaledObjectRef: scaledRef("queue", "q"), MetricName: name,
+		})
+		if err != nil {
+			t.Errorf("GetMetrics for the metric name %q = %v, want success", name, err)
+			continue
+		}
+		values := resp.GetMetricValues()
+		if len(values) != 1 || values[0].GetMetricName() != "jobqueue-q-backlog" || values[0].GetMetricValue() != 2 {
+			t.Errorf("GetMetrics for the metric name %q = %v, want the one value {\"jobqueue-q-backlog\" 2}", name, values)
+		}
+	}
+}
+
+// brokenStats is a store whose Stats fails with an error that is not one of
+// the store's own, which the Scaler can only report as an internal error.
+type brokenStats struct{ store.Store }
+
+func (brokenStats) Stats(context.Context, string) ([]store.TenantStats, error) {
+	return nil, errors.New("the disk is on fire")
+}
+
+func TestScalerLogsInternalStoreErrors(t *testing.T) {
+	env := newScalerEnv(t, func(s store.Store) store.Store { return brokenStats{Store: s} })
+	_, err := env.client.IsActive(t.Context(), scaledRef("queue", "q"))
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("IsActive = %v, want Internal", err)
+	}
+	if strings.Contains(err.Error(), "on fire") {
+		t.Errorf("IsActive = %v: the client must see \"internal error\" and nothing of the cause", err)
+	}
+	if logged := env.logs.String(); !strings.Contains(logged, "the disk is on fire") || !strings.Contains(logged, "scaler") {
+		t.Errorf("the log = %q, want the cause of the internal error and the scaler named", logged)
+	}
+
+	// A Scaler that nobody gave a logger reports the same error and does not
+	// panic on the way.
+	mem := memstore.New(memstore.Options{Clock: (&fakeClock{now: t0}).Now})
+	bare := NewScaler(brokenStats{Store: mem}, 0)
+	_, err = bare.IsActive(t.Context(), scaledRef("queue", "q"))
+	if status.Code(err) != codes.Internal {
+		t.Errorf("IsActive on a Scaler without a logger = %v, want Internal", err)
+	}
+}
+
+func TestScalerSharesTheBacklogBetweenStreamsAndCalls(t *testing.T) {
+	// With a cache that outlasts the test, a queue costs one store call however
+	// many streams and calls ask about it.
+	env := startScalerEnv(t, scalerOpts{cacheTTL: time.Hour})
+	env.add("q", "t", 1)
+	env.add("other", "t", 1)
+	ref := scaledRef("queue", "q")
+
+	a, b := env.openStream(ref), env.openStream(ref)
+	if !a.next(t, 5*time.Second, "the first stream's state") || !b.next(t, 5*time.Second, "the second stream's state") {
+		t.Fatal("a stream said false with a job waiting, want true")
+	}
+	// The streams go on looking every push interval, and calls come in too.
+	env.isActive(ref)
+	env.wantBacklog("q", 1)
+	a.silent(t, 6*scalerPush, "the backlog did not change")
+	if n := env.calls.Load(); n != 1 {
+		t.Errorf("two streams and two calls on one queue made %d store calls, want 1", n)
+	}
+
+	// Another queue has an entry of its own.
+	if !env.isActive(scaledRef("queue", "other")) {
+		t.Error("IsActive on another queue = false, want true")
+	}
+	if n := env.calls.Load(); n != 2 {
+		t.Errorf("a second queue brought the store calls to %d, want 2", n)
+	}
+}
+
+// gatedStats holds every Stats until its gate is closed.
+type gatedStats struct {
+	store.Store
+	gate    chan struct{}
+	entered chan struct{}
+}
+
+func (g gatedStats) Stats(ctx context.Context, queue string) ([]store.TenantStats, error) {
+	select {
+	case g.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-g.gate:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return g.Store.Stats(ctx, queue)
+}
+
+func TestScalerCallsThatFindTheBacklogStaleShareOneRead(t *testing.T) {
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 8)
+	env := startScalerEnv(t, scalerOpts{cacheTTL: time.Hour, wrap: func(s store.Store) store.Store {
+		return gatedStats{Store: s, gate: gate, entered: entered}
+	}})
+	env.add("q", "t", 1)
+
+	const callers = 4
+	var wg sync.WaitGroup
+	results := make(chan error, callers)
+	for range callers {
+		wg.Go(func() {
+			resp, err := env.client.IsActive(t.Context(), scaledRef("queue", "q"))
+			if err == nil && !resp.GetResult() {
+				err = errors.New("IsActive = false, want true")
+			}
+			results <- err
+		})
+	}
+	<-entered
+	// The first call is inside the store. This pause gives the others time to
+	// reach the cache, where they must wait for it and not read for themselves;
+	// a correct Scaler passes whatever the timing.
+	time.Sleep(100 * time.Millisecond)
+	close(gate)
+	wg.Wait()
+	close(results)
+	for err := range results {
+		if err != nil {
+			t.Error(err)
+		}
+	}
+	if n := env.calls.Load(); n != 1 {
+		t.Errorf("%d concurrent calls made %d store calls, want 1", callers, n)
+	}
+}
+
+func TestScalerBacklogCacheExpires(t *testing.T) {
+	env := startScalerEnv(t, scalerOpts{cacheTTL: 100 * time.Millisecond})
+	ref := scaledRef("queue", "q")
+	if env.isActive(ref) {
+		t.Fatal("IsActive on an empty queue = true, want false")
+	}
+	env.add("q", "t", 1)
+	waitFor(t, "the cached backlog to expire and show the new job", 5*time.Second, func() bool {
+		resp, err := env.client.IsActive(t.Context(), ref)
+		return err == nil && resp.GetResult()
+	})
+}
+
+func TestScalerCacheDoesNotGrowWithQueueNames(t *testing.T) {
+	// Anyone who can reach the port can ask about any queue name, so the
+	// cache must not grow with them.
+	const max = 8
+	env := startScalerEnv(t, scalerOpts{cacheTTL: time.Hour, maxCached: max})
+	for i := range 3 * max {
+		env.isActive(scaledRef("queue", fmt.Sprintf("q%d", i)))
+	}
+	if n := env.scaler.cachedQueues(); n > max {
+		t.Errorf("the cache holds %d queues, want at most %d", n, max)
+	}
+	// A queue that did not fit is still answered, from the store.
+	env.add("late", "t", 1)
+	if !env.isActive(scaledRef("queue", "late")) {
+		t.Error("IsActive on a queue that did not fit in the cache = false, want true")
+	}
+}
+
+func TestScalerCacheDropsStaleEntries(t *testing.T) {
+	const max = 8
+	env := startScalerEnv(t, scalerOpts{cacheTTL: 50 * time.Millisecond, maxCached: max})
+	for i := range max {
+		env.isActive(scaledRef("queue", fmt.Sprintf("q%d", i)))
+	}
+	if n := env.scaler.cachedQueues(); n != max {
+		t.Fatalf("the cache holds %d queues, want %d: the setup of this case is wrong", n, max)
+	}
+	time.Sleep(100 * time.Millisecond) // every entry is now older than the TTL
+	env.isActive(scaledRef("queue", "fresh"))
+	if n := env.scaler.cachedQueues(); n != 1 {
+		t.Errorf("the cache holds %d queues after the stale ones should have been dropped, want 1", n)
+	}
+}
+
+func TestScalerDoesNotCacheStoreErrors(t *testing.T) {
+	// A store that was down must be asked again, not remembered as down or as
+	// empty, even with a cache that outlasts the test.
+	var fail atomic.Bool
+	env := startScalerEnv(t, scalerOpts{cacheTTL: time.Hour, wrap: func(s store.Store) store.Store {
+		return failingStats{Store: s, fail: &fail}
+	}})
+	env.add("q", "t", 1)
+	ref := scaledRef("queue", "q")
+
+	fail.Store(true)
+	if _, err := env.client.IsActive(t.Context(), ref); status.Code(err) != codes.Unavailable {
+		t.Fatalf("IsActive with the store down = %v, want Unavailable", err)
+	}
+	fail.Store(false)
+	if !env.isActive(ref) {
+		t.Error("IsActive after the store came back = false, want true")
 	}
 }

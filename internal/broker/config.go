@@ -35,7 +35,10 @@ type Config struct {
 	// GRPCAddr and HTTPAddr are the listen addresses of the gRPC API and of
 	// the HTTP endpoint that serves health checks and metrics. ScalerAddr
 	// is the listen address of the autoscaler's gRPC service; empty
-	// disables it.
+	// disables it. That service is plaintext and has no authentication,
+	// because KEDA cannot send tokens: it is meant to be reachable only by
+	// KEDA, through a NetworkPolicy, and Validate makes no demand on the
+	// address.
 	GRPCAddr, HTTPAddr, ScalerAddr string
 	// DatabaseURL is the PostgreSQL connection URL, from --database-url or
 	// else the JOBQUEUE_DATABASE_URL environment variable.
@@ -100,7 +103,7 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 
 	fs.StringVar(&c.GRPCAddr, "grpc-addr", ":7070", "listen address of the gRPC API")
 	fs.StringVar(&c.HTTPAddr, "http-addr", ":7071", "listen address of the health and metrics endpoint")
-	fs.StringVar(&c.ScalerAddr, "scaler-addr", "", "listen address of the autoscaler service; empty disables it")
+	fs.StringVar(&c.ScalerAddr, "scaler-addr", "", "listen address of the autoscaler service, which is unauthenticated plaintext gRPC meant to be reachable only by KEDA through a NetworkPolicy; empty disables it")
 	fs.StringVar(&c.DatabaseURL, "database-url", "", "PostgreSQL connection URL; defaults to $"+databaseURLEnv)
 	c.MaxDBConns = 20
 	fs.Var((*int32Value)(&c.MaxDBConns), "max-db-conns", "size of the database connection pool")

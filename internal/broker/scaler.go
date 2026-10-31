@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"log/slog"
 	"strconv"
 	"sync"
 	"time"
@@ -24,6 +25,13 @@ const (
 	// defaultActivationBacklog is the backlog that must be exceeded to leave
 	// zero replicas when the ScaledObject does not say.
 	defaultActivationBacklog int64 = 0
+	// defaultBacklogTTL is how long a backlog that was read from the store is
+	// reused, by every stream and call that asks about the queue meanwhile.
+	defaultBacklogTTL = 500 * time.Millisecond
+	// maxCachedQueues is the most queues the backlog cache holds. The port is
+	// open to whoever the network policy admits, and a queue name is theirs to
+	// choose, so the cache cannot be allowed to grow with them.
+	maxCachedQueues = 1024
 )
 
 // The keys of the scaler metadata of a ScaledObject that the Scaler reads.
@@ -49,8 +57,14 @@ const (
 // The backlog of a queue is the number of its ready and leased jobs, summed
 // over its tenants. Leased jobs count so that KEDA does not scale the workers
 // that hold them to zero, and scheduled jobs do not, because nothing can
-// run them yet; they join the backlog when they fall due. A store that cannot
-// answer is an error and never an empty backlog, for the same reason.
+// run them yet; they join the backlog when they fall due. For the same reason
+// the Scaler is active whenever a job is leased, whatever activationBacklog
+// is, and otherwise when the backlog exceeds activationBacklog. A store that
+// cannot answer is an error and never an empty backlog.
+//
+// A backlog that was read from the store is reused for half a second by every
+// stream and call that asks about the queue meanwhile, so that the number of
+// streams does not set the number of store queries.
 //
 // The Scaler is served on a gRPC server of its own, without UnaryAuth: KEDA
 // cannot send bearer tokens. What protects the port is the network policy of
@@ -62,9 +76,39 @@ type Scaler struct {
 
 	st   store.Store
 	push time.Duration
+	// log receives the internal errors of the store, which the client sees only
+	// as "internal error". NewScaler gives it a logger that discards; the
+	// broker sets its own before it serves.
+	log *slog.Logger
+
+	// cacheTTL is how long a backlog is reused, and maxCached the most queues
+	// the cache holds. They are fields so that a test can change them before
+	// the Scaler serves.
+	cacheTTL  time.Duration
+	maxCached int
+	cacheMu   sync.Mutex
+	cache     map[string]*backlogEntry
 
 	drainOnce sync.Once
 	drained   chan struct{}
+}
+
+// backlogCount is what the Scaler reads from the store about one queue.
+type backlogCount struct {
+	ready, leased int64
+}
+
+// total is the backlog: the ready and the leased jobs.
+func (c backlogCount) total() int64 { return c.ready + c.leased }
+
+// backlogEntry is the cached backlog of one queue.
+type backlogEntry struct {
+	// mu is held while the entry is read or refreshed, so that callers that
+	// find it stale queue up behind the one that refreshes it and then use what
+	// it read.
+	mu  sync.Mutex
+	at  time.Time // when val was read; zero until it has been
+	val backlogCount
 }
 
 // NewScaler returns a Scaler over st. StreamIsActive looks at the backlog
@@ -73,7 +117,11 @@ func NewScaler(st store.Store, push time.Duration) *Scaler {
 	if push <= 0 {
 		push = defaultScalerPush
 	}
-	return &Scaler{st: st, push: push, drained: make(chan struct{})}
+	return &Scaler{
+		st: st, push: push, log: slog.New(slog.DiscardHandler),
+		cacheTTL: defaultBacklogTTL, maxCached: maxCachedQueues, cache: make(map[string]*backlogEntry),
+		drained: make(chan struct{}),
+	}
 }
 
 // Drain ends every StreamIsActive call, those open and those still to come,
@@ -132,30 +180,101 @@ func metaCount(md map[string]string, key string, def, least int64) (int64, error
 	return n, nil
 }
 
-// backlog returns the number of ready and leased jobs of the queue, over all
-// tenants.
-func (s *Scaler) backlog(ctx context.Context, queue string) (int64, error) {
+// read asks the store for the ready and leased jobs of the queue, over all
+// tenants. Its errors are statuses, and the internal ones are logged.
+func (s *Scaler) read(ctx context.Context, queue string) (backlogCount, error) {
 	stats, err := s.st.Stats(ctx, queue)
 	if err != nil {
-		return 0, toStatus(err)
+		return backlogCount{}, toStatusLogged(s.log, "scaler_backlog", err)
 	}
-	var n int64
+	var c backlogCount
 	for _, t := range stats {
-		n += t.Ready + t.Leased
+		c.ready += t.Ready
+		c.leased += t.Leased
 	}
-	return n, nil
+	return c, nil
 }
 
-// active says whether the backlog exceeds the activation backlog.
+// counts returns the backlog of the queue: what the store says, unless it said
+// so less than cacheTTL ago to someone else. Only an answer is kept; an error
+// is not, so a store that is down is asked again by the next caller.
+func (s *Scaler) counts(ctx context.Context, queue string) (backlogCount, error) {
+	if s.cacheTTL <= 0 {
+		return s.read(ctx, queue)
+	}
+	e := s.entry(queue)
+	if e == nil { // the cache is full of fresh entries
+		return s.read(ctx, queue)
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.at.IsZero() && time.Since(e.at) < s.cacheTTL {
+		return e.val, nil
+	}
+	start := time.Now()
+	c, err := s.read(ctx, queue)
+	if err != nil {
+		return backlogCount{}, err
+	}
+	e.val, e.at = c, start
+	return c, nil
+}
+
+// entry returns the cache entry of the queue, making it if there is none. It
+// returns nil if there is none and no room for one: a full cache first drops
+// the entries that have gone stale, and if every one is fresh the new queue is
+// read through without being kept.
+func (s *Scaler) entry(queue string) *backlogEntry {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	if e, ok := s.cache[queue]; ok {
+		return e
+	}
+	if len(s.cache) >= s.maxCached {
+		for q, e := range s.cache {
+			if !e.mu.TryLock() {
+				continue // being refreshed, so in use
+			}
+			stale := e.at.IsZero() || time.Since(e.at) >= s.cacheTTL
+			e.mu.Unlock()
+			if stale {
+				delete(s.cache, q)
+			}
+		}
+		if len(s.cache) >= s.maxCached {
+			return nil
+		}
+	}
+	e := &backlogEntry{}
+	s.cache[queue] = e
+	return e
+}
+
+// cachedQueues returns the number of queues in the cache.
+func (s *Scaler) cachedQueues() int {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	return len(s.cache)
+}
+
+// backlog returns the number of ready and leased jobs of the queue.
+func (s *Scaler) backlog(ctx context.Context, queue string) (int64, error) {
+	c, err := s.counts(ctx, queue)
+	return c.total(), err
+}
+
+// active says whether a job of the queue is leased, or the backlog exceeds the
+// activation backlog.
 func (s *Scaler) active(ctx context.Context, p scalerSpec) (bool, error) {
-	n, err := s.backlog(ctx, p.queue)
+	c, err := s.counts(ctx, p.queue)
 	if err != nil {
 		return false, err
 	}
-	return n > p.activation, nil
+	return c.leased > 0 || c.total() > p.activation, nil
 }
 
-// IsActive says whether the backlog of the queue exceeds activationBacklog.
+// IsActive says whether a job of the queue is leased or its backlog exceeds
+// activationBacklog.
 func (s *Scaler) IsActive(ctx context.Context, ref *externalscaler.ScaledObjectRef) (*externalscaler.IsActiveResponse, error) {
 	p, err := parseScalerRef(ref)
 	if err != nil {
@@ -170,9 +289,10 @@ func (s *Scaler) IsActive(ctx context.Context, ref *externalscaler.ScaledObjectR
 
 // StreamIsActive sends whether the queue is active as soon as the stream
 // opens, and then again whenever the answer differs from the one last sent,
-// looking at the backlog every push interval. It ends when the client goes
-// away, when Drain is called, or with the error of a store that cannot
-// answer; KEDA opens a new stream after any of them.
+// looking at the backlog every push interval, through the cache that every
+// other stream and call shares. It ends when the client goes away, when Drain
+// is called, or with the error of a store that cannot answer; KEDA opens a new
+// stream after any of them.
 func (s *Scaler) StreamIsActive(ref *externalscaler.ScaledObjectRef, stream externalscaler.ExternalScaler_StreamIsActiveServer) error {
 	p, err := parseScalerRef(ref)
 	if err != nil {

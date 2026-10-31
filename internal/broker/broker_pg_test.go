@@ -44,6 +44,12 @@ type runningBroker struct {
 // system.
 func startBroker(t *testing.T, pool *pgxpool.Pool, tune func(*Config)) *runningBroker {
 	t.Helper()
+	return startBrokerLog(t, pool, tune, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+// startBrokerLog is startBroker with a logger of the test's choosing.
+func startBrokerLog(t *testing.T, pool *pgxpool.Pool, tune func(*Config), log *slog.Logger) *runningBroker {
+	t.Helper()
 	cfg, err := ParseFlags([]string{
 		"--grpc-addr=127.0.0.1:0", "--http-addr=127.0.0.1:0", "--database-url=" + dbURL(t, pool),
 		"--log-level=debug",
@@ -54,7 +60,6 @@ func startBroker(t *testing.T, pool *pgxpool.Pool, tune func(*Config)) *runningB
 	if tune != nil {
 		tune(&cfg)
 	}
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ctx, cancel := context.WithCancel(context.Background())
 	b, err := New(ctx, cfg, log)
 	if err != nil {
@@ -394,9 +399,12 @@ func TestPGBrokerServesTheScalerWithoutTokens(t *testing.T) {
 	if _, err := rb.client.Enqueue(withToken(t.Context(), "admin-token"), &jobqueuev1.EnqueueRequest{Items: items}); err != nil {
 		t.Fatalf("Enqueue = %v", err)
 	}
-	if active, err = scaler.IsActive(t.Context(), ref); err != nil || !active.GetResult() {
-		t.Fatalf("IsActive with two jobs waiting = %v, %v; want true", active, err)
-	}
+	// The scaler reuses a backlog it read for half a second, so the answer for
+	// the empty queue may be given again for a moment before the jobs show.
+	waitFor(t, "IsActive to see the two waiting jobs", 10*time.Second, func() bool {
+		active, err = scaler.IsActive(t.Context(), ref)
+		return err == nil && active.GetResult()
+	})
 	metrics, err := scaler.GetMetrics(t.Context(), &externalscaler.GetMetricsRequest{ScaledObjectRef: ref, MetricName: "jobqueue-q-backlog"})
 	if err != nil || len(metrics.GetMetricValues()) != 1 || metrics.GetMetricValues()[0].GetMetricValue() != 2 {
 		t.Fatalf("GetMetrics with two jobs waiting = %v, %v; want one value of 2", metrics, err)
@@ -547,5 +555,28 @@ func TestPGBrokerCutsOffScalerCallsAfterTheGracePeriod(t *testing.T) {
 	}
 	if err := <-blocked; err == nil {
 		t.Error("the blocked IsActive succeeded; the grace period should have cut it off")
+	}
+}
+
+func TestPGBrokerLogsInternalScalerErrors(t *testing.T) {
+	// The scaler's clients see "internal error" and nothing more, so the
+	// cause has to be in the broker's log, which the broker's own logger must
+	// reach.
+	pool := pgtest.NewDB(t)
+	logs := &syncBuffer{}
+	rb := startBrokerLog(t, pool, func(c *Config) { c.ScalerAddr = "127.0.0.1:0" }, slog.New(slog.NewTextHandler(logs, nil)))
+	rb.waitReady()
+	scaler := rb.scalerClient()
+
+	// A table that is gone is an error that the store does not classify.
+	if _, err := pool.Exec(t.Context(), "ALTER TABLE jobqueue.jobs RENAME TO jobs_gone"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := scaler.IsActive(t.Context(), &externalscaler.ScaledObjectRef{ScalerMetadata: map[string]string{"queue": "q"}})
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("IsActive with the table gone = %v, want Internal", err)
+	}
+	if logged := logs.String(); !strings.Contains(logged, "op=scaler_backlog") {
+		t.Errorf("the broker's log has no entry for the scaler's internal error:\n%s", logged)
 	}
 }
