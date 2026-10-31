@@ -590,6 +590,15 @@ func TestPGDifferential(t *testing.T) {
 			rt.Fatal(err)
 		}
 		h := newDiffHarness(t.Context(), pool, pg)
+		// Two Repeat passes, not one. Each draws its own length, and the second
+		// goes on from the state the first left, so a check makes a longer and
+		// more varied history. The flaw that needs the longest one is F3-pg,
+		// Reap ignoring max_attempts: a job has to be leased, to run out of
+		// lease, and to be reaped with its attempts used up. Measured with
+		// one check per run, one pass finds it in 23 of 300 runs and two
+		// passes in 53 of 300. The flaws job relies on a check finding each
+		// flaw often enough that its many checks never miss; see
+		// scripts/check-flaws.sh.
 		for range 2 {
 			rt.Repeat(map[string]func(*rapid.T){
 				"":          h.checkSnapshots,
