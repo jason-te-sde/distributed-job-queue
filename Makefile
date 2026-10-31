@@ -15,11 +15,19 @@ PROTOC_GEN_GO_GRPC_VERSION := v1.6.2
 # whatever versions happen to be on the developer's PATH.
 BIN := $(CURDIR)/bin
 
-.PHONY: test test-pg lint check-buf gen hygiene helm-check test-scripts preflight
+.PHONY: test sim test-pg lint check-buf gen hygiene helm-check test-scripts preflight
 
 # Unit and simulator tests.
 test:
 	$(GO) test -race ./...
+
+# The simulator's seeded fault-injection sweep and its regression seeds, on
+# their own and with a longer timeout than the default. It runs 500 seeds from
+# seed 1; JOBQUEUE_SIM_SEEDS and JOBQUEUE_SIM_SEED_START change that, and the
+# nightly run sets 20000. A failing seed leaves internal/sim/testdata/failures/
+# seed-<n>.txt with the command that replays it.
+sim:
+	$(GO) test -race -count=1 -timeout 30m -run 'TestSim' ./internal/sim/
 
 # Tests that need a live PostgreSQL, selected by the pg build tag. The run is
 # recorded as JSON in pg.json and then counted: a test that silently stops

@@ -8,3 +8,6 @@
 
 # Failure files that property tests write next to the package under test.
 **/testdata/rapid/
+
+# Failing simulator seeds, written by TestSimSeeds.
+internal/sim/testdata/failures/
