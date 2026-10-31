@@ -19,7 +19,7 @@ FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS build
 
 ARG TARGETOS
 ARG TARGETARCH
-# What `jobqueue-server --version` prints.
+# What `jobqueue-server --version` and `jobqueuectl version` print.
 ARG VERSION=dev
 
 WORKDIR /src

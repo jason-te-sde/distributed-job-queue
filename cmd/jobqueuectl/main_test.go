@@ -904,6 +904,55 @@ func TestCtlSleep(t *testing.T) {
 	}
 }
 
+func TestCtlVersionPrintsTheVersionOfTheBuild(t *testing.T) {
+	// The release build sets version with -ldflags -X main.version=..., so a
+	// binary says which release it is. No broker is involved: the command works
+	// with nothing running. --version and -version do the same as the server's,
+	// and the version command does the same as both.
+	want := version + "\n"
+	for _, args := range [][]string{{"version"}, {"--version"}, {"-version"}, {"--insecure", "--version"}} {
+		if r := runCtl(nil, args...); r.code != 0 || r.stdout != want || r.stderr != "" {
+			t.Errorf("jobqueuectl %v = exit %d, stdout %q, stderr %q; want exit 0, %q and no stderr", args, r.code, r.stdout, r.stderr, want)
+		}
+	}
+	wantJSON := `{"version":"` + version + "\"}\n"
+	for _, args := range [][]string{{"version", "--json"}, {"--json", "--version"}} {
+		if r := runCtl(nil, args...); r.code != 0 || r.stdout != wantJSON || r.stderr != "" {
+			t.Errorf("jobqueuectl %v = exit %d, stdout %q, stderr %q; want exit 0 and %q", args, r.code, r.stdout, r.stderr, wantJSON)
+		}
+	}
+	// The default is "dev", but a test run with -ldflags -X main.version=...
+	// has another value, so only what a line can hold is required of it.
+	if version == "" || strings.ContainsAny(version, " \t\r\n") {
+		t.Errorf("version is %q, want a word: a build sets it with -ldflags -X main.version=...", version)
+	}
+	if r := runCtl(nil, "version", "extra"); r.code != 2 || r.stdout != "" || !strings.Contains(r.stderr, `"extra"`) {
+		t.Errorf("version extra = exit %d, stdout %q, stderr %q; want exit 2 naming the argument", r.code, r.stdout, r.stderr)
+	}
+	// --version is a flag of the command line before the command's name, like
+	// the other global flags: a command does not take it.
+	if r := runCtl(nil, "get", "5", "--version"); r.code != 2 || r.stdout != "" {
+		t.Errorf("get 5 --version = exit %d, stdout %q; want exit 2 and nothing on stdout", r.code, r.stdout)
+	}
+	r := runCtl(nil, "help")
+	if !strings.Contains(r.stdout, "\n  version\n") {
+		t.Errorf("help does not list the version command:\n%s", r.stdout)
+	}
+	// --version is accepted in front of the command's name only, so the help
+	// lists it under a heading of its own and not with the global flags, which
+	// every command takes before and after its name.
+	global := strings.Index(r.stdout, "global flags, accepted before and after the command name:")
+	only := strings.Index(r.stdout, "accepted before the command name only:")
+	switch {
+	case global < 0 || only < global:
+		t.Errorf("help has no heading for a flag of the command line in front of the command, after the global flags:\n%s", r.stdout)
+	case strings.Contains(r.stdout[global:only], "--version"):
+		t.Errorf("help lists --version with the global flags, which every command takes:\n%s", r.stdout)
+	case !strings.Contains(r.stdout[only:], "--version"):
+		t.Errorf("help does not list the --version flag under its own heading:\n%s", r.stdout)
+	}
+}
+
 func TestCtlMigrateErrorsDoNotLeakThePassword(t *testing.T) {
 	const password = "hunter2-s3cret"
 	for name, tc := range map[string]struct {

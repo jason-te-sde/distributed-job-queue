@@ -68,6 +68,10 @@ type migrateView struct {
 	Version int `json:"version"`
 }
 
+type versionView struct {
+	Version string `json:"version"`
+}
+
 type tokenView struct {
 	Token string `json:"token"`
 	Line  string `json:"line"`

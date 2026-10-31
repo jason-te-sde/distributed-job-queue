@@ -8,7 +8,10 @@
 // broker refused, could not be reached, or the database failed) and 2 for a
 // usage error, which is found before anything is sent.
 //
-// Run jobqueuectl help for the commands and the flags they share.
+// Run jobqueuectl help for the commands and the flags they share. A build sets
+// the version that the version command prints with
+//
+//	go build -ldflags "-X main.version=1.2.3" ./cmd/jobqueuectl
 package main
 
 import (
@@ -32,6 +35,10 @@ import (
 
 	jobqueuev1 "github.com/jason-te-sde/distributed-job-queue/internal/gen/jobqueue/v1"
 )
+
+// version is what the version command and the --version flag print. It is
+// "dev" unless the linker sets it.
+var version = "dev"
 
 // The exit statuses of the command.
 const (
@@ -89,6 +96,13 @@ func newGlobals(getenv func(string) string) *globals {
 		g.addr = v
 	}
 	return g
+}
+
+// registerVersionFlag adds --version to fs. Unlike the shared flags it belongs
+// to the command line in front of the command's name only, as the server's
+// --version does for the server: it prints the version and nothing runs.
+func registerVersionFlag(fs *flag.FlagSet, p *bool) {
+	fs.BoolVar(p, "version", false, "print the version and exit")
 }
 
 // register adds the shared flags to fs, which every command line goes
@@ -197,6 +211,7 @@ var commands = []command{
 	{name: "token new", run: cmdTokenNew,
 		synopsis: "token new --role producer --tenant T | --role worker --queues a,b | --role admin",
 		summary:  "mint a token and the tokens-file line that lists it; the token is shown only once"},
+	{name: "version", run: cmdVersion, synopsis: "version", summary: "print the version of this build"},
 	// sleep exists for the preStop hook of the Helm chart, which runs in an
 	// image that has no shell and so no sleep of its own.
 	{name: "sleep", run: cmdSleep, synopsis: "sleep <duration>", hidden: true},
@@ -207,11 +222,16 @@ var commands = []command{
 func (e *env) dispatch(args []string) error {
 	fs := newFlagSet("jobqueuectl")
 	e.g.register(fs)
+	var showVersion bool
+	registerVersionFlag(fs, &showVersion)
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return &helpRequest{text: usageText()}
 		}
 		return usagef("%v", err)
+	}
+	if showVersion {
+		return e.printVersion()
 	}
 	rest := fs.Args()
 	switch {
@@ -358,6 +378,12 @@ func usageText() string {
 	// Defaults are shown as they are without an environment.
 	newGlobals(func(string) string { return "" }).register(fs)
 	b.WriteString(defaults(fs))
+	// --version is not a global flag: no command takes it, so it is listed
+	// apart, and says where it is accepted.
+	b.WriteString("\nflag accepted before the command name only:\n")
+	vfs := newFlagSet("jobqueuectl")
+	registerVersionFlag(vfs, new(bool))
+	b.WriteString(defaults(vfs))
 	return b.String()
 }
 

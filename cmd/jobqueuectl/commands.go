@@ -532,6 +532,26 @@ func mintToken(r io.Reader, role, binding string) (token, line string, err error
 	return token, role + " " + binding + " " + hex.EncodeToString(sum[:]), nil
 }
 
+// cmdVersion prints the version of this build. It talks to nothing, so the
+// shared flags that name the broker do not apply to it.
+func cmdVersion(e *env, args []string) error {
+	positional, err := e.parse(e.flagSet(), args)
+	if err != nil {
+		return err
+	}
+	if err := noArguments(positional); err != nil {
+		return err
+	}
+	return e.printVersion()
+}
+
+// printVersion writes the version of this build, as text or as --json.
+func (e *env) printVersion() error {
+	return e.print(versionView{Version: version}, func(w *bytes.Buffer) {
+		fmt.Fprintln(w, version)
+	})
+}
+
 // cmdSleep waits for a duration and succeeds. It is not listed in the usage
 // text: the Helm chart runs it as the preStop hook of the broker's container,
 // whose image has no shell, to give the endpoint time to leave the load
