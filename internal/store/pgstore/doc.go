@@ -15,6 +15,15 @@
 //     transition of package job, which says why (fenced, expired, a duplicate,
 //     the wrong state or not found). The policy lives in package job; SQL only
 //     guards the write.
+//   - An acknowledgement (Complete, Fail, Heartbeat, Release) starts with a CTE
+//     that locks the rows it is about to change in ascending job id, and its
+//     UPDATE then changes only those rows. Two calls that name the same jobs
+//     in opposite orders therefore take their locks in the same order and
+//     cannot deadlock, whatever plan the planner picks. Only rows that pass the
+//     guard are locked, so an item with a stale token blocks nobody. A call
+//     that names one job id more than once runs one pass per repetition in one
+//     transaction; the order is not kept across passes, and such a call can
+//     still deadlock against another, which is reported as ErrUnavailable.
 //   - A lease picks rows with FOR UPDATE SKIP LOCKED in a materialized CTE,
 //     so concurrent leases never see the same row and the planner cannot
 //     evaluate the pick twice.
@@ -33,7 +42,17 @@
 //     tenant that gained a job that is ready to run. A listener learns that
 //     work exists; it reads the table to learn what.
 //
-// Errors are wrapped by classify: a lost connection, a closed pool and a
-// server that is shutting down or full wrap store.ErrUnavailable, which the
-// caller may retry; a cancelled context stays a context error.
+// Errors are wrapped by classify. These wrap store.ErrUnavailable, which the
+// caller may retry: a connection that cannot be opened or was lost (a network
+// error, an error the driver reports as safe to retry, or the end of the
+// stream on a pooled connection that the other end closed while it sat idle),
+// a pool that has been closed, a server that is shutting down (57P01, 57P02),
+// not yet accepting connections (57P03) or out of them (53300), any connection
+// exception (class 08), and a call that PostgreSQL rolled back because it
+// deadlocked with another (40P01) or could not be serialized (40001). A
+// rollback applied nothing, but a lost connection may have committed the call
+// first, so a retry is safe only for a call that tolerates repetition: an
+// acknowledgement is fenced by its token and an Enqueue with an idempotency key
+// is deduplicated. A cancelled or expired context stays a context error, and
+// any other error is wrapped unchanged.
 package pgstore

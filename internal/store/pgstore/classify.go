@@ -19,8 +19,12 @@ import (
 // pool that has been closed, a server that is shutting down, starting up or out
 // of connections, and a call that PostgreSQL rolled back because it deadlocked
 // with another or could not be serialized, wrap store.ErrUnavailable, which the
-// caller may retry: in each case nothing of the call was applied. Anything else
-// is wrapped unchanged.
+// caller may retry. A rollback applied nothing, but a connection that was lost
+// while the call ran may have committed it first, and the error cannot say
+// which. What makes a retry safe is that the call tolerates one (an
+// acknowledgement is fenced by its token, an Enqueue with an idempotency key is
+// deduplicated), not that nothing was applied. Anything else is wrapped
+// unchanged.
 func classify(op string, err error) error {
 	switch {
 	case err == nil:

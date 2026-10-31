@@ -3,10 +3,13 @@
 package pgstore_test
 
 import (
+	"cmp"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -115,8 +118,10 @@ func (p *proxy) cut() {
 // A pooled connection that the other end closed while it sat idle is found out
 // only when it is used. The failure that comes back, the end of the stream, is
 // not a network error and not one that the driver reports as safe to retry, and
-// it must still be a store.ErrUnavailable: the call did not run, and the next
-// one opens a new connection.
+// it must still be a store.ErrUnavailable: the connection is gone, and the next
+// call opens a new one. Here the call never ran, but the error cannot say so for
+// a connection that dropped in the middle of a call, which may have committed;
+// that is why a retry rests on the calls being idempotent.
 func TestPGClassifiesALostConnection(t *testing.T) {
 	cfg := pgtest.NewDB(t).Config()
 	p := newProxy(t, net.JoinHostPort(cfg.ConnConfig.Host, strconv.Itoa(int(cfg.ConnConfig.Port))))
@@ -140,28 +145,33 @@ func TestPGClassifiesALostConnection(t *testing.T) {
 	}
 }
 
+// planShapes are the two ways in which the tests for opposite-order calls have
+// the statements of an acknowledgement planned: as the planner chooses them for
+// a small table, and with index lookups and nested loops ruled out, which leaves
+// a hash join over a scan of the table, whose order is that of the pages. That
+// is the plan that autovacuum's statistics can bring about on a table that has
+// grown.
+var planShapes = map[string]func(*pgxpool.Config){
+	"with the plan the planner chooses": func(*pgxpool.Config) {},
+	"with a hash join over a scan": func(cfg *pgxpool.Config) {
+		for _, param := range []string{"enable_nestloop", "enable_indexscan", "enable_bitmapscan", "enable_indexonlyscan", "enable_mergejoin"} {
+			cfg.ConnConfig.RuntimeParams[param] = "off"
+		}
+	},
+}
+
 // Calls that name the same jobs in opposite orders must not deadlock. The
 // statements of an acknowledgement call lock the rows they change in ascending
 // id, whatever the order of the request and of the plan, so that every call
 // takes the row locks in the same order. Without that, calls fail with a
-// deadlock. The statements are run once as the planner chooses them for a small
-// table and once with index lookups and nested loops ruled out, which leaves a
-// hash join over a scan of the table, whose order is that of the pages: the
-// plan that autovacuum's statistics can bring about on a table that has grown.
+// deadlock. The statements are run under each of planShapes.
 func TestPGOppositeOrderHeartbeatsDoNotDeadlock(t *testing.T) {
 	const (
 		jobs    = 24
 		callers = 8
 		rounds  = 100
 	)
-	for name, option := range map[string]func(*pgxpool.Config){
-		"with the plan the planner chooses": func(*pgxpool.Config) {},
-		"with a hash join over a scan": func(cfg *pgxpool.Config) {
-			for _, param := range []string{"enable_nestloop", "enable_indexscan", "enable_bitmapscan", "enable_indexonlyscan", "enable_mergejoin"} {
-				cfg.ConnConfig.RuntimeParams[param] = "off"
-			}
-		},
-	} {
+	for name, option := range planShapes {
 		t.Run(name, func(t *testing.T) {
 			_, pg := newConcurrentStore(t, callers, quickDeadlockDetection, option)
 			refs := leaseAll(t, jobs, pg)
@@ -195,6 +205,137 @@ func TestPGOppositeOrderHeartbeatsDoNotDeadlock(t *testing.T) {
 			wg.Wait()
 		})
 	}
+}
+
+// leaseFresh enqueues n jobs in queue and leases them all, and returns their
+// refs in ascending id.
+func leaseFresh(t *testing.T, pg *pgstore.Store, queue string, n int) []store.Ref {
+	t.Helper()
+	specs := make([]job.Spec, n)
+	for i := range specs {
+		specs[i] = spec(queue, "t")
+	}
+	if _, err := pg.Enqueue(t.Context(), specs); err != nil {
+		t.Fatal(err)
+	}
+	grants, err := pg.Lease(t.Context(), store.LeaseRequest{
+		Queue: queue, Takes: []store.TenantTake{{Tenant: "t", Limit: n}}, TTL: time.Minute, Worker: "w",
+	})
+	if err != nil || len(grants) != n {
+		t.Fatalf("Lease in %s = %d grants, %v; want %d", queue, len(grants), err, n)
+	}
+	refs := make([]store.Ref, len(grants))
+	for i, g := range grants {
+		refs[i] = store.Ref{ID: g.Job.ID, Queue: queue, Token: g.Job.Epoch}
+	}
+	slices.SortFunc(refs, func(a, b store.Ref) int { return cmp.Compare(a.ID, b.ID) })
+	return refs
+}
+
+// testOppositeOrderAck has callers goroutines acknowledge the same jobs at the
+// same moment, half of them naming the jobs in ascending id and half in
+// descending id, and requires that no call fails and that each job is
+// acknowledged by exactly one of them. The others see an outcome in allowed,
+// because the first call to get the job ended its lease.
+//
+// Unlike a heartbeat, an acknowledgement that applies ends the lease, and a
+// call that arrives later locks nothing, so only the calls that arrive together
+// can deadlock. Every round therefore leases new jobs, in a queue of its own.
+func testOppositeOrderAck(t *testing.T, allowed []job.Outcome, ack func(ctx context.Context, pg *pgstore.Store, refs []store.Ref) ([]job.Outcome, error)) {
+	t.Helper()
+	const (
+		jobs    = 24
+		callers = 8
+		rounds  = 40
+	)
+	for name, option := range planShapes {
+		t.Run(name, func(t *testing.T) {
+			_, pg := newConcurrentStore(t, callers, quickDeadlockDetection, option)
+			for round := range rounds {
+				ascending := leaseFresh(t, pg, fmt.Sprintf("q%d", round), jobs)
+				orders := [2][]store.Ref{ascending, slices.Clone(ascending)}
+				slices.Reverse(orders[1])
+
+				var (
+					start   = make(chan struct{})
+					results = make([][]job.Outcome, callers)
+					wg      sync.WaitGroup
+				)
+				for c := range callers {
+					wg.Go(func() {
+						<-start
+						res, err := ack(t.Context(), pg, orders[c%2])
+						if err != nil {
+							t.Errorf("round %d, caller %d: %v, want no error: calls in opposite orders must not deadlock", round, c, err)
+							return
+						}
+						results[c] = res
+					})
+				}
+				close(start)
+				wg.Wait()
+				if t.Failed() {
+					return
+				}
+
+				won := make(map[int64]int, jobs)
+				for c, res := range results {
+					for i, o := range res {
+						if !slices.Contains(allowed, o) {
+							t.Errorf("round %d, caller %d: job %d = %v, want one of %v", round, c, orders[c%2][i].ID, o, allowed)
+						}
+						if o == job.Applied {
+							won[orders[c%2][i].ID]++
+						}
+					}
+				}
+				for _, r := range ascending {
+					if won[r.ID] != 1 {
+						t.Errorf("round %d: job %d was acknowledged by %d callers, want exactly 1", round, r.ID, won[r.ID])
+					}
+				}
+				if t.Failed() {
+					return
+				}
+			}
+		})
+	}
+}
+
+// Completions that name the same jobs in opposite orders must not deadlock; see
+// TestPGOppositeOrderHeartbeatsDoNotDeadlock.
+func TestPGOppositeOrderCompletesDoNotDeadlock(t *testing.T) {
+	testOppositeOrderAck(t, []job.Outcome{job.Applied, job.Duplicate, job.Fenced},
+		func(ctx context.Context, pg *pgstore.Store, refs []store.Ref) ([]job.Outcome, error) {
+			reqs := make([]store.CompleteRequest, len(refs))
+			for i, r := range refs {
+				reqs[i] = store.CompleteRequest{Ref: r, Result: []byte("done")}
+			}
+			return pg.Complete(ctx, reqs)
+		})
+}
+
+// Failures that name the same jobs in opposite orders must not deadlock. They
+// are permanent, so that the job ends and does not come back for another try;
+// see TestPGOppositeOrderHeartbeatsDoNotDeadlock.
+func TestPGOppositeOrderFailsDoNotDeadlock(t *testing.T) {
+	testOppositeOrderAck(t, []job.Outcome{job.Applied, job.Fenced},
+		func(ctx context.Context, pg *pgstore.Store, refs []store.Ref) ([]job.Outcome, error) {
+			reqs := make([]store.FailRequest, len(refs))
+			for i, r := range refs {
+				reqs[i] = store.FailRequest{Ref: r, Permanent: true, Error: "boom"}
+			}
+			return pg.Fail(ctx, reqs)
+		})
+}
+
+// Releases that name the same jobs in opposite orders must not deadlock; see
+// TestPGOppositeOrderHeartbeatsDoNotDeadlock.
+func TestPGOppositeOrderReleasesDoNotDeadlock(t *testing.T) {
+	testOppositeOrderAck(t, []job.Outcome{job.Applied, job.Fenced},
+		func(ctx context.Context, pg *pgstore.Store, refs []store.Ref) ([]job.Outcome, error) {
+			return pg.Release(ctx, refs)
+		})
 }
 
 // Enqueue keeps the items in request order, because ids follow it, so two
