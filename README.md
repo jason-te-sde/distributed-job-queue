@@ -1,3 +1,190 @@
+# Distributed Durable Job Queue
+
 A distributed job queue for Go services, backed by PostgreSQL: leased at-least-once delivery with fencing tokens, weighted fair scheduling across tenants, and a deterministic simulator that proves it.
 
-Status: under construction.
+## What it is
+
+Producers enqueue jobs over gRPC to a set of stateless brokers. The brokers keep every job in one PostgreSQL table and hand jobs to workers as leases: a worker asks for work (a long poll), keeps its lease alive with heartbeats while its handler runs, and acknowledges the result. A lease that is not renewed expires and the job runs again, after a backoff, until it succeeds or uses up its attempts.
+
+Delivery is **at-least-once**. A worker can stall past its lease, or an acknowledgement can be lost, so a job can run more than once, and no queue that crosses a network can promise otherwise. What this one promises is that only the newest lease holder can change a job: every lease carries a fencing token that grows by one, and the broker turns away any report that carries an older one. A downstream system that keeps the highest token it has seen for a job, or that is idempotent, then sees each effect **once**: the delivery is at-least-once and the effect is "effectively once". Without such a sink you have at-least-once, and nothing more.
+
+The scheduler shares each queue between tenants by weight (deficit round robin), so one tenant's flood does not starve the others. The Go SDK provides the producer and the worker, `jobqueuectl` is the admin CLI, and a Helm chart deploys the brokers, with KEDA scaling the workers on the backlog. The decision logic is written as pure state machines, and a deterministic simulator runs it against crashes, stalls, partitions and message loss, checking the invariants after every step. Every CI run replays 500 seeds of it.
+
+Requirements: Go 1.26 or newer, PostgreSQL 15 to 18, Linux or macOS.
+
+## Quick start
+
+You need a PostgreSQL database. This uses a local one and a broker on a loopback address, where no TLS or tokens are required.
+
+```sh
+createdb jobqueue
+export JOBQUEUE_DATABASE_URL='postgres://localhost:5432/jobqueue?sslmode=disable'
+
+go build -o bin/ ./cmd/jobqueue-server ./cmd/jobqueuectl
+
+bin/jobqueuectl migrate        # applied=1 version=1
+bin/jobqueue-server --grpc-addr 127.0.0.1:7070 --database-url "$JOBQUEUE_DATABASE_URL"
+```
+
+A producer and a worker, each in a program of its own. These are the bodies of `ExampleProducer_Enqueue` and `ExampleNewWorker` in [example_test.go](example_test.go), which `go test` compiles, so they match the SDK:
+
+```go
+ctx := context.Background()
+
+conn, err := jobqueue.Dial("127.0.0.1:7070", jobqueue.WithInsecure())
+if err != nil {
+	log.Fatal(err)
+}
+defer func() { _ = conn.Close() }()
+
+producer := jobqueue.NewProducer(conn, jobqueue.ProducerOptions{Tenant: "acme"})
+res, err := producer.Enqueue(ctx, jobqueue.EnqueueParams{
+	Queue:          "thumbnails",
+	Payload:        []byte(`{"seed": 7, "size": 1024}`),
+	IdempotencyKey: "thumbnail-7",
+})
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Printf("job %d, deduplicated: %t\n", res.ID, res.Deduplicated)
+
+info, err := producer.Get(ctx, res.ID)
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Printf("job %d is %s after %d of %d attempts\n", info.ID, info.State, info.Attempts, info.MaxAttempts)
+```
+
+```go
+conn, err := jobqueue.Dial("127.0.0.1:7070", jobqueue.WithInsecure())
+if err != nil {
+	log.Fatal(err)
+}
+defer func() { _ = conn.Close() }()
+
+worker := jobqueue.NewWorker(conn, jobqueue.WorkerOptions{Queue: "thumbnails", Concurrency: 16})
+err = worker.Handle(func(ctx context.Context, j *jobqueue.Job) error {
+	// j.Token() is the fencing token of this lease. Send it with every
+	// write to a downstream system, and have that system refuse a write
+	// whose token is lower than one it has already seen for the job.
+	fmt.Printf("job %d, attempt %d, token %d: %s\n", j.ID, j.Attempt, j.Token(), j.Payload)
+	j.SetResult([]byte("done"))
+	return nil
+})
+if err != nil {
+	log.Fatal(err)
+}
+
+// Run returns after ctx ends and the running handlers have finished or
+// been given back.
+ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+defer stop()
+if err := worker.Run(ctx); err != nil {
+	log.Fatal(err)
+}
+```
+
+Or from the command line:
+
+```sh
+bin/jobqueuectl --insecure --addr 127.0.0.1:7070 enqueue --queue thumbnails --payload-string hello
+bin/jobqueuectl --insecure --addr 127.0.0.1:7070 get 1
+bin/jobqueuectl --insecure --addr 127.0.0.1:7070 stats --queue thumbnails
+```
+
+A broker that listens on anything but a loopback address refuses to start without TLS and a tokens file, unless it is given `--insecure`. [docs/operations.md](docs/operations.md) covers tokens, TLS, every flag and the metrics.
+
+## A zombie worker, fenced
+
+Worker A leases job 7 under fencing token 1. It is paused by a long garbage collection, a stopped container or a partition, and its heartbeats stop. With the defaults (lease 30 s, margin 3 s, heartbeat every 7.5 s) the story goes like this:
+
+| Time | What happens |
+| --- | --- |
+| 0 s | A leases the job. Its token is 1. |
+| 27 s | A's three heartbeats failed. Its local deadline, lease time + 30 s - 3 s, passes and the SDK cancels the handler's context. This handler ignores it. |
+| 30 s | The lease expires on the database clock. |
+| about 31 s | A broker's reaper takes the job back (every second); after a backoff of at most one second B leases it. B's token is 2. |
+| 32 s | B writes its result and completes the job. |
+| 40 s | A wakes up, writes with token 1 and reports completion. Both are turned away. |
+
+The result table of the downstream system is what makes the write safe. It keeps the highest token it has seen and replaces a row only for a higher one:
+
+```sql
+INSERT INTO sink (job_id, token, written_by) VALUES ($1, $2, $3)
+ON CONFLICT (job_id) DO UPDATE SET token = EXCLUDED.token, written_by = EXCLUDED.written_by
+WHERE sink.token < EXCLUDED.token
+```
+
+A's write changes zero rows, so the handler learns that it was superseded, and the broker answers A's `Complete` with `FENCED`. The job ends `succeeded` under token 2. `TestPGZombieWorkerIsFenced` in `e2e_pg_test.go` (lands with the end-to-end task) runs this story on real brokers over PostgreSQL with short leases and checks the table, the job and the broker's counters. `TestWorkerUncooperativeHandlerIsFenced` in `worker_test.go` is the in-process version.
+
+The broker does this much for any worker: it refuses the late report. Making the write to your own database or API safe takes the token, which is why `Job.Token()` exists. [ADR 0002](docs/design/0002-leases-and-fencing.md) has the argument.
+
+## Guarantees
+
+Each guarantee, the mechanism behind it and the tests that prove it. Tests named `TestPG...` need a database and the `pg` build tag; [docs/testing.md](docs/testing.md) says how to run every layer.
+
+| Guarantee | Mechanism | Proved by |
+| --- | --- | --- |
+| A job whose worker dies is not lost: it runs again | Every broker runs a reaper once a second. An expired lease counts as a failed attempt: the job is ready again after a backoff, or dead when its attempts are used up | `TestReapRecordsLeaseExpired` in `internal/core/job/transition_test.go`<br>`TestPGConformanceMaintenance` in `internal/store/pgstore/pgstore_pg_test.go`<br>`TestReaperReapsExpired` in `internal/broker/maintenance_test.go` |
+| Only the newest lease holder can change a job | `lease_epoch` grows by one on every lease and is the fencing token. Heartbeat, Complete, Fail and Release apply only to a job that is leased under that token | `TestTransitionMatrix` in `internal/core/job/transition_test.go`<br>`TestConformance` in `internal/store/memstore/memstore_test.go` (subtests `CompleteStaleTokenFenced`, `HeartbeatStaleTokenIsFenced`)<br>`TestPGConformanceAck` in `internal/store/pgstore/pgstore_pg_test.go`<br>`TestWorkerUncooperativeHandlerIsFenced` in `worker_test.go` |
+| Expiry is for liveness, not correctness | A Complete under the current token is accepted even after the lease expired, as long as nobody leased the job since. A Heartbeat on an expired lease is refused and does not revive it | `TestTransitionBoundaries` in `internal/core/job/transition_test.go`<br>`TestConformance` in `internal/store/memstore/memstore_test.go` (subtests `CompleteAfterExpiryBeforeReapSucceeds`, `HeartbeatAtExpiryIsExpired`, `ReapAtExactExpiry`) |
+| A worker stops trusting a lease before the broker can give the job away | The local deadline is anchored at the instant the request was sent, never at the response, and lies a margin before expiry | `TestGrantDeadlineAnchorsAtSendTime` in `internal/core/lease/tracker_test.go`<br>`TestDeadlineIgnoresResponseLatency` in `internal/core/lease/tracker_test.go`<br>`TestWorkerHeartbeatDeadlineIsAnchoredAtTheSendTime` in `worker_test.go`<br>`TestTrackerProperties` in `internal/core/lease/property_test.go` |
+| Two heartbeats in a row can be lost without losing the lease | Heartbeats go out every TTL/4, and the TTL must be greater than four times the margin | `TestTwoLostHeartbeatsSurvive` in `internal/core/lease/tracker_test.go`<br>`TestSmallestLegalTTLSurvivesTwoLostHeartbeats` in `internal/core/lease/tracker_test.go`<br>`TestConfigValidate` in `internal/core/lease/tracker_test.go` |
+| Retries are bounded and spread out | A budget of `max_attempts` (25 by default). The wait grows from 1 s by doubling to 1 h, with full jitter. A release gives the attempt back | `TestFailExhaustsBudget` in `internal/core/job/transition_test.go`<br>`TestCeilingSumOverDefaultRetries` in `internal/core/job/backoff_test.go`<br>`TestDelayIsFullJitter` in `internal/core/job/backoff_test.go`<br>`TestReleaseRefundsAttempt` in `internal/core/job/transition_test.go` |
+| Enqueue can be repeated safely | An idempotency key names one job within its tenant and queue while the row exists. The SDK adds a random key to every call and retries it | `TestConformance` in `internal/store/memstore/memstore_test.go` (subtests `EnqueueIdempotencyKeyIsScopedByTenantAndQueue`, `EnqueueBatchDedupWithinBatch`, `EnqueueKeyReusableAfterPrune`)<br>`TestPGEnqueueIsAtomic` in `internal/store/pgstore/pgstore_pg_test.go`<br>`TestProducerGeneratesIdempotencyKey` in `producer_test.go` |
+| One clock decides every expiry | The database clock, `jobqueue.now()`, is read once per statement. Brokers and workers never compare a wall clock with a database timestamp | `TestPGEachStatementReadsTheClockOnce` in `internal/store/pgstore/pgstore_pg_test.go`<br>`TestPGTestClockControlsNow` in `internal/store/pgstore/migrate/migrate_pg_test.go`<br>`TestWriteCallsReadTheClockOnce` in `internal/store/memstore/memstore_test.go` |
+| A noisy tenant cannot starve the others | Deficit round robin over the tenants with work, in turns of 8 jobs times the tenant's weight. A tenant's share never drifts from its weighted share by more than one turn, and the plan does not depend on the batch size | `TestPlanShareBound` in `internal/core/fair/drr_test.go`<br>`TestPlanBatchIndependence` in `internal/core/fair/drr_test.go`<br>`TestDispatcherDRRServesSmallTenant` in `internal/broker/dispatcher_test.go` |
+| A long poll never leaks a waiter or strands a job | Every waiter is answered at its deadline, on cancel and on drain. Jobs fetched for a caller that went away are released, and the attempt is refunded | `TestCancelDuringFetchReleases` in `internal/core/dispatch/dispatch_test.go`<br>`TestDrainAnswersEveryWaiter` in `internal/core/dispatch/dispatch_test.go`<br>`TestDispatcherReleasesOrphanedGrants` in `internal/broker/dispatcher_test.go` |
+| Wakeups follow the amount of work, not the number of waiters | Every dispatch event starts at most one fetch, and a full batch chains the next waiter | `TestNotifyStartsOneFetchPerNotification` in `internal/core/dispatch/dispatch_test.go`<br>`TestFullFetchChainsToNextWaiter` in `internal/core/dispatch/dispatch_test.go`<br>`TestDispatchProperties` in `internal/core/dispatch/property_test.go` |
+| NOTIFY is a hint, never the source of truth | A fallback poll (1 s) and a resync after every reconnect find work that a lost notification would have announced | `TestDispatcherPollFindsWorkWithoutNotify` in `internal/broker/dispatcher_test.go`<br>`TestPGListenerReconnectsAndResyncs` in `internal/broker/listener_pg_test.go` |
+| Hostile or oversized input never reaches the table | Names, sizes, delays and keys are validated by the broker and again by the store, and the schema has CHECK constraints behind them | `TestValidateName` in `internal/core/job/validate_test.go`<br>`TestServerRejectsBadNames` in `internal/broker/server_test.go`<br>`TestServerEnqueueSizeLimits` in `internal/broker/server_test.go`<br>`TestPGConstraintsRejectInconsistentRows` in `internal/store/pgstore/migrate/migrate_pg_test.go` |
+| A caller can do only what its token allows | A producer token is bound to a tenant, a worker token to queues, and only an admin may do the rest. Tokens are stored as hashes. A broker on a non-loopback address refuses to start without TLS and tokens | `TestServerEveryRPCChecksRole` in `internal/broker/server_test.go`<br>`TestServerTenantScope` in `internal/broker/server_test.go`<br>`TestValidateRefusesInsecureNonLoopback` in `internal/broker/config_test.go`<br>`TestLoadTokensRejectsMalformed` in `internal/broker/auth_test.go` |
+| A rolling restart drops no call | A draining broker fails `/readyz`, refuses new Lease calls so that the SDK moves to another broker, and keeps serving heartbeats and acknowledgements until its grace period ends | `TestPGBrokerGracefulShutdown` in `internal/broker/broker_pg_test.go`<br>`TestServerDrainingLeaseUnavailable` in `internal/broker/server_test.go`<br>`TestWorkerSwitchesBrokerOnUnavailable` in `worker_test.go` |
+| A worker shuts down without losing work | It stops leasing, waits up to the drain timeout (25 s) for its handlers, then gives the rest back with their attempts refunded | `TestWorkerDrainWaitsForRunningHandlers` in `worker_test.go`<br>`TestWorkerDrainReleasesAfterTimeout` in `worker_test.go` |
+| The decision logic cannot read a clock, open a socket or start a goroutine | `internal/core` may import only the standard library minus the packages that perform effects, and contains no `go`, `select` or channel. A test over the import graph and the syntax tree enforces it | `TestRepositoryHasNoViolations` in `internal/archtest/archtest_test.go` |
+| The binary and the schema agree | Migrations are embedded, forward-only and applied once under an advisory lock. A broker refuses to start against another schema version | `TestPGMigrateConcurrentUp` in `internal/store/pgstore/migrate/migrate_pg_test.go`<br>`TestPGBrokerRefusesSchemaMismatch` in `internal/broker/broker_pg_test.go` |
+| A queue name from a request cannot grow the metrics without bound | Only the first 100 queue names get a label of their own; later ones share the label `other` | `TestQueueLabelCapsCardinality` in `internal/broker/metrics_test.go` |
+| The hot statements stay on their indexes | Lease, reap and prune reach their rows through partial indexes, not through a scan of the table | `TestPGHotStatementsDoNotScanTheTable` in `internal/store/pgstore/pgstore_pg_test.go` |
+
+What is not guaranteed:
+
+- **Exactly-once execution.** See above: a job can run more than once.
+- **Execution order.** Within a tenant, jobs are dispatched in `(run_at, id)` order as a best effort. With several brokers and workers that order is not guaranteed, and the order in which concurrent workers finish is not either.
+- **Global fairness across brokers.** Every broker shares its own fetches by weight; the shares add up across brokers, which is only approximately fair.
+- **Results over 64 KiB, payloads over 256 KiB.** Keep large data elsewhere and put a reference in the job.
+
+## Performance
+
+Throughput, enqueue-to-start latency, the noisy-neighbour wait with and without fair scheduling, recovery time after a worker or broker is killed, and the behaviour of the table over a long run are measured with `jobqueue-bench` on one laptop. [docs/benchmarks.md](docs/benchmarks.md) holds the method, the exact commands and the raw output, and this README quotes no figure that it does not hold.
+
+## What is not covered
+
+The suite does not test failover and replica promotion of PostgreSQL, multi-region setups, a worker clock whose frequency drifts beyond the margin model, malicious (byzantine) workers, PostgreSQL's own durability, or performance on hardware other than the laptop of the benchmarks. The simulator re-implements the wiring around the pure cores, so a separate multi-process chaos test covers the real broker and SDK. [docs/testing.md](docs/testing.md) lists what each layer catches and what it does not.
+
+## Deployment
+
+The image and the Helm chart are built by the release workflow. The chart in `deploy/helm/jobqueue` runs the brokers as a Deployment of two replicas, behind a headless Service for client-side load balancing, with readiness and liveness probes, a PodDisruptionBudget, a preStop sleep and a pre-install and pre-upgrade hook that runs `jobqueuectl migrate`.
+
+```sh
+kubectl create secret generic jobqueue-database --from-literal=url='postgres://...'
+helm install jobqueue deploy/helm/jobqueue \
+  --set tokens.secretName=jobqueue-tokens \
+  --set tls.secretName=jobqueue-tls
+```
+
+The Secrets must exist first; the chart creates none. For a test cluster on a trusted network, `--set insecure=true` replaces the tokens and the TLS.
+
+Workers are scaled with [KEDA](https://keda.sh): the broker serves KEDA's external scaler protocol on its own port, `--scaler-addr`, and reports the backlog of a queue (ready plus leased jobs), so a `ScaledObject` can take a worker Deployment from zero to N and back. The chart renders one for the example thumbnail worker with `--set example.enabled=true --set example.keda.enabled=true`. The scaler port carries no token authentication, because KEDA does not send tokens, so the chart's NetworkPolicy admits it only from the KEDA namespace. [docs/operations.md](docs/operations.md) has the values, the Secrets and what to check when scaling does not happen.
+
+## Documentation
+
+- [docs/architecture.md](docs/architecture.md): the components, the life of a job, the dispatch path and the data model.
+- [docs/design](docs/design/0001-postgres-as-source-of-truth.md): the design records, with the alternatives that were rejected.
+- [docs/operations.md](docs/operations.md): running it, and what to do at 3 a.m.
+- [docs/testing.md](docs/testing.md): the test layers, the planted flaws and how to reproduce a failing seed.
+- [docs/benchmarks.md](docs/benchmarks.md): the measurements.
+- [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [CHANGELOG.md](CHANGELOG.md) and [RELEASING.md](RELEASING.md).
+
+## License
+
+Apache License 2.0. Copyright 2026 Jason Te. See [LICENSE](LICENSE).
