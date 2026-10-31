@@ -83,6 +83,7 @@ func TestParseFlagsEveryFlag(t *testing.T) {
 		"--tls-cert=/etc/tls.crt",
 		"--tls-key=/etc/tls.key",
 		"--insecure",
+		"--disable-listen",
 		"--scheduler=fifo",
 		"--tenant-weights=a=4,b=1",
 		"--reap-interval=2s",
@@ -115,6 +116,7 @@ func TestParseFlagsEveryFlag(t *testing.T) {
 		TLSCert:               "/etc/tls.crt",
 		TLSKey:                "/etc/tls.key",
 		Insecure:              true,
+		DisableListen:         true,
 		Scheduler:             "fifo",
 		TenantWeights:         map[string]int64{"a": 4, "b": 1},
 		ReapInterval:          2 * time.Second,
@@ -135,6 +137,39 @@ func TestParseFlagsEveryFlag(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("config differs\n got: %+v\nwant: %+v", got, want)
 	}
+}
+
+func TestParseFlagsDisableListen(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"absent means the listener runs", nil, false},
+		{"bare flag", []string{"--disable-listen"}, true},
+		{"explicitly true", []string{"--disable-listen=true"}, true},
+		{"explicitly false", []string{"--disable-listen=false"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ParseFlags(tc.args, noEnv)
+			if err != nil {
+				t.Fatalf("ParseFlags(%v): %v", tc.args, err)
+			}
+			if got.DisableListen != tc.want {
+				t.Errorf("DisableListen = %v for %v, want %v", got.DisableListen, tc.args, tc.want)
+			}
+			if err := withLoopbackDB(got).Validate(); err != nil {
+				t.Errorf("Validate with DisableListen = %v: %v, want no error: the flag is not a validity rule", got.DisableListen, err)
+			}
+		})
+	}
+}
+
+// withLoopbackDB gives c what Validate needs besides the flag under test.
+func withLoopbackDB(c Config) Config {
+	c.GRPCAddr = "127.0.0.1:7070"
+	c.DatabaseURL = "postgres://db/jobs"
+	return c
 }
 
 func TestParseFlagsEnvDatabaseURL(t *testing.T) {
