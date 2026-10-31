@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 
@@ -92,14 +93,18 @@ func startBroker(t *testing.T, extra ...string) string {
 	return b.GRPCAddr().String()
 }
 
-// eventually polls cond until it holds, and fails the test if it does not
-// within the time.
-func eventually(t *testing.T, what string, within time.Duration, cond func() bool) {
+// eventually polls cond until it reports done, and fails the test if it does
+// not within the time. cond also says what it saw, which the failure shows.
+func eventually(t *testing.T, what string, within time.Duration, cond func() (done bool, seen string)) {
 	t.Helper()
 	deadline := time.Now().Add(within)
-	for !cond() {
+	for {
+		done, seen := cond()
+		if done {
+			return
+		}
 		if time.Now().After(deadline) {
-			t.Fatalf("%s did not happen within %v", what, within)
+			t.Fatalf("%s did not happen within %v; last seen: %s", what, within, seen)
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
@@ -112,7 +117,7 @@ func eventually(t *testing.T, what string, within time.Duration, cond func() boo
 // SDK, which the worker must fail for good: one whose payload cannot be
 // rendered, and one whose sink row a newer lease has already written. Then it
 // produces three jobs with the command, starts the worker, and waits for the
-// worker to finish all five.
+// worker to finish all five: the produced ones succeeded, the other two dead.
 func endToEnd(t *testing.T, producer *jobqueue.Producer, addr string, produceArgs, workArgs []string, workEnv map[string]string) {
 	t.Helper()
 	ctx := t.Context()
@@ -161,15 +166,39 @@ func endToEnd(t *testing.T, producer *jobqueue.Producer, addr string, produceArg
 		}
 		return info
 	}
-	rows := func() int {
-		var n int
-		if err := sinkPool.QueryRow(ctx, "SELECT count(*) FROM thumbnails").Scan(&n); err != nil {
+	// producedIDs are the jobs the produce command made. The sink has a row
+	// for each of them once the worker has written it, and the row of the
+	// fenced job was seeded above, so it is left out.
+	producedIDs := func() []int64 {
+		rows, err := sinkPool.Query(ctx, "SELECT job_id FROM thumbnails WHERE job_id <> $1 ORDER BY job_id", fencedID)
+		if err != nil {
 			t.Fatal(err)
 		}
-		return n
+		ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ids
 	}
-	eventually(t, "the worker to finish every job", 60*time.Second, func() bool {
-		return rows() == 4 && jobInfo(badID).State == "dead" && jobInfo(fencedID).State == "dead"
+	// A job is finished when the broker says so, which is later than the row
+	// being written: the handler must also return nil. A handler that wrote
+	// the row and then failed would leave every other assertion true.
+	eventually(t, "the worker to finish every job", 30*time.Second, func() (bool, string) {
+		ids := producedIDs()
+		states := map[string]string{"bad job": jobInfo(badID).State, "fenced job": jobInfo(fencedID).State}
+		for _, id := range ids {
+			states[fmt.Sprintf("produced job %d", id)] = jobInfo(id).State
+		}
+		seen := fmt.Sprintf("%d of 3 produced jobs have a row; states %v", len(ids), states)
+		if len(ids) != 3 || states["bad job"] != "dead" || states["fenced job"] != "dead" {
+			return false, seen
+		}
+		for _, id := range ids {
+			if states[fmt.Sprintf("produced job %d", id)] != "succeeded" {
+				return false, seen
+			}
+		}
+		return true, seen
 	})
 	stop()
 	select {
@@ -220,6 +249,11 @@ func endToEnd(t *testing.T, producer *jobqueue.Producer, addr string, produceArg
 		t.Errorf("the superseded write changed the row: token %d, sum %q", token, sum)
 	}
 
+	for _, id := range producedIDs() {
+		if info := jobInfo(id); info.State != "succeeded" || info.Attempts != 1 || info.LastError != "" {
+			t.Errorf("produced job %d: state %q, attempts %d, last error %q; want succeeded at the first attempt", id, info.State, info.Attempts, info.LastError)
+		}
+	}
 	for _, c := range []struct {
 		name string
 		id   int64

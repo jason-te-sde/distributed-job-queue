@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"math/rand/v2"
 	"sync"
 	"testing"
 
@@ -81,6 +83,45 @@ func TestPGFencedSinkFencesEachJobSeparately(t *testing.T) {
 	}
 	if token, _, _ := stored(t, pool, 1); token != 9 {
 		t.Errorf("job 1 has token %d, want 9", token)
+	}
+}
+
+func TestPGFencedSinkKeepsTheHighestTokenUnderConcurrentWrites(t *testing.T) {
+	s, pool := newSink(t)
+	const job, writers = 7, 32
+
+	// The tokens 1..32 arrive in a shuffled order, from as many goroutines as
+	// the pool has connections for. Whatever the interleaving, the row must
+	// end with the highest token and the content that was written under it.
+	tokens := make([]int64, writers)
+	for i := range tokens {
+		tokens[i] = int64(i + 1)
+	}
+	rng := rand.New(rand.NewPCG(1, 2))
+	rng.Shuffle(len(tokens), func(i, j int) { tokens[i], tokens[j] = tokens[j], tokens[i] })
+
+	var wg sync.WaitGroup
+	errs := make(chan error, writers)
+	for _, token := range tokens {
+		wg.Go(func() {
+			applied, err := s.Write(context.WithoutCancel(t.Context()), job, token, fmt.Sprintf("sum-%d", token), int(token))
+			if err == nil && token == writers && !applied {
+				err = fmt.Errorf("the highest token %d was not applied", token)
+			}
+			errs <- err
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	token, sum, n := stored(t, pool, job)
+	if token != writers || sum != fmt.Sprintf("sum-%d", writers) || n != writers {
+		t.Errorf("stored row = (token %d, %s, %d bytes), want (token %d, sum-%d, %d bytes)", token, sum, n, writers, writers, writers)
 	}
 }
 

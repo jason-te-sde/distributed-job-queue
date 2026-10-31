@@ -242,7 +242,7 @@ func TestRunRejectsWhatItCannotParse(t *testing.T) {
 		{"no command", nil, 2, "usage: thumbnail"},
 		{"unknown command", []string{"frobnicate"}, 2, "frobnicate"},
 		{"help", []string{"--help"}, 0, "usage: thumbnail"},
-		{"command help", []string{"work", "-h"}, 0, "--database-url"},
+		{"command help", []string{"work", "-h"}, 0, "-database-url"},
 		{"work without a transport", []string{"work", "--addr", "b:1", "--database-url", "postgres://127.0.0.1:1/none"}, 2, "--tls-ca"},
 		{"produce without a transport", []string{"produce", "--addr", "b:1"}, 2, "--tls-ca"},
 	} {
@@ -280,19 +280,24 @@ func TestProcessFailsAnUnrenderablePayloadWithoutTouchingTheSink(t *testing.T) {
 	}
 }
 
-func TestHelpListsEveryFlagWithTwoDashesAndNoTrailingSpace(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	if status := run(context.Background(), []string{"work", "-h"}, env(nil), &stdout, &stderr); status != 0 {
-		t.Fatalf("status = %d: %s", status, stderr.String())
-	}
-	for _, flagName := range []string{"addr", "concurrency", "database-url", "insecure", "tls-ca", "token"} {
-		if !strings.Contains(stdout.String(), "\n  --"+flagName) {
-			t.Errorf("help does not list --%s:\n%s", flagName, stdout.String())
-		}
-	}
-	for _, line := range strings.Split(stdout.String(), "\n") {
-		if strings.TrimRight(line, " ") != line {
-			t.Errorf("help line %q ends with a space", line)
-		}
+func TestHelpListsEveryFlag(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		flags   []string
+	}{
+		{"work", []string{"addr", "concurrency", "database-url", "insecure", "tls-ca", "token"}},
+		{"produce", []string{"addr", "count", "tenant", "insecure", "tls-ca", "token"}},
+	} {
+		t.Run(tc.command, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if status := run(context.Background(), []string{tc.command, "-h"}, env(nil), &stdout, &stderr); status != 0 {
+				t.Fatalf("status = %d: %s", status, stderr.String())
+			}
+			for _, name := range tc.flags {
+				if !strings.Contains(stdout.String(), "\n  -"+name) {
+					t.Errorf("help does not list -%s:\n%s", name, stdout.String())
+				}
+			}
+		})
 	}
 }

@@ -28,8 +28,13 @@ A handler that lost its lease but kept running, a stalled process that woke up
 late, cannot overwrite what the next holder wrote: its token is lower, so the
 statement changes no row. The worker then fails the job for good
 (`superseded by a newer lease`), because a newer holder has already done the
-work and a retry would only repeat it. A write under the same token is refused
-as well; only a higher token replaces a row.
+work and a retry would only repeat it.
+
+Only a higher token replaces a row. A write under the same token is refused as
+well, so a caller must not write twice under one lease, even to repeat a write
+that failed: the first may have been applied. The handler writes once per
+attempt, and a job that is tried again runs under a new lease with a higher
+token, so a refused write there always means that a later lease has written.
 
 The worker applies `schema.sql` when it starts. The statement is idempotent and
 runs under an advisory lock, so replicas that start together do not collide.
@@ -88,5 +93,13 @@ JOBQUEUE_TEST_DSN='postgres://localhost:5432/postgres?sslmode=disable' go test -
 ```
 
 The `pg` tests include two end-to-end runs: both commands against an in-process
-broker, once over plaintext and once over TLS with tokens, including a job
-whose sink row a newer lease has already written.
+broker, once over plaintext and once over TLS with tokens. Each checks that the
+produced jobs end `succeeded`, and that a job whose sink row a newer lease has
+already written, and a job whose payload cannot be rendered, end `dead` after
+one attempt.
+
+The `pg` tests belong to this repository: they start the broker from
+`internal/broker` and use `internal/pgtest` and the migrations, which only code
+inside the module can import. With `-tags pg` the directory's tests therefore do
+not compile if it is copied out of the module. The program, and the tests
+without the tag, need only the public SDK, `pgx` and the standard library.

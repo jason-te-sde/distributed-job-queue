@@ -188,21 +188,22 @@ type helpError struct{ text string }
 
 func (e *helpError) Error() string { return e.text }
 
-// newFlagSet returns the flag set of a command. The flag package's own
-// reporting is silenced: parse turns its errors into ours.
-func newFlagSet(name string) *flag.FlagSet {
+// newFlagSet returns the flag set of a command and the buffer that receives
+// what the flag package prints. That is the usage text, which parse returns
+// for -h; for an error the command reports in its own words instead.
+func newFlagSet(name string) (*flag.FlagSet, *strings.Builder) {
+	var out strings.Builder
 	fs := flag.NewFlagSet("thumbnail "+name, flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	fs.Usage = func() {}
-	return fs
+	fs.SetOutput(&out)
+	return fs, &out
 }
 
 // parse parses args into fs. A request for help comes back as a *helpError. An
 // argument that is not a flag is refused, as every parameter is a flag.
-func parse(fs *flag.FlagSet, args []string) error {
+func parse(fs *flag.FlagSet, out *strings.Builder, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			return &helpError{text: flagHelp(fs)}
+			return &helpError{text: strings.TrimRight(out.String(), "\n")}
 		}
 		return err
 	}
@@ -210,26 +211,6 @@ func parse(fs *flag.FlagSet, args []string) error {
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
 	return nil
-}
-
-// flagHelp describes the flags of fs, spelled with two dashes as the errors
-// spell them.
-func flagHelp(fs *flag.FlagSet) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "usage: %s [flags]\n\nflags:\n", fs.Name())
-	fs.VisitAll(func(f *flag.Flag) {
-		arg, text := flag.UnquoteUsage(f)
-		name := "--" + f.Name
-		if arg != "" {
-			name += " " + arg
-		}
-		fmt.Fprintf(&b, "  %s\n    \t%s", name, text)
-		if f.DefValue != "" && f.DefValue != "false" {
-			fmt.Fprintf(&b, " (default %s)", f.DefValue)
-		}
-		b.WriteString("\n")
-	})
-	return strings.TrimRight(b.String(), "\n")
 }
 
 // produceConfig is the configuration of thumbnail produce.
@@ -242,12 +223,12 @@ type produceConfig struct {
 
 func parseProduce(args []string, getenv func(string) string) (produceConfig, error) {
 	var c produceConfig
-	fs := newFlagSet("produce")
+	fs, out := newFlagSet("produce")
 	fs.StringVar(&c.addr, "addr", "", "broker `address`, for example dns:///jobqueue-grpc:7070 (required)")
 	fs.IntVar(&c.count, "count", defaultCount, "how many jobs to enqueue, with the seeds 0 to count-1")
 	fs.StringVar(&c.tenant, "tenant", "", "tenant of the jobs; empty leaves the choice to the broker")
 	c.transport.bind(fs)
-	if err := parse(fs, args); err != nil {
+	if err := parse(fs, out, args); err != nil {
 		return produceConfig{}, err
 	}
 	switch {
@@ -272,12 +253,12 @@ type workConfig struct {
 
 func parseWork(args []string, getenv func(string) string) (workConfig, error) {
 	var c workConfig
-	fs := newFlagSet("work")
+	fs, out := newFlagSet("work")
 	fs.StringVar(&c.addr, "addr", "", "broker `address`, for example dns:///jobqueue-grpc:7070 (required)")
 	fs.StringVar(&c.databaseURL, "database-url", "", "PostgreSQL `URL` of the sink; defaults to $"+databaseURLEnv)
 	fs.IntVar(&c.concurrency, "concurrency", defaultConcurrency, "how many jobs to render at once")
 	c.transport.bind(fs)
-	if err := parse(fs, args); err != nil {
+	if err := parse(fs, out, args); err != nil {
 		return workConfig{}, err
 	}
 	if c.databaseURL == "" {
@@ -372,9 +353,10 @@ func handler(sink *Sink, log *slog.Logger) jobqueue.Handler {
 // process renders the thumbnail of a payload and records it under the token.
 //
 // A payload that cannot be rendered fails for good: the same bytes would fail
-// again. So does a write that the sink did not apply: a newer holder of the
-// lease has already written, so a retry would only repeat work that is done.
-// A failure of the database is retried like any other error.
+// again. So does a write that the sink did not apply: the row holds a token
+// that is not lower than ours, and the handler writes once per lease, so a
+// newer lease has already written, and a retry would only repeat work that is
+// done. A failure of the database is retried like any other error.
 func process(ctx context.Context, sink *Sink, jobID, token int64, payload []byte) error {
 	var p Payload
 	if err := json.Unmarshal(payload, &p); err != nil {

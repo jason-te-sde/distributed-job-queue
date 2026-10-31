@@ -63,6 +63,12 @@ WHERE thumbnails.token < EXCLUDED.token`
 // under the fencing token of the lease that made it. applied is false when the
 // table already holds a row of the job with the same or a higher token; the
 // row is then left as it was.
+//
+// A token fences out every write under it or under a lower one, its own
+// repeats included: the second Write of one lease is refused although the
+// first made the row. So a caller writes once per lease. The job handler does,
+// and a job that is tried again runs under a new lease with a higher token.
+// That is why a refused write there means that a later lease has written.
 func (s *Sink) Write(ctx context.Context, jobID, token int64, sum string, n int) (applied bool, err error) {
 	tag, err := s.pool.Exec(ctx, writeSQL, jobID, token, sum, n)
 	if err != nil {
