@@ -44,3 +44,7 @@ if [ -n "${JOBQUEUE_TEST_DSN:-}" ]; then
 else
   echo "SKIPPED test-pg: JOBQUEUE_TEST_DSN unset"
 fi
+
+# The flaws job of CI. Without a database it skips the pg rows and says how
+# many it skipped.
+make flaws

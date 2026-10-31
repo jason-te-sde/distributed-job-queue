@@ -15,7 +15,7 @@ PROTOC_GEN_GO_GRPC_VERSION := v1.6.2
 # whatever versions happen to be on the developer's PATH.
 BIN := $(CURDIR)/bin
 
-.PHONY: test sim test-pg lint check-buf gen hygiene helm-check test-scripts preflight
+.PHONY: test sim test-pg flaws lint check-buf gen hygiene helm-check test-scripts preflight
 
 # Unit and simulator tests.
 test:
@@ -49,6 +49,20 @@ test-pg:
 	scripts/check-pg-count.sh pg.json || status=$$?; \
 	exit $$status
 
+# Asserts that every planted flaw turns its named tests red and that the build
+# that carries them is inert otherwise (see scripts/check-flaws.sh and
+# scripts/flaws.tsv). The pg rows need a database; without JOBQUEUE_TEST_DSN
+# they are skipped and the output says how many. CI always has one and never
+# skips them.
+flaws:
+	@if [ -z "$$JOBQUEUE_TEST_DSN" ]; then \
+		scripts/check-flaws.sh --no-pg; \
+	else \
+		scripts/check-flaws.sh; \
+	fi
+
+# The second golangci-lint pass compiles the flaw sites in, which no other
+# build does: the jobqueue_flaws files are checked only by it.
 lint: check-buf
 	@golangci-lint version 2>/dev/null | grep -qF '$(GOLANGCI_LINT_SERIES)' || { \
 		echo "lint: golangci-lint $(GOLANGCI_LINT_SERIES).x is required; install it with" >&2; \
@@ -56,6 +70,7 @@ lint: check-buf
 		exit 1; \
 	}
 	golangci-lint run ./...
+	golangci-lint run --build-tags jobqueue_flaws,pg ./...
 	buf lint
 	@if ! git rev-parse --verify -q origin/main >/dev/null; then \
 		echo "lint: origin/main is not available, so buf breaking cannot run; fetch it with" >&2; \
@@ -113,6 +128,7 @@ helm-check:
 test-scripts:
 	bash scripts/tests/hygiene_test.sh
 	bash scripts/tests/pg_count_test.sh
+	bash scripts/tests/flaws_test.sh
 	$(call with_helm,bash scripts/tests/helm_test.sh,helm test)
 
 preflight:
