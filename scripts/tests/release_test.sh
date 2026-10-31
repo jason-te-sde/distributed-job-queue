@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Tests for scripts/check-release.sh. Every case builds a throwaway git
-# repository with a CHANGELOG and a chart and prints "PASS <case>"; the first
-# failing case aborts the run.
+# Tests for scripts/check-release.sh and scripts/is-latest-release.sh. Every
+# case builds a throwaway git repository, with a CHANGELOG and a chart where the
+# case needs them, and prints "PASS <case>"; the first failing case aborts the
+# run.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 check="$(cd "$here/.." && pwd)/check-release.sh"
+latest="$(cd "$here/.." && pwd)/is-latest-release.sh"
 
 # Keep the developer's global git configuration (hooks, templates, signing)
 # out of the throwaway repositories.
@@ -173,26 +175,34 @@ expect_output all-mismatches-are-reported "version is 0.2.0"
 expect_output all-mismatches-are-reported "appVersion is 0.3.0"
 pass all-mismatches-are-reported
 
-# (g) A commit that is not on main fails and names main.
+# (g) A commit that is not on main fails and says so.
 repo="$(release_repo)"
 git -C "$repo" checkout -q -b side
 printf 'x\n' >"$repo/x.txt"
 commit_all "$repo" "feat: work that is not on main"
 run_check "$repo" v0.1.0
 expect_status commit-off-main-fails 1
-expect_output commit-off-main-fails "main"
+expect_output commit-off-main-fails "is not on main"
 pass commit-off-main-fails
 
-# (h) Where CI stands, a detached HEAD at a commit that main contains, passes,
-# also when main has moved on since.
+# (h) The commit must be the tip of main, not just on it: a release is cut from
+# the tip, and the lint of the preflight compares the proto files with the tip.
+# A detached HEAD at the tip passes; at an older commit of main it fails and
+# says that the commit is on main but is not its tip.
 repo="$(release_repo)"
 tagged="$(git -C "$repo" rev-parse HEAD)"
+git -C "$repo" checkout -q --detach "$tagged"
+run_check "$repo" v0.1.0
+expect_status detached-head-at-the-tip-passes 0
+git -C "$repo" checkout -q main
 printf 'x\n' >"$repo/x.txt"
 commit_all "$repo" "feat: work after the release commit"
 git -C "$repo" checkout -q --detach "$tagged"
 run_check "$repo" v0.1.0
-expect_status detached-head-on-main-passes 0
-pass detached-head-on-main-passes
+expect_status commit-behind-the-tip-fails 1
+expect_output commit-behind-the-tip-fails "is on main but is not its tip"
+expect_no_output commit-behind-the-tip-fails "is not on main"
+pass detached-head-and-the-tip
 
 # (i) The newest release heading counts, and Unreleased is not one. The older
 # 0.0.9 in the same file does not satisfy a v0.0.9 tag.
@@ -256,16 +266,14 @@ expect_status missing-main-ref-is-an-error 2
 expect_output missing-main-ref-is-an-error "cannot find origin/main"
 pass missing-main-ref-is-an-error
 
-# (o) A shallow clone cannot say whether a commit is on main, so it is an error.
+# (o) A shallow clone at the tip passes: the check compares two commit ids and
+# needs no history.
 repo="$(release_repo)"
-printf 'x\n' >"$repo/x.txt"
-commit_all "$repo" "feat: a second commit"
 shallow="$workdir/shallow"
 git clone -q --depth 1 "file://$repo" "$shallow"
 run_check "$shallow" v0.1.0
-expect_status shallow-clone-is-an-error 2
-expect_output shallow-clone-is-an-error "shallow"
-pass shallow-clone-is-an-error
+expect_status shallow-clone-at-the-tip-passes 0
+pass shallow-clone-at-the-tip-passes
 
 # (p) A call without a tag, or with a path that is no repository, is a usage
 # error.
@@ -287,3 +295,102 @@ status=0
 out="$(cd / && bash "$repo/scripts/check-release.sh" v0.1.0 2>&1)" || status=$?
 expect_status default-repository-is-the-scripts-own 0
 pass default-repository-is-the-scripts-own
+
+# (r) The shape of CI: a full clone with a real origin, a detached HEAD at the
+# tag's commit, and the default ref, origin/main. When that commit is the tip
+# of origin/main the check passes; once origin/main has moved on it fails.
+repo="$(release_repo)"
+upstream="$workdir/upstream.git"
+git clone -q --bare "$repo" "$upstream"
+full="$workdir/full"
+git clone -q "file://$upstream" "$full"
+git -C "$full" checkout -q --detach origin/main
+status=0
+out="$(env -u RELEASE_MAIN_REF bash "$check" v0.1.0 "$full" 2>&1)" || status=$?
+expect_status ci-shape-at-the-tip-passes 0
+expect_output ci-shape-at-the-tip-passes "release: ok"
+printf 'x\n' >"$repo/x.txt"
+commit_all "$repo" "feat: work after the release commit"
+git -C "$repo" push -q "$upstream" main
+git -C "$full" fetch -q origin
+status=0
+out="$(env -u RELEASE_MAIN_REF bash "$check" v0.1.0 "$full" 2>&1)" || status=$?
+expect_status ci-shape-behind-origin-main-fails 1
+expect_output ci-shape-behind-origin-main-fails "is on main but is not its tip"
+expect_output ci-shape-behind-origin-main-fails "origin/main"
+pass ci-shape
+
+# run_latest <repo> <tag>: run is-latest-release.sh on the repository.
+run_latest() {
+  status=0
+  out="$(bash "$latest" "$2" "$1" 2>&1)" || status=$?
+}
+
+# tag_repo <tag>...: a repository with these tags.
+tag_repo() {
+  local dir tag
+  dir="$(new_repo)"
+  printf 'x\n' >"$dir/x.txt"
+  commit_all "$dir" "chore: start"
+  for tag in "$@"; do
+    git -C "$dir" tag "$tag"
+  done
+  printf '%s' "$dir"
+}
+
+# (s) The highest release tag is the latest, compared as numbers: 0.10.0 is
+# above 0.9.0 and 1.2.10 above 1.2.9, which a text sort gets wrong.
+repo="$(tag_repo v0.2.0 v0.9.0 v0.10.0 v1.2.9 v1.2.10 v0.1.0)"
+run_latest "$repo" v1.2.10
+expect_status highest-tag-is-latest 0
+[ "$out" = true ] || { printf 'FAIL highest-tag-is-latest: got %q\n' "$out" >&2; exit 1; }
+for tag in v1.2.9 v0.10.0 v0.9.0 v0.1.0; do
+  run_latest "$repo" "$tag"
+  expect_status "lower-tag-is-not-latest ($tag)" 0
+  [ "$out" = false ] || { printf 'FAIL lower-tag-is-not-latest (%s): got %q\n' "$tag" "$out" >&2; exit 1; }
+done
+repo="$(tag_repo v0.2.0 v0.9.0 v0.10.0)"
+run_latest "$repo" v0.10.0
+[ "$out" = true ] || { printf 'FAIL numeric-order: v0.10.0 got %q\n' "$out" >&2; exit 1; }
+run_latest "$repo" v0.9.0
+[ "$out" = false ] || { printf 'FAIL numeric-order: v0.9.0 got %q\n' "$out" >&2; exit 1; }
+pass latest-is-the-highest-tag-by-number
+
+# (t) Tags that are not releases do not count: a higher pre-release tag, a bare
+# major, and names that are no version at all must not keep a release from
+# being the latest.
+repo="$(tag_repo v0.1.0 v1.0.0-rc1 v2 v1.0 latest vfoo nightly-2026-10-31)"
+run_latest "$repo" v0.1.0
+expect_status non-release-tags-are-ignored 0
+[ "$out" = true ] || { printf 'FAIL non-release-tags-are-ignored: got %q\n' "$out" >&2; exit 1; }
+pass non-release-tags-are-ignored
+
+# (u) The tag being released counts even when it does not exist yet: a version
+# above every tag is the latest, a version below one is not, and with no tags
+# at all the first release is.
+repo="$(tag_repo v0.1.0)"
+run_latest "$repo" v0.2.0
+[ "$out" = true ] || { printf 'FAIL untagged-higher-version: got %q\n' "$out" >&2; exit 1; }
+run_latest "$repo" v0.0.9
+[ "$out" = false ] || { printf 'FAIL untagged-lower-version: got %q\n' "$out" >&2; exit 1; }
+repo="$(tag_repo)"
+run_latest "$repo" v0.1.0
+[ "$out" = true ] || { printf 'FAIL first-release: got %q\n' "$out" >&2; exit 1; }
+pass untagged-version-counts
+
+# (v) A tag that is not a release tag, no tag, or a path that is no repository
+# is an error, not an answer.
+repo="$(tag_repo v0.1.0)"
+for tag in 0.1.0 v0.1 v0.1.0-rc1 ""; do
+  run_latest "$repo" "$tag"
+  expect_status "latest-malformed-tag-is-an-error ($tag)" 2
+  expect_output "latest-malformed-tag-is-an-error ($tag)" "is-latest-release"
+done
+status=0
+out="$(bash "$latest" 2>&1)" || status=$?
+expect_status latest-no-tag-is-a-usage-error 2
+expect_output latest-no-tag-is-a-usage-error "usage"
+run_latest "$workdir/absent" v0.1.0
+expect_status latest-no-repository-is-an-error 2
+expect_output latest-no-repository-is-an-error "absent"
+pass latest-usage-errors

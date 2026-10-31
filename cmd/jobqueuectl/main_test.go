@@ -907,21 +907,39 @@ func TestCtlSleep(t *testing.T) {
 func TestCtlVersionPrintsTheVersionOfTheBuild(t *testing.T) {
 	// The release build sets version with -ldflags -X main.version=..., so a
 	// binary says which release it is. No broker is involved: the command works
-	// with nothing running.
-	if r := runCtl(nil, "version"); r.code != 0 || r.stdout != version+"\n" || r.stderr != "" {
-		t.Errorf("version = exit %d, stdout %q, stderr %q; want exit 0, %q and no stderr", r.code, r.stdout, r.stderr, version+"\n")
+	// with nothing running. --version and -version do the same as the server's,
+	// and the version command does the same as both.
+	want := version + "\n"
+	for _, args := range [][]string{{"version"}, {"--version"}, {"-version"}, {"--insecure", "--version"}} {
+		if r := runCtl(nil, args...); r.code != 0 || r.stdout != want || r.stderr != "" {
+			t.Errorf("jobqueuectl %v = exit %d, stdout %q, stderr %q; want exit 0, %q and no stderr", args, r.code, r.stdout, r.stderr, want)
+		}
 	}
-	if r, want := runCtl(nil, "version", "--json"), `{"version":"`+version+"\"}\n"; r.code != 0 || r.stdout != want {
-		t.Errorf("version --json = exit %d, stdout %q; want exit 0 and %q", r.code, r.stdout, want)
+	wantJSON := `{"version":"` + version + "\"}\n"
+	for _, args := range [][]string{{"version", "--json"}, {"--json", "--version"}} {
+		if r := runCtl(nil, args...); r.code != 0 || r.stdout != wantJSON || r.stderr != "" {
+			t.Errorf("jobqueuectl %v = exit %d, stdout %q, stderr %q; want exit 0 and %q", args, r.code, r.stdout, r.stderr, wantJSON)
+		}
 	}
-	if version != "dev" {
-		t.Errorf("version defaults to %q, want \"dev\": a build sets it with -ldflags -X main.version=...", version)
+	// The default is "dev", but a test run with -ldflags -X main.version=...
+	// has another value, so only what a line can hold is required of it.
+	if version == "" || strings.ContainsAny(version, " \t\r\n") {
+		t.Errorf("version is %q, want a word: a build sets it with -ldflags -X main.version=...", version)
 	}
 	if r := runCtl(nil, "version", "extra"); r.code != 2 || r.stdout != "" || !strings.Contains(r.stderr, `"extra"`) {
 		t.Errorf("version extra = exit %d, stdout %q, stderr %q; want exit 2 naming the argument", r.code, r.stdout, r.stderr)
 	}
-	if r := runCtl(nil, "help"); !strings.Contains(r.stdout, "\n  version\n") {
+	// --version is a flag of the command line before the command's name, like
+	// the other global flags: a command does not take it.
+	if r := runCtl(nil, "get", "5", "--version"); r.code != 2 || r.stdout != "" {
+		t.Errorf("get 5 --version = exit %d, stdout %q; want exit 2 and nothing on stdout", r.code, r.stdout)
+	}
+	r := runCtl(nil, "help")
+	if !strings.Contains(r.stdout, "\n  version\n") {
 		t.Errorf("help does not list the version command:\n%s", r.stdout)
+	}
+	if !strings.Contains(r.stdout, "--version") {
+		t.Errorf("help does not list the --version flag:\n%s", r.stdout)
 	}
 }
 

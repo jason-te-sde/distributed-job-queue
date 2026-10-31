@@ -112,10 +112,12 @@ jobs:
             go.sum
             bench/go.sum
       # The benchmark module is separate from the root module, so it is built
-      # and run from its own directory. The numbers are a regression check
-      # and are never quoted: the figures that reach the README come from the
-      # full runs recorded in docs/benchmarks.md. --out keeps the results,
-      # one line of JSON each, for the upload below.
+      # and run from its own directory. This is a smoke run: it fails only
+      # when the producer cannot send or a sample of the jobs table fails, and
+      # says nothing about performance. Its numbers are never quoted: the
+      # figures that reach the README come from the full runs recorded in
+      # docs/benchmarks.md. --out keeps the results, one line of JSON each,
+      # for the upload below.
       - name: Soak at 300 jobs per second for 5 minutes
         working-directory: bench
         run: go run ./cmd/jobqueue-bench soak --duration 5m --rate 300 --out soak-short.jsonl
@@ -130,7 +132,10 @@ jobs:
   # go test -fuzz takes one package and one target, so the targets are listed
   # here and each one runs in a job of its own, in parallel. Nothing names them
   # in this file: a fuzz target added to any package of the module is picked up
-  # by the next run.
+  # by the next run. A target is named after the last element of its package
+  # path and its own name, such as job-FuzzTransitions, which names its job and
+  # its artifact. Two targets that would get the same name fail this step
+  # instead of overwriting each other's artifact.
   fuzz-targets:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -160,11 +165,16 @@ jobs:
             exit 1
           fi
           cat "$RUNNER_TEMP/fuzz-targets.txt"
-          targets="$(jq -R -s -c 'split("\n") | map(select(length > 0) | split(" ") | {package: .[0], target: .[1]})' "$RUNNER_TEMP/fuzz-targets.txt")"
+          targets="$(jq -R -s -c 'split("\n") | map(select(length > 0) | split(" ") | {package: .[0], target: .[1], name: ((.[0] | split("/") | last) + "-" + .[1])})' "$RUNNER_TEMP/fuzz-targets.txt")"
+          if ! jq -e 'map(.name) | length == (unique | length)' <<<"$targets" >/dev/null; then
+            echo "two fuzz targets would get the same name:" >&2
+            jq -r '.[] | .name + " = " + .package + " " + .target' <<<"$targets" >&2
+            exit 1
+          fi
           echo "targets=$targets" >>"$GITHUB_OUTPUT"
 
   fuzz:
-    name: fuzz ${{ matrix.target }}
+    name: fuzz ${{ matrix.name }}
     needs: fuzz-targets
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -204,10 +214,10 @@ jobs:
             cp "$file" "$out/$file"
             echo "new crasher of $FUZZ_TARGET: $file"
           done
-      - name: Upload the crashers of ${{ matrix.target }}
+      - name: Upload the crashers of ${{ matrix.name }}
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: fuzz-crashers-${{ matrix.target }}
+          name: fuzz-crashers-${{ matrix.name }}
           path: ${{ runner.temp }}/crashers
           if-no-files-found: warn

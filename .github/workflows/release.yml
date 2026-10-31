@@ -1,40 +1,75 @@
 name: release
 
 # A release is made here, from a tag, and nowhere else: nothing is built or
-# published from a developer machine. Pushing a tag such as v0.1.0 to a commit
-# of main checks the tag, runs the preflight, builds the binaries, pushes the
-# image and creates the GitHub release with the binaries, the checksums and the
-# chart attached.
+# published from a developer machine. Pushing a tag such as v0.1.0 to the tip of
+# main runs two jobs.
 #
-# Everything that only builds comes before the first thing that publishes, so
-# that a failure while building leaves nothing behind. The image is published
-# before the release page is, because the release page is what announces it.
+#   build    checks the tag, runs the preflight, builds the binaries, packages
+#            the chart and writes the checksums and the release notes. It can
+#            only read the repository, and it runs third-party tools and the
+#            whole test suite, so it holds no token that could write anything.
+#   publish  pushes the image and creates the GitHub release. It runs nothing
+#            of the repository's except the Docker build, and it is the only
+#            job with write permissions.
+#
+# The release is created as a draft, gets all its files, and is published only
+# then, so a failed upload never leaves a public release with files missing. A
+# failed run can leave the draft behind; delete it before running the job again.
 
 on:
   push:
     tags: ["v*"]
 
-permissions:
-  # Create the release and attach files to it.
-  contents: write
-  # Push the image to ghcr.io.
-  packages: write
+# Permissions are set per job, and none is set here: a job added later starts
+# from the repository's default, so it has to say what it needs.
+
+concurrency:
+  # Releases do not overlap, and a release that has started is never
+  # cancelled. GitHub keeps one waiting run per group, so of several tags
+  # pushed together only the last one waits.
+  group: release
+  cancel-in-progress: false
 
 env:
-  # Never download a toolchain: the job runs the Go version it asked for.
+  # Never download a toolchain: the jobs run the Go version they asked for.
   GOTOOLCHAIN: local
   IMAGE: ghcr.io/jason-te-sde/distributed-job-queue
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # The preflight runs everything that CI runs on a commit except the chaos
+    # and Kubernetes tests: lint (10 minutes in ci.yml), the race tests (20),
+    # the Postgres tests (20) and the flaw check (30), and the tools and the
+    # build come before and after. All of it took 12 minutes on a developer
+    # machine, 5.5 of them in the flaw check; the budget is that of ci.yml.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    # The preflight needs a database: without one it would skip the Postgres
+    # tests, and the flaw check refuses to run without it on a CI runner.
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 2s
+          --health-retries 30
+        ports:
+          - 5432:5432
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      latest: ${{ steps.latest.outputs.latest }}
     steps:
       - uses: actions/checkout@v7
         with:
-          # The release check asks whether the commit is on main, and make
-          # lint compares the proto files with origin/main. Both need the
-          # branches, and the hygiene check reads every commit message.
+          # No token is left in the repository's git configuration for the
+          # steps that run third-party code.
+          persist-credentials: false
+          # The hygiene check reads every commit message, and the release
+          # check and the latest-release check read the tags and origin/main.
           fetch-depth: 0
       # Before anything is built: the tag, CHANGELOG.md, the chart and main
       # have to agree. This is also what makes the tag safe to use below: a
@@ -44,6 +79,11 @@ jobs:
       - name: Read the version from the tag
         id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >>"$GITHUB_OUTPUT"
+      # Only the highest release tag takes the image name :latest, so that a
+      # release of an older line does not take it from a newer one.
+      - name: Find out whether this is the latest release
+        id: latest
+        run: echo "latest=$(scripts/is-latest-release.sh "$GITHUB_REF_NAME")" >>"$GITHUB_OUTPUT"
       - uses: actions/setup-go@v7
         with:
           go-version: 1.27.x
@@ -56,10 +96,12 @@ jobs:
           go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
           go install github.com/bufbuild/buf/cmd/buf@v1.75.0
           echo "$(go env GOPATH)/bin" >>"$GITHUB_PATH"
-      # Everything CI runs that needs no database. JOBQUEUE_TEST_DSN is unset,
-      # so the Postgres tests are skipped here: they ran on the commit when it
-      # was merged to main.
+      # Everything CI runs, with the database: the Postgres tests, and every
+      # row of the flaw check. The database is the service above, and only
+      # this step is given its address.
       - name: Preflight
+        env:
+          JOBQUEUE_TEST_DSN: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
         run: make preflight
       # Static binaries, as in the Dockerfile. -X main.version sets what
       # jobqueue-server --version and jobqueuectl version print. One archive per
@@ -116,7 +158,9 @@ jobs:
           sha256sum -- *.tar.gz *.tgz >SHA256SUMS
           sha256sum --check --strict SHA256SUMS
       # The section of the version that is being released, without its
-      # heading. check-release.sh has made sure that it is the first one.
+      # heading. check-release.sh has made sure that it is the first one. The
+      # notes travel in dist/ with the files, but are not one of them: they are
+      # not in SHA256SUMS and are not attached.
       - name: Extract the release notes
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -125,17 +169,57 @@ jobs:
           awk -v want="## [${VERSION}]" '
             /^## \[/ { if (found) exit; if (index($0, want) == 1) { found = 1; next } }
             found { print }
-          ' CHANGELOG.md >"$RUNNER_TEMP/notes.md"
-          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
+          ' CHANGELOG.md >dist/release-notes.md
+          if ! grep -q '[^[:space:]]' dist/release-notes.md; then
             echo "CHANGELOG.md has no text under the heading of $VERSION" >&2
             exit 1
           fi
-          cat "$RUNNER_TEMP/notes.md"
+          cat dist/release-notes.md
+      - name: Upload what the publish job needs
+        uses: actions/upload-artifact@v7
+        with:
+          name: release
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      # Create the release and attach files to it.
+      contents: write
+      # Push the image to ghcr.io.
+      packages: write
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      LATEST: ${{ needs.build.outputs.latest }}
+    steps:
+      # Only for the Docker build context. No token is left in the repository.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Outside the workspace, so that the files are not part of the build
+      # context of the image.
+      - uses: actions/download-artifact@v8
+        with:
+          name: release
+          path: ${{ runner.temp }}/release
+      # The files cross a job boundary, so check them once more before they are
+      # published.
+      - name: Verify the files against SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/release"
+          sha256sum --check --strict SHA256SUMS
+          test -f "jobqueue-${VERSION}.tgz"
       # The build stage of the Dockerfile cross-compiles on the runner's own
       # architecture and the final stage only copies files, so the arm64 image
       # needs no emulation: ci.yml builds the same two platforms the same way.
-      # The version is the tag with its v, which is what the binaries report;
-      # the image tag has no v, because the chart takes it from appVersion.
+      # The build argument is the tag with its v, which is what the binaries
+      # report; the image tag has no v, because the chart takes it from
+      # appVersion. :latest is added only for the highest release tag.
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
@@ -151,19 +235,24 @@ jobs:
           build-args: |
             VERSION=${{ github.ref_name }}
           tags: |
-            ${{ env.IMAGE }}:${{ steps.version.outputs.version }}
-            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ env.VERSION }}
+            ${{ env.LATEST == 'true' && format('{0}:latest', env.IMAGE) || '' }}
           # The source label is what links the package to this repository.
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.version=${{ env.VERSION }}
             org.opencontainers.image.licenses=Apache-2.0
+      # A draft first, with every file attached, and published only after that.
+      # --verify-tag stops the run if the tag is not in the repository.
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.tgz dist/SHA256SUMS \
-            --repo "$GITHUB_REPOSITORY" --verify-tag \
-            --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
+          dir="$RUNNER_TEMP/release"
+          gh release create "$GITHUB_REF_NAME" "$dir"/*.tar.gz "$dir"/*.tgz "$dir"/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+            --title "$GITHUB_REF_NAME" --notes-file "$dir/release-notes.md"
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --draft=false --latest="$LATEST"

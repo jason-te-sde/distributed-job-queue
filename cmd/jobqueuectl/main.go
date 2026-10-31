@@ -36,8 +36,8 @@ import (
 	jobqueuev1 "github.com/jason-te-sde/distributed-job-queue/internal/gen/jobqueue/v1"
 )
 
-// version is what the version command prints. It is "dev" unless the linker
-// sets it.
+// version is what the version command and the --version flag print. It is
+// "dev" unless the linker sets it.
 var version = "dev"
 
 // The exit statuses of the command.
@@ -96,6 +96,13 @@ func newGlobals(getenv func(string) string) *globals {
 		g.addr = v
 	}
 	return g
+}
+
+// registerVersionFlag adds --version to fs. Unlike the shared flags it belongs
+// to the command line in front of the command's name only, as the server's
+// --version does for the server: it prints the version and nothing runs.
+func registerVersionFlag(fs *flag.FlagSet, p *bool) {
+	fs.BoolVar(p, "version", false, "print the version and exit")
 }
 
 // register adds the shared flags to fs, which every command line goes
@@ -215,11 +222,16 @@ var commands = []command{
 func (e *env) dispatch(args []string) error {
 	fs := newFlagSet("jobqueuectl")
 	e.g.register(fs)
+	var showVersion bool
+	registerVersionFlag(fs, &showVersion)
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return &helpRequest{text: usageText()}
 		}
 		return usagef("%v", err)
+	}
+	if showVersion {
+		return e.printVersion()
 	}
 	rest := fs.Args()
 	switch {
@@ -365,6 +377,7 @@ func usageText() string {
 	fs := newFlagSet("jobqueuectl")
 	// Defaults are shown as they are without an environment.
 	newGlobals(func(string) string { return "" }).register(fs)
+	registerVersionFlag(fs, new(bool))
 	b.WriteString(defaults(fs))
 	return b.String()
 }

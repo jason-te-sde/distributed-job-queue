@@ -542,6 +542,11 @@ func cmdVersion(e *env, args []string) error {
 	if err := noArguments(positional); err != nil {
 		return err
 	}
+	return e.printVersion()
+}
+
+// printVersion writes the version of this build, as text or as --json.
+func (e *env) printVersion() error {
 	return e.print(versionView{Version: version}, func(w *bytes.Buffer) {
 		fmt.Fprintln(w, version)
 	})

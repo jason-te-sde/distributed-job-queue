@@ -12,16 +12,19 @@
 #     a heading that is not a version, such as "## [Unreleased]", is skipped;
 #   - deploy/helm/jobqueue/Chart.yaml has that version as its version and as
 #     its appVersion, which is the tag of the image the chart deploys;
-#   - the checked-out commit is on main.
+#   - the checked-out commit is the tip of main.
 #
-# "On main" means that HEAD is reachable from the ref in RELEASE_MAIN_REF,
-# which is origin/main unless the variable says otherwise. In CI that needs the
-# whole history: check out with fetch-depth: 0.
+# Main is the ref in RELEASE_MAIN_REF, which is origin/main unless the variable
+# says otherwise. The tip is required, not just a place on main: a release is
+# cut from main's tip, and the lint that the release build runs compares the
+# proto files with the tip of main, so an older commit that was tagged after a
+# proto change would fail it for a reason that has nothing to do with the
+# release. The check compares two commit ids and needs no history.
 #
 # Output: "release: ok", or one "release: FAIL: ..." line per problem.
 # Exit status: 0 ok, 1 a requirement is not met, 2 usage or environment error,
-# which includes a history that cannot answer whether the commit is on main:
-# a check that could not run is never reported as passed.
+# which includes a main ref that does not exist: a check that could not run is
+# never reported as passed.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -89,20 +92,22 @@ else
   done
 fi
 
-# The commit is on main. A shallow clone is refused: it may lack the commits
-# that connect this one to main, and would then report it as off main.
-[ "$(git -C "$root" rev-parse --is-shallow-repository)" = false ] ||
-  die "the repository is a shallow clone, so it cannot tell whether the commit is on $main_ref; fetch the whole history (fetch-depth: 0)"
+# The commit is the tip of main. When it is not, ancestry tells the two ways of
+# missing apart: a commit off main, such as one on another branch, and a commit
+# that is on main but behind its tip.
 git -C "$root" rev-parse --verify --quiet "$main_ref^{commit}" >/dev/null ||
-  die "cannot find $main_ref, so it cannot tell whether the commit is on main; fetch it, or name the ref in RELEASE_MAIN_REF"
+  die "cannot find $main_ref, so it cannot tell whether the commit is the tip of main; fetch it, or name the ref in RELEASE_MAIN_REF"
+tip="$(git -C "$root" rev-parse "$main_ref^{commit}")"
 head="$(git -C "$root" rev-parse HEAD)" || die "the repository has no commit"
-ancestor=0
-git -C "$root" merge-base --is-ancestor "$head" "$main_ref" || ancestor=$?
-case "$ancestor" in
-  0) ;;
-  1) fail "the commit $head is not on main ($main_ref)" ;;
-  *) die "git merge-base failed (status $ancestor) for $main_ref" ;;
-esac
+if [ "$head" != "$tip" ]; then
+  ancestor=0
+  git -C "$root" merge-base --is-ancestor "$head" "$tip" || ancestor=$?
+  case "$ancestor" in
+    0) fail "the commit $head is on main but is not its tip: $main_ref is at $tip, and a release is cut from the tip of main" ;;
+    1) fail "the commit $head is not on main ($main_ref is at $tip): a release is cut from the tip of main" ;;
+    *) die "git merge-base failed (status $ancestor) for $main_ref" ;;
+  esac
+fi
 
 [ "$failures" -eq 0 ] || exit 1
 printf 'release: ok\n'
