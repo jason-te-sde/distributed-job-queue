@@ -42,6 +42,10 @@ type Network struct {
 	cfg        NetConfig
 	partitions map[link]time.Duration // until, exclusive
 	stats      NetStats
+	// brokers are the broker nodes attached to the network, by id. A client
+	// knows a broker only by its NodeID, and finds the node here when a
+	// message reaches it.
+	brokers map[NodeID]*BrokerNode
 }
 
 // NewNetwork returns a network over w. It panics if a latency range is
@@ -53,7 +57,7 @@ func NewNetwork(w *World, cfg NetConfig) *Network {
 			panic("sim: NewNetwork called with a negative or inverted latency range")
 		}
 	}
-	return &Network{w: w, cfg: cfg, partitions: map[link]time.Duration{}}
+	return &Network{w: w, cfg: cfg, partitions: map[link]time.Duration{}, brokers: map[NodeID]*BrokerNode{}}
 }
 
 // Send sends one message from one node to another. The network decides, in
