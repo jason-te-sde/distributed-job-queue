@@ -53,6 +53,7 @@
 // rollback applied nothing, but a lost connection may have committed the call
 // first, so a retry is safe only for a call that tolerates repetition: an
 // acknowledgement is fenced by its token and an Enqueue with an idempotency key
-// is deduplicated. A cancelled or expired context stays a context error, and
-// any other error is wrapped unchanged.
+// is deduplicated, but an Enqueue without a key may create the job twice. A
+// cancelled or expired context stays a context error, and any other error is
+// wrapped unchanged.
 package pgstore

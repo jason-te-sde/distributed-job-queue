@@ -15,6 +15,12 @@ trap 'rm -rf "$workdir"' EXIT
 # whatever the caller's environment says about workspaces and flags.
 export GOTOOLCHAIN=local GOFLAGS='' GOWORK=off
 
+# The hygiene job of CI runs this test with GITHUB_ACTIONS set, which the script
+# treats as a CI run and answers with a refusal of --no-pg. The cases that use
+# that flag are about the flag, so the variable starts unset, and the case that
+# is about the refusal sets it itself.
+unset GITHUB_ACTIONS
+
 root="$workdir/mod"
 tsv="$workdir/flaws.tsv"
 out=""
@@ -58,6 +64,9 @@ const ('
 #   ./pgp     TestPGUnderF5 fails under flaw F5 when built with the pg tag.
 #   internal/sim  TestLeavesAFailureFile writes a failure file under flaw F6
 #             and fails, saying whether an older file was still there.
+#   ./seeds   TestSeedVariablesAreUnset fails if JOBQUEUE_SIM_SEEDS or
+#             JOBQUEUE_SIM_SEED_START reaches it, and under flaw F7 says that
+#             they did not.
 new_module() {
   rm -rf "$root"
   mkdir -p "$root"
@@ -151,6 +160,24 @@ func TestPGUnderF5(t *testing.T) {
 	}
 	if os.Getenv("JOBQUEUE_FLAW") == "F5" {
 		t.Fatal("flaw F5 is on: marker-gamma")
+	}
+}'
+  write seeds/seeds.go 'package seeds'
+  write seeds/seeds_test.go 'package seeds
+
+import (
+	"os"
+	"testing"
+)
+
+func TestSeedVariablesAreUnset(t *testing.T) {
+	for _, name := range []string{"JOBQUEUE_SIM_SEEDS", "JOBQUEUE_SIM_SEED_START"} {
+		if os.Getenv(name) != "" {
+			t.Fatalf("%s reached the test", name)
+		}
+	}
+	if os.Getenv("JOBQUEUE_FLAW") == "F7" {
+		t.Fatal("flaw F7 is on, seed variables unset")
 	}
 }'
   write internal/sim/sim.go 'package sim'
@@ -468,7 +495,41 @@ if [ -e "$root/internal/sim/testdata/failures/seed-7.txt" ] || [ -e "$root/inter
 fi
 pass failure-files-are-cleared
 
-# (l) The table of this repository. It names only packages that exist, and
+# (l) The simulator's seed count and first seed are read from the environment,
+# so a value that a developer has exported would change what the rows and the
+# inert run test. The script runs everything without them: here the caller has
+# exported both, and the test that sees either fails the run, in a row (which
+# then lacks the expected text) and in the inert build.
+flaw_source F1 F2 F7
+rows "${base_rows[@]}" "F7|./seeds|^TestSeedVariablesAreUnset\$|-|seed variables unset"
+status=0
+out="$(JOBQUEUE_SIM_SEEDS=3 JOBQUEUE_SIM_SEED_START=9 JOBQUEUE_TEST_DSN=dsn FLAWS_ROOT="$root" FLAWS_TSV="$tsv" bash "$check" 2>&1)" || status=$?
+expect_status sim-seed-variables-are-unset 0
+expect_output sim-seed-variables-are-unset 'flaw F7 caught by ^TestSeedVariablesAreUnset$'
+expect_output sim-seed-variables-are-unset 'inert build passed'
+pass sim-seed-variables-are-unset
+
+# (m) CI. GITHUB_ACTIONS says the script runs in a workflow, where the pg rows
+# are what the job is for: --no-pg is refused, and says why, before anything
+# runs. Without the flag the same environment runs the rows as usual.
+flaw_source F1 F2 F5
+rows "${base_rows[@]}" "F5|./pgp|^TestPGUnderF5\$|pg|marker-gamma"
+status=0
+out="$(GITHUB_ACTIONS=true JOBQUEUE_TEST_DSN=dsn FLAWS_ROOT="$root" FLAWS_TSV="$tsv" bash "$check" --no-pg 2>&1)" || status=$?
+expect_status no-pg-is-refused-in-ci 2
+expect_output no-pg-is-refused-in-ci '--no-pg is refused'
+expect_output no-pg-is-refused-in-ci 'GITHUB_ACTIONS'
+expect_no_output no-pg-is-refused-in-ci 'flaw F1'
+pass no-pg-is-refused-in-ci
+
+status=0
+out="$(GITHUB_ACTIONS=true JOBQUEUE_TEST_DSN=dsn FLAWS_ROOT="$root" FLAWS_TSV="$tsv" bash "$check" 2>&1)" || status=$?
+expect_status pg-rows-run-in-ci 0
+expect_output pg-rows-run-in-ci 'flaw F5 caught by ^TestPGUnderF5$'
+expect_no_output pg-rows-run-in-ci 'SKIPPED'
+pass pg-rows-run-in-ci
+
+# (n) The table of this repository. It names only packages that exist, and
 # every id that internal/flaw/flaw.go quotes has a row; the script's own
 # completeness check says which one is missing.
 real_root="$(cd "$here/../.." && pwd)"

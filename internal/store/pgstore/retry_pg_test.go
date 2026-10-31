@@ -121,7 +121,7 @@ func (p *proxy) cut() {
 // it must still be a store.ErrUnavailable: the connection is gone, and the next
 // call opens a new one. Here the call never ran, but the error cannot say so for
 // a connection that dropped in the middle of a call, which may have committed;
-// that is why a retry rests on the calls being idempotent.
+// that is why a retry is safe only for a call that tolerates repetition.
 func TestPGClassifiesALostConnection(t *testing.T) {
 	cfg := pgtest.NewDB(t).Config()
 	p := newProxy(t, net.JoinHostPort(cfg.ConnConfig.Host, strconv.Itoa(int(cfg.ConnConfig.Port))))
@@ -160,53 +160,6 @@ var planShapes = map[string]func(*pgxpool.Config){
 	},
 }
 
-// Calls that name the same jobs in opposite orders must not deadlock. The
-// statements of an acknowledgement call lock the rows they change in ascending
-// id, whatever the order of the request and of the plan, so that every call
-// takes the row locks in the same order. Without that, calls fail with a
-// deadlock. The statements are run under each of planShapes.
-func TestPGOppositeOrderHeartbeatsDoNotDeadlock(t *testing.T) {
-	const (
-		jobs    = 24
-		callers = 8
-		rounds  = 100
-	)
-	for name, option := range planShapes {
-		t.Run(name, func(t *testing.T) {
-			_, pg := newConcurrentStore(t, callers, quickDeadlockDetection, option)
-			refs := leaseAll(t, jobs, pg)
-			descending := make([]store.Ref, jobs)
-			for i, r := range refs {
-				descending[jobs-1-i] = r
-			}
-
-			var wg sync.WaitGroup
-			for c := range callers {
-				order := refs
-				if c%2 == 1 {
-					order = descending
-				}
-				wg.Go(func() {
-					for range rounds {
-						res, err := pg.Heartbeat(t.Context(), order, time.Minute)
-						if err != nil {
-							t.Errorf("caller %d: Heartbeat: %v", c, err)
-							return
-						}
-						for i, r := range res {
-							if r.Outcome != job.Applied {
-								t.Errorf("caller %d: item %d (job %d) = %v, want applied", c, i, order[i].ID, r.Outcome)
-								return
-							}
-						}
-					}
-				})
-			}
-			wg.Wait()
-		})
-	}
-}
-
 // leaseFresh enqueues n jobs in queue and leases them all, and returns their
 // refs in ascending id.
 func leaseFresh(t *testing.T, pg *pgstore.Store, queue string, n int) []store.Ref {
@@ -232,16 +185,70 @@ func leaseFresh(t *testing.T, pg *pgstore.Store, queue string, n int) []store.Re
 	return refs
 }
 
-// testOppositeOrderAck has callers goroutines acknowledge the same jobs at the
-// same moment, half of them naming the jobs in ascending id and half in
-// descending id, and requires that no call fails and that each job is
-// acknowledged by exactly one of them. The others see an outcome in allowed,
-// because the first call to get the job ended its lease.
+// raceBehindAGate runs call(0) to call(callers-1) in goroutines of their own,
+// all in contention for the rows of refs, and returns when they have finished.
+// The pool needs a connection for each caller and two more.
 //
-// Unlike a heartbeat, an acknowledgement that applies ends the lease, and a
-// call that arrives later locks nothing, so only the calls that arrive together
-// can deadlock. Every round therefore leases new jobs, in a queue of its own.
-func testOppositeOrderAck(t *testing.T, allowed []job.Outcome, ack func(ctx context.Context, pg *pgstore.Store, refs []store.Ref) ([]job.Outcome, error)) {
+// A transaction holds a lock on every one of the rows while the goroutines
+// start, and commits only when PostgreSQL reports a backend waiting for a row
+// lock for each caller. The calls are then known to be in flight together, each
+// stopped at its first row, and they all start on the rows in the same instant.
+// Starting goroutines together cannot promise that: a call that runs to its end
+// before another begins also leaves the other nothing to wait for, and the test
+// would pass without having raced anything. If the callers are not all waiting
+// within ten seconds the test fails and says so.
+func raceBehindAGate(t *testing.T, pool *pgxpool.Pool, refs []store.Ref, callers int, call func(c int)) {
+	t.Helper()
+	ids := make([]int64, len(refs))
+	for i, r := range refs {
+		ids[i] = r.ID
+	}
+	gate, err := pool.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = gate.Rollback(context.Background()) }() // does nothing after the commit
+	if _, err := gate.Exec(t.Context(), "SELECT id FROM jobqueue.jobs WHERE id = ANY($1::int8[]) ORDER BY id FOR UPDATE", ids); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	for c := range callers {
+		wg.Go(func() { call(c) })
+	}
+
+	waiting := 0
+	for deadline := time.Now().Add(10 * time.Second); waiting < callers && time.Now().Before(deadline); {
+		// Each test has a database of its own, so every waiting backend in it is a caller.
+		err := pool.QueryRow(t.Context(),
+			"SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'").Scan(&waiting)
+		if err != nil {
+			t.Errorf("count the calls that wait for a lock: %v", err)
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if waiting < callers {
+		t.Errorf("%d of %d calls were waiting for a row lock, so they did not overlap", waiting, callers)
+	}
+	if err := gate.Commit(t.Context()); err != nil {
+		t.Errorf("release the rows: %v", err)
+	}
+	wg.Wait()
+}
+
+// testOppositeOrderAck has callers goroutines acknowledge the same jobs at the
+// same moment (see raceBehindAGate), half of them naming the jobs in ascending
+// id and half in descending id, and requires that no call fails. Every outcome
+// must be one of allowed. If exclusive, an acknowledgement ends the lease and
+// each job is acknowledged by exactly one of the callers, and the others see
+// that it is gone; if not, as for a heartbeat, every caller finds every job
+// applied.
+//
+// A call that arrives after the lease has ended locks nothing, so only calls
+// that arrive together can deadlock. Every round therefore leases new jobs, in
+// a queue of its own.
+func testOppositeOrderAck(t *testing.T, allowed []job.Outcome, exclusive bool, ack func(ctx context.Context, pg *pgstore.Store, refs []store.Ref) ([]job.Outcome, error)) {
 	t.Helper()
 	const (
 		jobs    = 24
@@ -250,30 +257,22 @@ func testOppositeOrderAck(t *testing.T, allowed []job.Outcome, ack func(ctx cont
 	)
 	for name, option := range planShapes {
 		t.Run(name, func(t *testing.T) {
-			_, pg := newConcurrentStore(t, callers, quickDeadlockDetection, option)
+			// A connection for each caller, one for the gate and one to watch.
+			pool, pg := newConcurrentStore(t, callers+2, quickDeadlockDetection, option)
 			for round := range rounds {
 				ascending := leaseFresh(t, pg, fmt.Sprintf("q%d", round), jobs)
 				orders := [2][]store.Ref{ascending, slices.Clone(ascending)}
 				slices.Reverse(orders[1])
 
-				var (
-					start   = make(chan struct{})
-					results = make([][]job.Outcome, callers)
-					wg      sync.WaitGroup
-				)
-				for c := range callers {
-					wg.Go(func() {
-						<-start
-						res, err := ack(t.Context(), pg, orders[c%2])
-						if err != nil {
-							t.Errorf("round %d, caller %d: %v, want no error: calls in opposite orders must not deadlock", round, c, err)
-							return
-						}
-						results[c] = res
-					})
-				}
-				close(start)
-				wg.Wait()
+				results := make([][]job.Outcome, callers)
+				raceBehindAGate(t, pool, ascending, callers, func(c int) {
+					res, err := ack(t.Context(), pg, orders[c%2])
+					if err != nil {
+						t.Errorf("round %d, caller %d: %v, want no error: calls in opposite orders must not deadlock", round, c, err)
+						return
+					}
+					results[c] = res
+				})
 				if t.Failed() {
 					return
 				}
@@ -289,9 +288,13 @@ func testOppositeOrderAck(t *testing.T, allowed []job.Outcome, ack func(ctx cont
 						}
 					}
 				}
+				want := callers
+				if exclusive {
+					want = 1
+				}
 				for _, r := range ascending {
-					if won[r.ID] != 1 {
-						t.Errorf("round %d: job %d was acknowledged by %d callers, want exactly 1", round, r.ID, won[r.ID])
+					if won[r.ID] != want {
+						t.Errorf("round %d: job %d was applied for %d callers, want %d", round, r.ID, won[r.ID], want)
 					}
 				}
 				if t.Failed() {
@@ -302,10 +305,32 @@ func testOppositeOrderAck(t *testing.T, allowed []job.Outcome, ack func(ctx cont
 	}
 }
 
+// Calls that name the same jobs in opposite orders must not deadlock. The
+// statements of an acknowledgement call lock the rows they change in ascending
+// id, whatever the order of the request and of the plan, so that every call
+// takes the row locks in the same order. Without that, calls fail with a
+// deadlock. The statements are run under each of planShapes, and the callers
+// are held at the same moment, as testOppositeOrderAck describes. Heartbeats
+// leave the lease in place, so every caller finds every job applied.
+func TestPGOppositeOrderHeartbeatsDoNotDeadlock(t *testing.T) {
+	testOppositeOrderAck(t, []job.Outcome{job.Applied}, false,
+		func(ctx context.Context, pg *pgstore.Store, refs []store.Ref) ([]job.Outcome, error) {
+			res, err := pg.Heartbeat(ctx, refs, time.Minute)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]job.Outcome, len(res))
+			for i, r := range res {
+				out[i] = r.Outcome
+			}
+			return out, nil
+		})
+}
+
 // Completions that name the same jobs in opposite orders must not deadlock; see
 // TestPGOppositeOrderHeartbeatsDoNotDeadlock.
 func TestPGOppositeOrderCompletesDoNotDeadlock(t *testing.T) {
-	testOppositeOrderAck(t, []job.Outcome{job.Applied, job.Duplicate, job.Fenced},
+	testOppositeOrderAck(t, []job.Outcome{job.Applied, job.Duplicate, job.Fenced}, true,
 		func(ctx context.Context, pg *pgstore.Store, refs []store.Ref) ([]job.Outcome, error) {
 			reqs := make([]store.CompleteRequest, len(refs))
 			for i, r := range refs {
@@ -319,7 +344,7 @@ func TestPGOppositeOrderCompletesDoNotDeadlock(t *testing.T) {
 // are permanent, so that the job ends and does not come back for another try;
 // see TestPGOppositeOrderHeartbeatsDoNotDeadlock.
 func TestPGOppositeOrderFailsDoNotDeadlock(t *testing.T) {
-	testOppositeOrderAck(t, []job.Outcome{job.Applied, job.Fenced},
+	testOppositeOrderAck(t, []job.Outcome{job.Applied, job.Fenced}, true,
 		func(ctx context.Context, pg *pgstore.Store, refs []store.Ref) ([]job.Outcome, error) {
 			reqs := make([]store.FailRequest, len(refs))
 			for i, r := range refs {
@@ -332,7 +357,7 @@ func TestPGOppositeOrderFailsDoNotDeadlock(t *testing.T) {
 // Releases that name the same jobs in opposite orders must not deadlock; see
 // TestPGOppositeOrderHeartbeatsDoNotDeadlock.
 func TestPGOppositeOrderReleasesDoNotDeadlock(t *testing.T) {
-	testOppositeOrderAck(t, []job.Outcome{job.Applied, job.Fenced},
+	testOppositeOrderAck(t, []job.Outcome{job.Applied, job.Fenced}, true,
 		func(ctx context.Context, pg *pgstore.Store, refs []store.Ref) ([]job.Outcome, error) {
 			return pg.Release(ctx, refs)
 		})
