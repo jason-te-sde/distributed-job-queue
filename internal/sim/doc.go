@@ -19,8 +19,11 @@
 // WorkerNode, which run the real dispatch, fair and lease cores and carry out
 // the effects they return; Producer, a client that retries an enqueue by its
 // idempotency key; Sink, the fenced downstream that a handler writes to; and
-// ScheduleFaults, which crashes, stalls and partitions them. Nodes talk only
-// through Network.Send, and each measures time on its own Clock.
+// ScheduleFaults, which crashes, stalls and partitions them. Workers,
+// producers and brokers talk to each other through Network.Send, which a
+// partition can cut. A broker reaches the store through StoreNode.Call, which
+// a partition does not affect; the store has outages of its own. Each node
+// measures time on its own Clock.
 //
 // Checker is the oracle. A run feeds it every row change of the store, every
 // confirmation and cancel a client hears, and every worker's view of its

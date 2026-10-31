@@ -105,11 +105,15 @@ type WorkerNode struct {
 }
 
 // NewWorkerNode starts a worker. Its tracker is seeded with seed, as is its
-// handlers' random stream. It panics if the queue is not a valid name, there
-// is no broker, the clock does not run or the lease config is invalid.
+// handlers' random stream. It panics if the queue is not a valid name, the ID
+// is not a valid worker id (the store records it on every lease), there is no
+// broker, the clock does not run or the lease config is invalid.
 func NewWorkerNode(w *World, net *Network, sink *Sink, cfg WorkerConfig, seed uint64) *WorkerNode {
 	if err := job.ValidateName("queue", cfg.Queue); err != nil {
 		panic("sim: NewWorkerNode called with a bad Queue: " + err.Error())
+	}
+	if err := job.ValidateWorkerID(string(cfg.ID)); err != nil {
+		panic("sim: NewWorkerNode called with a bad ID: " + err.Error())
 	}
 	if len(cfg.Brokers) == 0 {
 		panic("sim: NewWorkerNode called with no Brokers")
@@ -156,9 +160,12 @@ func (wk *WorkerNode) Crash() {
 }
 
 // Restart brings the worker back under a new id with a fresh tracker seeded
-// with seed and no memory of its leases. A worker that is running is crashed
-// first.
+// with seed and no memory of its leases. It panics if the new id is not a
+// valid worker id. A worker that is running is crashed first.
 func (wk *WorkerNode) Restart(newID NodeID, seed uint64) {
+	if err := job.ValidateWorkerID(string(newID)); err != nil {
+		panic("sim: WorkerNode.Restart called with a bad ID: " + err.Error())
+	}
 	if wk.up {
 		wk.Crash()
 	}

@@ -64,3 +64,37 @@ func TestBrokerReleasesJobsFetchedForAClientThatLeft(t *testing.T) {
 		t.Errorf("get: %v (store.ErrNotFound is %v)", err, store.ErrNotFound)
 	}
 }
+
+// TestBrokerAnswersADrainedPollWithNoJobsAndARejectedOneWithAnError checks
+// the two ways the core ends a poll without jobs on a drain: a parked waiter
+// is told there is nothing, as when its wait runs out, and a request that
+// arrives afterwards is refused with an error.
+func TestBrokerAnswersADrainedPollWithNoJobsAndARejectedOneWithAnError(t *testing.T) {
+	w := NewWorld(8)
+	net := NewNetwork(w, NetConfig{Latency: [2]time.Duration{time.Millisecond, time.Millisecond}})
+	st := NewStoreNode(w)
+	b := NewBrokerNode(w, net, st, BrokerConfig{ID: "b1", Clock: Clock{Rate: 1}})
+	var parked, refused []leaseResp
+	run := func(until time.Duration) {
+		for w.Now < until {
+			w.Step()
+		}
+	}
+	b.handleLeaseReq(leaseReq{from: "w1", seq: 1, queue: "q", max: 4, wait: time.Minute, ttl: 30 * time.Second,
+		reply: func(r leaseResp) { parked = append(parked, r) }})
+	run(time.Second) // the fetch finds nothing and the waiter stays parked
+	if len(parked) != 0 {
+		t.Fatalf("the poll was answered after 1s: %+v", parked)
+	}
+	b.apply(b.core.Drain(b.mono()))
+	b.handleLeaseReq(leaseReq{from: "w2", seq: 2, queue: "q", max: 4, wait: time.Minute, ttl: 30 * time.Second,
+		reply: func(r leaseResp) { refused = append(refused, r) }})
+	run(2 * time.Second)
+
+	if len(parked) != 1 || parked[0].err != nil || len(parked[0].grants) != 0 || parked[0].seq != 1 {
+		t.Errorf("the drained poll got %+v, want one empty answer without an error", parked)
+	}
+	if len(refused) != 1 || refused[0].err == nil || refused[0].seq != 2 {
+		t.Errorf("the request after the drain got %+v, want one error reply", refused)
+	}
+}

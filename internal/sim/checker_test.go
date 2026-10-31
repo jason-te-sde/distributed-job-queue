@@ -86,6 +86,11 @@ func TestCheckerAlarms(t *testing.T) {
 			ch.Op = memstore.OpPurge
 			return c.Change(ch)
 		}},
+		{"S1 a dead row pruned between the two retentions", "S1", 29, func(t *testing.T, c *sim.Checker, _ *sim.Sink) error {
+			// Done is 2m and Dead is 5m: a dead row finished 3m ago is not
+			// old enough, though a succeeded one would be.
+			return c.Change(prune(finished(job.StateDead, 29, 0), 3*time.Minute))
+		}},
 		{"S1 a confirmed job is gone and was not pruned", "S1", 3, func(t *testing.T, c *sim.Checker, _ *sim.Sink) error {
 			must(t, c.Confirmed("k", 3))
 			return c.Final(nil, at(time.Hour))

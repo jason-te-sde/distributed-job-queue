@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -585,6 +586,153 @@ func TestNotifyWakesLongPollAndDropFallsBackToPoll(t *testing.T) {
 	}
 }
 
+func TestDroppedNotificationsStillBringTheSmallTenantIntoTheRing(t *testing.T) {
+	r := newRig(t, 171)
+	// Every notification is lost. Tenant A's flood is under way with only A in
+	// the ring when tenant B's jobs arrive, so the periodic refresh is the
+	// only thing that can add B before A runs dry.
+	r.addBroker("b1", func(c *sim.BrokerConfig) { c.NotifyDropP = 1 })
+	r.addWorker("w1", func(c *sim.WorkerConfig) {
+		c.Lease.Concurrency = 8
+		c.Handler = sim.HandlerModel{Duration: [2]time.Duration{300 * time.Millisecond, 300 * time.Millisecond}}
+	})
+	r.producer("pa", func(c *sim.ProducerConfig) { c.Jobs, c.Tenants = 300, []string{"A"} }, nil, nil)
+	r.w.At(time.Second, "tenant B arrives", func() {
+		r.producer("pb", func(c *sim.ProducerConfig) { c.Jobs, c.Tenants = 5, []string{"B"} }, nil, nil)
+	})
+
+	if !r.runUntil(2*time.Minute, func() bool { return len(r.changesOf(memstore.OpLease)) >= 120 }) {
+		t.Fatalf("only %d leases by %v", len(r.changesOf(memstore.OpLease)), r.w.Now)
+	}
+	aLeases, bLeases, aBeforeLastB := 0, 0, 0
+	for _, ch := range r.changesOf(memstore.OpLease) {
+		switch ch.After.Tenant {
+		case "A":
+			aLeases++
+		case "B":
+			bLeases++
+			aBeforeLastB = aLeases
+		}
+	}
+	if bLeases != 5 {
+		t.Fatalf("%d of tenant B's 5 jobs were leased among the first %d leases, want all", bLeases, aLeases+bLeases)
+	}
+	if aBeforeLastB >= 100 {
+		t.Errorf("tenant B's last job started after %d of tenant A's jobs, want before A's 100th", aBeforeLastB)
+	}
+	if drops := r.brokers[0].Stats().NotifyDrops; drops == 0 {
+		t.Error("no notification was dropped, so the refresh was not what added tenant B")
+	}
+}
+
+func TestHeartbeatExtendedDeadlineIsAnchoredAtTheSend(t *testing.T) {
+	r := newRig(t, 181)
+	r.addBroker("b1", nil)
+	wk := r.addWorker("w1", func(c *sim.WorkerConfig) {
+		c.Clock = sim.Clock{Offset: 5 * time.Hour, Rate: 1 - 1e-4}
+		c.Lease.Concurrency = 1
+		c.Handler = sim.HandlerModel{Duration: [2]time.Duration{40 * time.Second, 40 * time.Second}}
+	})
+	r.producer("p1", nil, nil, nil)
+
+	if !r.runUntil(time.Minute, func() bool { return len(r.changesOf(memstore.OpHeartbeat)) >= 1 }) {
+		t.Fatalf("no heartbeat reached the store by %v", r.w.Now)
+	}
+	r.runFor(100 * time.Millisecond) // the answer gets back to the worker
+	hb := r.changesOf(memstore.OpHeartbeat)[0]
+	holds := wk.Holds()
+	if len(holds) != 1 {
+		t.Fatalf("the worker holds %v after a heartbeat, want its one lease", holds)
+	}
+	// The extended deadline is the send time plus the 30s the store granted,
+	// less the margin. It is later than the grant's, which is 7.5s older, so
+	// it is the heartbeat that set it. The store saw the request a few
+	// milliseconds after the worker sent it, so the deadline is that much
+	// before the expiry less the margin, give or take the 100ppm slow clock.
+	const drift = 3 * time.Millisecond
+	slack := hb.After.LeaseExpiresAt.Add(-testMargin).Sub(holds[0].Deadline)
+	if slack < -drift || slack > 50*time.Millisecond {
+		t.Errorf("the deadline is %v before expiry-margin, want between %v and 50ms: it is anchored at the send, not earlier or later", slack, -drift)
+	}
+}
+
+func TestStoreNodePanicsWhenAnObserverWrites(t *testing.T) {
+	w := sim.NewWorld(43)
+	var st *sim.StoreNode
+	wrote := false
+	st = sim.NewStoreNode(w, func(memstore.Change) {
+		if wrote {
+			return
+		}
+		wrote = true
+		// A write from an observer: it would queue a change behind the ones
+		// being delivered.
+		_, _ = st.Mem().Enqueue(context.Background(), []job.Spec{{Queue: "q", Tenant: "t"}})
+	})
+	st.Call("enqueue", func(s store.Store) error {
+		_, err := s.Enqueue(context.Background(), []job.Spec{{Queue: "q", Tenant: "t"}})
+		return err
+	}, nil)
+	msg := mustPanic(t, func() {
+		for w.Step() {
+		}
+	})
+	if !strings.Contains(msg, "observers must not write") {
+		t.Errorf("panic = %q, want it to name the rule that observers must not write", msg)
+	}
+}
+
+func TestWorkerNodeRejectsBadIDs(t *testing.T) {
+	w := sim.NewWorld(44)
+	net := sim.NewNetwork(w, sim.NetConfig{})
+	cfg := sim.WorkerConfig{ID: "w1", Queue: testQueue, Clock: sim.Clock{Rate: 1}, Brokers: []sim.NodeID{"b1"}}
+	for _, id := range []sim.NodeID{"", "has space", "caf\u00e9", sim.NodeID(strings.Repeat("a", 129))} {
+		cfg.ID = id
+		msg := mustPanic(t, func() { sim.NewWorkerNode(w, net, sim.NewSink(), cfg, 1) })
+		if !strings.Contains(msg, "bad ID") {
+			t.Errorf("NewWorkerNode with ID %q panicked with %q, want it to name the bad ID", id, msg)
+		}
+	}
+	cfg.ID = "w1"
+	wk := sim.NewWorkerNode(w, net, sim.NewSink(), cfg, 1)
+	msg := mustPanic(t, func() { wk.Restart("bad id", 2) })
+	if !strings.Contains(msg, "Restart") || !strings.Contains(msg, "bad ID") {
+		t.Errorf("Restart with a bad id panicked with %q, want it to name Restart and the bad ID", msg)
+	}
+	if wk.ID() != "w1" {
+		t.Errorf("a refused Restart changed the id to %q", wk.ID())
+	}
+}
+
+func TestRefreshWakesAQueueWhoseKnownEmptyIsStale(t *testing.T) {
+	r := newRig(t, 191)
+	// The worker's first fetch finds the ring empty and the queue empty, so
+	// the dispatch core marks the queue known empty. A job is then enqueued
+	// with a delay far shorter than the refresh interval: it sends no
+	// notification, and it is already due when the next refresh looks, so no
+	// due-time wakeup is set either. The poll is 30s away. Only the refresh
+	// finding due work can wake the parked waiter.
+	r.addBroker("b1", func(c *sim.BrokerConfig) {
+		c.PollInterval = 30 * time.Second
+		c.ActivityInterval = 2 * time.Second
+	})
+	r.addWorker("w1", func(c *sim.WorkerConfig) { c.Lease.LongPoll = 20 * time.Second })
+	r.w.At(5*time.Second, "enqueue a delayed job", func() {
+		r.st.Call("enqueue", func(s store.Store) error {
+			_, err := s.Enqueue(context.Background(), []job.Spec{{Queue: testQueue, Tenant: "t1", Delay: 20 * time.Millisecond}})
+			return err
+		}, nil)
+	})
+
+	if !r.runUntil(time.Minute, func() bool { return len(r.changesOf(memstore.OpLease)) == 1 }) {
+		t.Fatalf("the job was not leased by %v", r.w.Now)
+	}
+	leased := r.changesOf(memstore.OpLease)[0]
+	if late := leased.Now.Sub(leased.Before.RunAt); late > 3*time.Second {
+		t.Errorf("the job was leased %v after it fell due, want the next activity refresh (2s) to wake the queue, not the 30s poll", late)
+	}
+}
+
 func TestWorkerCrashDropsHandlersAndRestartRejoins(t *testing.T) {
 	r := newRig(t, 101)
 	r.addBroker("b1", nil)
@@ -778,13 +926,13 @@ func TestFaultsFireAndTheClusterRecovers(t *testing.T) {
 		Latency: [2]time.Duration{time.Millisecond, 4 * time.Millisecond},
 		TailP:   0.01, Tail: [2]time.Duration{100 * time.Millisecond, 4 * time.Second},
 	})
-	// Every node's clock starts somewhere else and drifts at the edge of what
-	// the checker tolerates, so that a wakeup computed on one clock lands
-	// on the right instant of another.
+	// Every node's clock starts somewhere else and runs up to 100ppm fast or
+	// slow, as far as the checker's tolerance allows, so that a wakeup
+	// computed on one clock lands on the right instant of another.
 	for i, id := range []string{"b1", "b2"} {
 		r.addBroker(id, func(c *sim.BrokerConfig) {
 			c.NotifyDropP = 0.2
-			c.Clock = sim.Clock{Offset: time.Duration(i+1) * 3 * time.Hour, Rate: 1 - 1e-4*float64(i+1)}
+			c.Clock = sim.Clock{Offset: time.Duration(i+1) * 3 * time.Hour, Rate: 1 + 1e-4*float64(1-2*i)}
 		})
 	}
 	for i, id := range []string{"w1", "w2", "w3"} {

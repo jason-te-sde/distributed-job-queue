@@ -528,13 +528,14 @@ func (b *BrokerNode) deliver(id dispatch.WaiterID) {
 }
 
 // respond answers a waiter with no jobs: an empty answer when its wait ran
-// out, an error for any other reason.
+// out or the broker is draining, which ends the poll without error, and an
+// error when the request was rejected or the fetch failed.
 func (b *BrokerNode) respond(e dispatch.Respond) {
 	rec := b.waiter(e.Waiter)
 	resp := leaseResp{seq: rec.req.seq}
 	switch e.Reason {
-	case dispatch.ReasonTimeout:
-	case dispatch.ReasonDraining, dispatch.ReasonRejected, dispatch.ReasonUnavailable:
+	case dispatch.ReasonTimeout, dispatch.ReasonDraining:
+	case dispatch.ReasonRejected, dispatch.ReasonUnavailable:
 		resp.err = fmt.Errorf("sim broker %s: lease request answered %v", b.cfg.ID, e.Reason)
 	}
 	reply := rec.req.reply
@@ -814,15 +815,18 @@ func (b *BrokerNode) prune() {
 	}, func(error) {})
 }
 
-// refreshActivity re-reads which tenants have work on every queue that has a
-// waiter parked, so that a tenant whose notification was lost joins the ring.
-// A queue that has work gets a wakeup too, since a waiter should not be
-// parked beside due jobs.
+// refreshActivity re-reads which tenants have work on every queue that a
+// worker has asked this broker for, so that a tenant whose notification was
+// lost joins the ring, and when the next scheduled job falls due. It does not
+// skip a queue that has no waiter parked: under a flood the waiters are
+// mostly busy fetching, and that is when a lost notification would starve a
+// small tenant. A queue that has tenants with work is woken, because the
+// dispatch core may hold "known empty" from a fetch that ran while the ring
+// was empty, and a refresh that finds due work is the signal that this is
+// stale (a delayed job that fell due, a lost notification). The wakeup is
+// one fetch at most, and none if the core finds no waiter to serve.
 func (b *BrokerNode) refreshActivity() {
 	for _, queue := range slices.Sorted(maps.Keys(b.queues)) {
-		if b.core.Waiting(queue) == 0 {
-			continue
-		}
 		var act store.Activity
 		b.call("activity", func(s store.Store) (err error) {
 			act, err = s.Activity(context.Background(), queue)
