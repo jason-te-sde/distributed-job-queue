@@ -14,6 +14,22 @@
 // sim-determinism rule rejects a go statement and the time package's clock
 // functions anywhere under internal/sim.
 //
+// On top of the kernel sit the actors of a simulated cluster: StoreNode, a
+// memstore behind calls that take virtual time and can fail; BrokerNode and
+// WorkerNode, which run the real dispatch, fair and lease cores and carry out
+// the effects they return; Producer, a client that retries an enqueue by its
+// idempotency key; Sink, the fenced downstream that a handler writes to; and
+// ScheduleFaults, which crashes, stalls and partitions them. Workers,
+// producers and brokers talk to each other through Network.Send, which a
+// partition can cut. A broker reaches the store through StoreNode.Call, which
+// a partition does not affect; the store has outages of its own. Each node
+// measures time on its own Clock.
+//
+// Checker is the oracle. A run feeds it every row change of the store, every
+// confirmation and cancel a client hears, and every worker's view of its
+// leases after each event; it names the first invariant that breaks, S1 to S8
+// while the faults run and L1 and L2 once the system has healed.
+//
 // Epoch is the wall-clock instant that virtual time zero stands for when a
 // simulated database needs a timestamp; see World.StoreTime.
 package sim
