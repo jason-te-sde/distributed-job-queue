@@ -141,6 +141,61 @@ jobs:
           path: pg.json
           if-no-files-found: ignore
 
+  # The benchmark module is separate from the root module, so the jobs above never
+  # build it. This job vets and tests it, and runs the throughput experiment for ten
+  # seconds against a real database, which is what makes the harness fail in CI
+  # when the broker or the SDK changes under it. The numbers it prints are a
+  # regression smoke only and are never quoted anywhere.
+  bench-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 2s
+          --health-retries 30
+        ports:
+          - 5432:5432
+    env:
+      JOBQUEUE_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+      JOBQUEUE_TEST_DSN: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+    defaults:
+      run:
+        working-directory: bench
+    steps:
+      - uses: actions/checkout@v7
+      # The floor of the Go versions the module supports (bench/go.mod says 1.26.0),
+      # which the other jobs reach only through the root module.
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.26.x
+          cache-dependency-path: bench/go.sum
+      # The root configuration, with the version the lint job runs. The build tags
+      # that the pg tests need are listed in that configuration.
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
+          working-directory: bench
+          args: --config ../.golangci.yml
+      - name: go vet
+        run: go vet ./... && go vet -tags pg ./...
+      - name: go test -race
+        run: go test -race ./...
+      # The tests that need the database and whose assertions do not depend on how
+      # fast the runner is. The ones that compare latencies (the noisy neighbour,
+      # NOTIFY against polling, recovery) run on a developer machine with
+      # JOBQUEUE_TEST_DSN and -tags pg. One package at a time (-p 1): the runner
+      # has two cores, and each test starts brokers, workers and a producer in one
+      # process against the one database.
+      - name: go test -tags pg (deterministic subset)
+        run: go test -race -count=1 -p 1 -tags pg -run 'TestPG(Cluster|StartWorkers|CaptureEnv|Throughput|Soak|River)' ./...
+      - name: Throughput smoke run
+        run: go run ./cmd/jobqueue-bench throughput --duration 10s --rate 200
+
   hygiene:
     runs-on: ubuntu-24.04
     timeout-minutes: 5

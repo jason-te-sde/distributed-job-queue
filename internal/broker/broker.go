@@ -63,7 +63,7 @@ type Broker struct {
 	metrics    *Metrics
 	server     *Server
 	dispatcher *Dispatcher
-	listener   *Listener
+	listener   *Listener // nil when Config.DisableListen is set
 	health     *Health
 
 	grpcServer *grpc.Server
@@ -149,7 +149,9 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*Broker, error) {
 		MaxInFlight: cfg.MaxInFlight, PollInterval: cfg.PollInterval, ActivityInterval: cfg.ActivityInterval,
 	}, b.metrics, log)
 	b.server = NewServer(b.st, b.dispatcher, b.metrics, log, b.seed)
-	b.listener = NewListener(cfg.DatabaseURL, b.dispatcher, b.metrics, log)
+	if !cfg.DisableListen {
+		b.listener = NewListener(cfg.DatabaseURL, b.dispatcher, b.metrics, log)
+	}
 
 	opts := []grpc.ServerOption{
 		grpc.ChainUnaryInterceptor(UnaryAuth(auth)),
@@ -259,7 +261,9 @@ func (b *Broker) Run(ctx context.Context) error {
 		return nil
 	})
 	start("dispatcher", func() error { return b.dispatcher.Run(bg) })
-	start("notify listener", func() error { return b.listener.Run(bg) })
+	if b.listener != nil { // nil under DisableListen, which leaves only the fallback poll
+		start("notify listener", func() error { return b.listener.Run(bg) })
+	}
 	start("reaper", func() error {
 		RunReaper(bg, b.st, cfg.ReapInterval, cfg.ReapBatch, b.seed, b.metrics, b.log)
 		return nil

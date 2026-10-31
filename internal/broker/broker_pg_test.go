@@ -227,6 +227,96 @@ func TestPGBrokerRefusesSchemaMismatch(t *testing.T) {
 	}
 }
 
+// listenerSessions counts the sessions that the notify listener holds open on
+// the database of pool.
+func listenerSessions(t *testing.T, pool *pgxpool.Pool) int {
+	t.Helper()
+	var n int
+	err := pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND application_name = $1`,
+		listenerAppName).Scan(&n)
+	if err != nil {
+		t.Fatalf("count the listener sessions: %v", err)
+	}
+	return n
+}
+
+func TestPGDisableListenSkipsTheListener(t *testing.T) {
+	// The control: by default the broker listens, so the query below does see
+	// a listener session when there is one.
+	pool := pgtest.NewDB(t)
+	on := startBroker(t, pool, nil)
+	if on.b.listener == nil {
+		t.Fatal("the default broker has no listener")
+	}
+	waitFor(t, "the default broker to LISTEN", 10*time.Second, func() bool { return listenerSessions(t, pool) == 1 })
+
+	// With --disable-listen the broker serves and finds work by polling only.
+	pool = pgtest.NewDB(t)
+	off := startBroker(t, pool, func(c *Config) { c.DisableListen = true })
+	off.waitReady()
+	if off.b.listener != nil {
+		t.Error("a broker with DisableListen built a listener")
+	}
+	if _, err := off.client.Lease(t.Context(), &jobqueuev1.LeaseRequest{
+		Queue: "q", MaxJobs: 1, Ttl: durationpb.New(30 * time.Second), Wait: durationpb.New(0), WorkerId: "w",
+	}); err != nil {
+		t.Fatalf("a Lease on a broker without a listener: %v", err)
+	}
+	if n := listenerSessions(t, pool); n != 0 {
+		t.Errorf("a broker with DisableListen holds %d listener sessions, want 0", n)
+	}
+}
+
+func TestPGDisableListenBrokerDeliversToAParkedLease(t *testing.T) {
+	// Without the listener nothing announces a new job, so a Lease that is
+	// already waiting finds it by the dispatcher's own timers alone: the fallback
+	// poll and the periodic read of which tenants have work. Both are set short.
+	const poll = 200 * time.Millisecond
+	pool := pgtest.NewDB(t)
+	rb := startBroker(t, pool, func(c *Config) {
+		c.DisableListen = true
+		c.PollInterval, c.ActivityInterval = poll, poll
+	})
+	rb.waitReady()
+
+	type answer struct {
+		resp *jobqueuev1.LeaseResponse
+		err  error
+	}
+	got := make(chan answer, 1)
+	go func() {
+		resp, err := rb.client.Lease(t.Context(), &jobqueuev1.LeaseRequest{
+			Queue: "q", MaxJobs: 1, Ttl: durationpb.New(30 * time.Second), Wait: durationpb.New(10 * time.Second), WorkerId: "w",
+		})
+		got <- answer{resp, err}
+	}()
+	rb.waitSeries(`jobqueue_waiters{queue="q"}`, 1) // the Lease is parked, so the job below arrives while it waits
+
+	enq, err := rb.client.Enqueue(t.Context(), &jobqueuev1.EnqueueRequest{Items: []*jobqueuev1.EnqueueItem{{Queue: "q", Tenant: "t", Payload: []byte("p")}}})
+	if err != nil || len(enq.GetResults()) != 1 {
+		t.Fatalf("Enqueue = %v, %v", enq, err)
+	}
+	enqueued := time.Now()
+
+	select {
+	case a := <-got:
+		if a.err != nil || len(a.resp.GetJobs()) != 1 || a.resp.GetJobs()[0].GetId() != enq.GetResults()[0].GetId() {
+			t.Fatalf("Lease = %v, %v; want the enqueued job, found without a notification", a.resp, a.err)
+		}
+		// An interval and a generous slack. The Lease itself would have waited ten
+		// seconds and answered empty if neither timer found the job.
+		if took := time.Since(enqueued); took > poll+3*time.Second {
+			t.Errorf("the job reached the parked Lease %v after the enqueue, want about one interval (%v)", took, poll)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the parked Lease was not answered within 15s")
+	}
+	if n := listenerSessions(t, pool); n != 0 {
+		t.Errorf("%d listener sessions on a broker with DisableListen, want 0: the job must have come by the timers", n)
+	}
+}
+
 func TestPGBrokerServesAndReportsItself(t *testing.T) {
 	rb := startBroker(t, pgtest.NewDB(t), nil)
 	rb.b.SetVersion("v9.9.9")
