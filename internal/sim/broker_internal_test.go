@@ -9,6 +9,17 @@ import (
 	"github.com/jason-te-sde/distributed-job-queue/internal/store/memstore"
 )
 
+// runTo fires events until virtual time reaches until. It fails the test if
+// the queue empties first, instead of looping on a world with nothing to do.
+func runTo(t *testing.T, w *World, until time.Duration) {
+	t.Helper()
+	for w.Now < until {
+		if !w.Step() {
+			t.Fatalf("the queue emptied at %v, before virtual time reached %v", w.Now, until)
+		}
+	}
+}
+
 // TestBrokerReleasesJobsFetchedForAClientThatLeft cancels a long-poll request
 // while the broker's fetch for it is in flight, after the store has leased
 // the job and before the broker has the answer. The job must go back to the
@@ -30,14 +41,10 @@ func TestBrokerReleasesJobsFetchedForAClientThatLeft(t *testing.T) {
 	replies := 0
 	b.handleEnqueue(enqueueReq{from: "p1", spec: job.Spec{Queue: "q", Tenant: "t"}, reply: func(enqueueResp) {}})
 	// Let the job be committed before the worker asks.
-	for w.Now < time.Second {
-		w.Step()
-	}
+	runTo(t, w, time.Second)
 	b.handleLeaseReq(leaseReq{from: "w1", seq: 1, queue: "q", max: 4, wait: 5 * time.Second, ttl: 30 * time.Second,
 		reply: func(leaseResp) { replies++ }})
-	for w.Now < 20*time.Second {
-		w.Step()
-	}
+	runTo(t, w, 20*time.Second)
 
 	if !cancelled {
 		t.Fatal("the store never leased the job, so the cancel did not race the fetch")
@@ -75,11 +82,7 @@ func TestBrokerAnswersADrainedPollWithNoJobsAndARejectedOneWithAnError(t *testin
 	st := NewStoreNode(w)
 	b := NewBrokerNode(w, net, st, BrokerConfig{ID: "b1", Clock: Clock{Rate: 1}})
 	var parked, refused []leaseResp
-	run := func(until time.Duration) {
-		for w.Now < until {
-			w.Step()
-		}
-	}
+	run := func(until time.Duration) { runTo(t, w, until) }
 	b.handleLeaseReq(leaseReq{from: "w1", seq: 1, queue: "q", max: 4, wait: time.Minute, ttl: 30 * time.Second,
 		reply: func(r leaseResp) { parked = append(parked, r) }})
 	run(time.Second) // the fetch finds nothing and the waiter stays parked

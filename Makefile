@@ -25,9 +25,11 @@ test:
 # their own and with a longer timeout than the default. It runs 500 seeds from
 # seed 1; JOBQUEUE_SIM_SEEDS and JOBQUEUE_SIM_SEED_START change that, and the
 # nightly run sets 20000. A failing seed leaves internal/sim/testdata/failures/
-# seed-<n>.txt with the command that replays it.
+# seed-<n>.txt with the command that replays it. The timeout is 30m unless
+# SIM_TIMEOUT says otherwise, which the nightly run does.
+SIM_TIMEOUT ?= 30m
 sim:
-	$(GO) test -race -count=1 -timeout 30m -run 'TestSim' ./internal/sim/
+	$(GO) test -race -count=1 -timeout $(SIM_TIMEOUT) -run 'TestSim' ./internal/sim/
 
 # Tests that need a live PostgreSQL, selected by the pg build tag. The run is
 # recorded as JSON in pg.json and then counted: a test that silently stops

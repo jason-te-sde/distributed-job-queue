@@ -1,6 +1,7 @@
 package sim
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -51,5 +52,56 @@ func TestRunFailsWhenTheProducerCannotConfirmItsJobs(t *testing.T) {
 	_, err := Run(cfg)
 	if err == nil || !strings.Contains(err.Error(), "seed 13") || !strings.Contains(err.Error(), "producer got") {
 		t.Errorf("err = %v, want an error that names the seed and the producer's confirmations", err)
+	}
+}
+
+// overstrictSimulation is a simulation whose checker holds the workers to
+// twice their margin, so that the first lease a worker holds breaks S5, and
+// nothing else in the run does.
+func overstrictSimulation(cfg Config) *simulation {
+	s := newSimulation(cfg)
+	s.checker = NewChecker(CheckerConfig{
+		Margin: 2 * cfg.Margin, MaxTTL: cfg.TTL, MaxLongPoll: runLongPoll, MaxDriftPPM: maxClockDriftPPM,
+		Retention: cfg.Retention, ReapInterval: runReapInterval,
+	}, s.sink)
+	return s
+}
+
+// TestRunChecksWhatWorkersHoldAfterEveryEvent steps a simulation, event by
+// event, and needs the hold check inside step to raise S5. It stops at the
+// end of the fault phase, so that a step that checks nothing fails the test
+// rather than running forever.
+func TestRunChecksWhatWorkersHoldAfterEveryEvent(t *testing.T) {
+	cfg := DefaultConfig(3)
+	s := overstrictSimulation(cfg)
+	for s.violation == nil && s.w.Now < cfg.Faults.Phase && s.step() {
+	}
+	var v *Violation
+	if !errors.As(s.violation, &v) || v.Invariant != "S5" {
+		t.Fatalf("violation = %v at %v, want S5 from the hold check of step", s.violation, s.w.Now)
+	}
+}
+
+// TestRunStopsAtTheFirstViolation runs the same simulation twice. Stepping it
+// by hand counts the events up to and including the one that breaks S5;
+// execute must fire exactly those and no more, and return the violation.
+func TestRunStopsAtTheFirstViolation(t *testing.T) {
+	cfg := DefaultConfig(3)
+	counted := overstrictSimulation(cfg)
+	events := 0
+	for counted.violation == nil && counted.w.Now < cfg.Faults.Phase && counted.step() {
+		events++
+	}
+	if counted.violation == nil {
+		t.Fatal("the counting run found no violation")
+	}
+
+	stats, err := overstrictSimulation(cfg).execute()
+	var v *Violation
+	if !errors.As(err, &v) || v.Invariant != "S5" {
+		t.Fatalf("execute returned %v, want the S5 violation", err)
+	}
+	if stats.Events != events {
+		t.Errorf("execute fired %d events, want the %d up to the violation: a violation must stop the run", stats.Events, events)
 	}
 }

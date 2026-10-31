@@ -1,9 +1,11 @@
 package sim_test
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +30,17 @@ func envInt(t *testing.T, name string, def int) int {
 	return n
 }
 
+// minRoughSeeds is the fewest seeds that the roughness requirement is applied
+// to. A run of one seed, as a replay is, cannot be expected to have every
+// kind of fault in it.
+const minRoughSeeds = 100
+
+// reproduce is the command that runs exactly one seed of TestSimSeeds, for
+// any seed, and counts as a pass when the seed passes.
+func reproduce(seed int) string {
+	return fmt.Sprintf("JOBQUEUE_SIM_SEEDS=1 JOBQUEUE_SIM_SEED_START=%d go test ./internal/sim -run 'TestSimSeeds'", seed)
+}
+
 // writeFailure leaves a file that a person can start from: the config, the
 // error and the command that replays the seed.
 func writeFailure(t *testing.T, seed int, cfg sim.Config, err error) {
@@ -37,7 +50,7 @@ func writeFailure(t *testing.T, seed int, cfg sim.Config, err error) {
 		t.Logf("cannot write the failure file: %v", mkErr)
 		return
 	}
-	body := fmt.Sprintf("seed %d\n\nconfig:\n%+v\n\nerror:\n%v\n\nreproduce:\ngo test ./internal/sim -run 'TestSimSeeds/seeds/%d$'\n", seed, cfg, err, seed)
+	body := fmt.Sprintf("seed %d\n\nconfig:\n%+v\n\nerror:\n%v\n\nreproduce:\n%s\n", seed, cfg, err, reproduce(seed))
 	path := filepath.Join(dir, "seed-"+strconv.Itoa(seed)+".txt")
 	if wErr := os.WriteFile(path, []byte(body), 0o644); wErr != nil {
 		t.Logf("cannot write %s: %v", path, wErr)
@@ -132,16 +145,80 @@ func TestRunReportsAPanicAsAnErrorNamingTheSeed(t *testing.T) {
 }
 
 func TestSimDeterministic(t *testing.T) {
-	a, errA := sim.Run(sim.DefaultConfig(8123))
-	b, errB := sim.Run(sim.DefaultConfig(8123))
-	if errA != nil || errB != nil {
-		t.Fatalf("Run failed: %v, %v", errA, errB)
+	// Several seeds, and at least one with more than one broker: the order in
+	// which nodes are built and ticked is where a map iteration would show.
+	seeds := []uint64{8123, 1, 2, 3, 4, 5}
+	multiBroker := false
+	for _, seed := range seeds {
+		multiBroker = multiBroker || sim.DefaultConfig(seed).Brokers >= 2
 	}
-	if a != b {
-		t.Errorf("the same seed gave\n%+v\nand\n%+v", a, b)
+	if !multiBroker {
+		t.Fatalf("none of the seeds %v has two brokers", seeds)
 	}
-	if a.TraceHash == 0 || a.Events == 0 {
-		t.Errorf("stats = %+v, want a run that fired events", a)
+	for _, seed := range seeds {
+		t.Run(strconv.FormatUint(seed, 10), func(t *testing.T) {
+			a, errA := sim.Run(sim.DefaultConfig(seed))
+			b, errB := sim.Run(sim.DefaultConfig(seed))
+			if errA != nil || errB != nil {
+				t.Fatalf("Run failed: %v, %v", errA, errB)
+			}
+			if a != b {
+				t.Errorf("the same seed gave\n%+v\nand\n%+v", a, b)
+			}
+			if a.TraceHash == 0 || a.Events == 0 {
+				t.Errorf("stats = %+v, want a run that fired events", a)
+			}
+		})
+	}
+}
+
+func TestStatsAddCoversEveryField(t *testing.T) {
+	// Every field set to 1 on both sides: after Add each count is 2, so a
+	// field that Add forgets stays at 1. TraceHash is the one field that is
+	// not a count, and Add leaves it alone on purpose.
+	var a, b sim.Stats
+	for _, s := range []*sim.Stats{&a, &b} {
+		v := reflect.ValueOf(s).Elem()
+		for i := range v.NumField() {
+			f := v.Field(i)
+			if f.Kind() == reflect.Int {
+				f.SetInt(1)
+			} else if f.Kind() == reflect.Uint64 {
+				f.SetUint(1)
+			} else {
+				t.Fatalf("Stats.%s has kind %v, which this test does not know how to set", v.Type().Field(i).Name, f.Kind())
+			}
+		}
+	}
+	a.Add(b)
+	v := reflect.ValueOf(a)
+	for i := range v.NumField() {
+		name, f := v.Type().Field(i).Name, v.Field(i)
+		switch {
+		case name == "TraceHash":
+			if f.Uint() != 1 {
+				t.Errorf("Add changed TraceHash to %d, want it left alone", f.Uint())
+			}
+		case f.Int() != 2:
+			t.Errorf("after Add, Stats.%s = %d, want 2: Add does not sum it", name, f.Int())
+		}
+	}
+}
+
+func TestRunChecksTheFinalInvariants(t *testing.T) {
+	// Far more work than one handler per worker can finish in a minute, and
+	// no time to heal: jobs that were confirmed are still waiting at the end,
+	// which only the final check can see.
+	cfg := sim.DefaultConfig(3)
+	cfg.Jobs, cfg.Concurrency = 300, 1
+	cfg.Faults.Phase, cfg.Heal = time.Minute, 0
+	_, err := sim.Run(cfg)
+	var v *sim.Violation
+	if !errors.As(err, &v) || v.Invariant != "L1" {
+		t.Fatalf("err = %v, want a *sim.Violation of L1 inside the error", err)
+	}
+	if !strings.HasPrefix(err.Error(), "seed 3: ") {
+		t.Errorf("err = %q, want it to start with the seed", err.Error())
 	}
 }
 
@@ -149,6 +226,7 @@ func TestSimSeeds(t *testing.T) {
 	n, start := envInt(t, "JOBQUEUE_SIM_SEEDS", 500), envInt(t, "JOBQUEUE_SIM_SEED_START", 1)
 	var mu sync.Mutex
 	var total sim.Stats
+	ran := 0 // the seeds that ran and passed; a -run filter can leave out most of n
 	t.Run("seeds", func(t *testing.T) {
 		for s := start; s < start+n; s++ {
 			t.Run(strconv.Itoa(s), func(t *testing.T) {
@@ -157,10 +235,11 @@ func TestSimSeeds(t *testing.T) {
 				st, err := sim.Run(cfg)
 				if err != nil {
 					writeFailure(t, s, cfg, err)
-					t.Fatalf("%v\nreproduce: go test ./internal/sim -run 'TestSimSeeds/seeds/%d$'", err, s)
+					t.Fatalf("%v\nreproduce: %s", err, reproduce(s))
 				}
 				mu.Lock()
 				total.Add(st)
+				ran++
 				mu.Unlock()
 			})
 		}
@@ -168,7 +247,11 @@ func TestSimSeeds(t *testing.T) {
 	if t.Failed() {
 		return
 	}
-	t.Logf("%d seeds from %d: %+v", n, start, total)
+	t.Logf("%d seeds ran, from %d: %+v", ran, start, total)
+	if ran < minRoughSeeds {
+		t.Logf("fewer than %d seeds ran, so the roughness of the batch is not checked", minRoughSeeds)
+		return
+	}
 	// The batch must have been rough enough to mean something: a system
 	// that is left alone passes every safety check.
 	counters := map[string]int{
@@ -180,7 +263,7 @@ func TestSimSeeds(t *testing.T) {
 	for _, name := range []string{"DuplicateDeliveries", "FencedAcks", "SinkRejections", "Reaps", "Prunes",
 		"WorkerCrashes", "WorkerStalls", "BrokerCrashes", "StoreOutages", "Partitions", "NotifyDrops"} {
 		if counters[name] <= 0 {
-			t.Errorf("the batch of %d seeds from %d had %s = %d, want more than 0, so it was not rough enough", n, start, name, counters[name])
+			t.Errorf("the batch of %d seeds that ran, from %d, had %s = %d, want more than 0, so it was not rough enough", ran, start, name, counters[name])
 		}
 	}
 }
@@ -217,7 +300,7 @@ func TestSimRegressionSeeds(t *testing.T) {
 		t.Run(strconv.FormatUint(seed, 10), func(t *testing.T) {
 			t.Parallel()
 			if _, err := sim.Run(sim.DefaultConfig(seed)); err != nil {
-				t.Fatalf("%v\nreproduce: go test ./internal/sim -run 'TestSimRegressionSeeds/%d$'", err, seed)
+				t.Fatalf("%v\nreproduce: go test ./internal/sim -run 'TestSimRegressionSeeds/^%d$'", err, seed)
 			}
 		})
 	}

@@ -23,6 +23,11 @@ const (
 	// runReapInterval is the period of every broker's reaper, as in
 	// production.
 	runReapInterval = time.Second
+	// configSeedMix is mixed into the seed that DefaultConfig draws from, so
+	// that the config's stream is not the world's stream: NewWorld(seed)
+	// starts from the same generator, and a config drawn from the same one
+	// would be correlated with the choices of the run itself.
+	configSeedMix = 0x6a09e667f3bcc908
 )
 
 // Config describes one simulated run. DefaultConfig draws every field that
@@ -59,9 +64,10 @@ type Config struct {
 }
 
 // DefaultConfig returns the configuration of a seed: every drawn value comes
-// from NewRand(seed), so a seed always means the same run.
+// from NewRand(seed ^ configSeedMix), a stream of its own, so a seed always
+// means the same run.
 func DefaultConfig(seed uint64) Config {
-	r := NewRand(seed)
+	r := NewRand(seed ^ configSeedMix)
 	between := func(lo, hi int) int { return lo + r.IntN(hi-lo+1) }
 	names := func(prefix string, n int) []string {
 		out := make([]string, n)
@@ -255,7 +261,7 @@ func newSimulation(cfg Config) *simulation {
 		ID: "p1", Brokers: brokerIDs, Jobs: cfg.Jobs, Over: cfg.Faults.Phase / 2,
 		Tenants: cfg.Tenants, Queues: cfg.Queues,
 		DelayP: 0.15, MaxAttempts: []int32{2, 5, job.DefaultMaxAttempts}, CancelP: 0.05,
-	}, func(key string, id int64) { s.fail(s.checker.Confirmed(key, id)) }, s.checker.Cancelled)
+	}, func(key string, id int64) { s.fail(s.checker.Confirmed(key, id)) }, func(id int64) { s.checker.Cancelled(id) })
 
 	s.faults = ScheduleFaults(w, s.net, s.st, s.brokers, s.workers, cfg.Faults)
 	w.At(cfg.Faults.Phase, "heal", func() {
@@ -327,10 +333,16 @@ func (s *simulation) finish() (Stats, error) {
 	return *st, nil
 }
 
-// run is Run without the error handling around it.
-func run(cfg Config) (Stats, error) {
-	s := newSimulation(cfg)
-	for end := cfg.Faults.Phase + cfg.Heal; s.violation == nil && s.w.Now < end && s.step(); {
+// execute runs the simulation to the end of the heal phase, or to the first
+// violation, whichever is first, and then finishes it. A violation stops the
+// run: no event fires after the one that broke the invariant.
+func (s *simulation) execute() (Stats, error) {
+	for end := s.cfg.Faults.Phase + s.cfg.Heal; s.violation == nil && s.w.Now < end && s.step(); {
 	}
 	return s.finish()
+}
+
+// run is Run without the error handling around it.
+func run(cfg Config) (Stats, error) {
+	return newSimulation(cfg).execute()
 }
