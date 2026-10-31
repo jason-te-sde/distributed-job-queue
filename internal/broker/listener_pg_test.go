@@ -4,9 +4,10 @@ package broker
 
 import (
 	"context"
-	"io"
 	"log/slog"
 	"net/url"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -38,14 +39,15 @@ type listenEnv struct {
 	reg  *prometheus.Registry
 	d    *Dispatcher
 	l    *Listener
+	logs *syncBuffer
 }
 
 func newListenEnv(t *testing.T, configure ...func(*Listener)) *listenEnv {
 	t.Helper()
-	e := &listenEnv{t: t, pool: pgtest.NewDB(t), reg: prometheus.NewRegistry()}
+	e := &listenEnv{t: t, pool: pgtest.NewDB(t), reg: prometheus.NewRegistry(), logs: &syncBuffer{}}
 	e.st = pgstore.New(e.pool)
 	m := NewMetrics(e.reg)
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	log := slog.New(slog.NewTextHandler(e.logs, nil))
 	e.d = NewDispatcher(e.st, DispatcherConfig{Scheduler: "drr", PollInterval: time.Hour, ActivityInterval: time.Hour}, m, log)
 	e.l = NewListener(dbURL(t, e.pool), e.d, m, log)
 	for _, c := range configure {
@@ -99,6 +101,19 @@ func (e *listenEnv) parkWaiter(queue string) <-chan leaseResult {
 	return ch
 }
 
+// terminateListener kills the backend of the listener's connection. It is
+// restricted to the test's own database: the server is shared, and a listener
+// of another test, or of another process running these tests, is not ours to
+// kill.
+func (e *listenEnv) terminateListener() {
+	e.t.Helper()
+	if _, err := e.pool.Exec(e.t.Context(),
+		`SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+		  WHERE datname = current_database() AND application_name = 'jobqueue-listener' AND pid <> pg_backend_pid()`); err != nil {
+		e.t.Fatalf("terminate the listener's backend: %v", err)
+	}
+}
+
 func (e *listenEnv) waitListening(n int64) {
 	e.t.Helper()
 	waitFor(e.t, "the listener to LISTEN", quickly, func() bool { return e.l.listens.Load() >= n })
@@ -123,11 +138,7 @@ func TestPGListenerReconnectsAndResyncs(t *testing.T) {
 	e.waitListening(1)
 	res := e.parkWaiter("q")
 
-	if _, err := e.pool.Exec(t.Context(),
-		`SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-		  WHERE (query LIKE 'LISTEN%' OR application_name = 'jobqueue-listener') AND pid <> pg_backend_pid()`); err != nil {
-		t.Fatalf("terminate the listener's backend: %v", err)
-	}
+	e.terminateListener()
 	waitFor(t, "the reconnect counter", 6*time.Second, func() bool {
 		return e.metric("jobqueue_notify_reconnects_total", nil) == 1
 	})
@@ -164,6 +175,74 @@ func TestPGListenerSurvivesIdlePings(t *testing.T) {
 	e.enqueue("q", "t")
 	wantGrants(t, recv(t, res, quickly), 1)
 	if got := e.metric("jobqueue_notify_reconnects_total", nil); got != 0 {
-		t.Errorf("notify_reconnects_total = %v, want 0: a ping must not cost the connection", got)
+		t.Errorf("notify_reconnects_total = %v, want 0: a ping must not cost the connection\n%s", got, e.logs.String())
+	}
+}
+
+// backoffAttempts records the attempt number the listener asks the backoff for.
+type backoffAttempts struct {
+	mu   sync.Mutex
+	seen []int
+}
+
+func (b *backoffAttempts) delay(attempt int) time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.seen = append(b.seen, attempt)
+	return 10 * time.Millisecond
+}
+
+func (b *backoffAttempts) get() []int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return slices.Clone(b.seen)
+}
+
+func TestPGListenerBackoffGrowsAcrossShortSessions(t *testing.T) {
+	// Each connection listens and is killed within moments. Reaching LISTEN is
+	// not recovery: the delays must keep growing, 0, 1, 2, and not start over.
+	var attempts backoffAttempts
+	e := newListenEnv(t, func(l *Listener) { l.backoff = attempts.delay })
+	for i := 1; i <= 3; i++ {
+		e.waitListening(int64(i))
+		e.terminateListener()
+		waitFor(t, "the backoff to be asked for", 6*time.Second, func() bool { return len(attempts.get()) == i })
+	}
+	if got, want := attempts.get(), []int{0, 1, 2}; !slices.Equal(got, want) {
+		t.Errorf("backoff attempts = %v, want %v", got, want)
+	}
+}
+
+func TestPGListenerBackoffStartsOverAfterAHealthySession(t *testing.T) {
+	// Connections that listened for longer than healthyAfter end an outage:
+	// the next one is a new outage and starts from the first delay.
+	var attempts backoffAttempts
+	e := newListenEnv(t, func(l *Listener) {
+		l.backoff = attempts.delay
+		l.healthyAfter = 50 * time.Millisecond
+	})
+	for i := 1; i <= 2; i++ {
+		e.waitListening(int64(i))
+		time.Sleep(150 * time.Millisecond) // the connection lives longer than healthyAfter; there is nothing to wait on instead
+		e.terminateListener()
+		waitFor(t, "the backoff to be asked for", 6*time.Second, func() bool { return len(attempts.get()) == i })
+	}
+	if got, want := attempts.get(), []int{0, 0}; !slices.Equal(got, want) {
+		t.Errorf("backoff attempts = %v, want %v", got, want)
+	}
+}
+
+func TestPGListenerSurvivesAPingDeadlineThatPassedBeforeTheWait(t *testing.T) {
+	// A deadline of one nanosecond has passed before WaitForNotification looks
+	// at it, which a loaded machine can also do to a longer one. pgx reports
+	// that as a timeout, and it is an idle connection, not a broken one.
+	e := newListenEnv(t, func(l *Listener) { l.pingEvery = time.Nanosecond })
+	e.waitListening(1)
+	res := e.parkWaiter("q")
+	time.Sleep(100 * time.Millisecond) // many pings; there is nothing to wait on instead
+	e.enqueue("q", "t")
+	wantGrants(t, recv(t, res, quickly), 1)
+	if got := e.metric("jobqueue_notify_reconnects_total", nil); got != 0 {
+		t.Errorf("notify_reconnects_total = %v, want 0: a passed deadline must not cost the connection\n%s", got, e.logs.String())
 	}
 }

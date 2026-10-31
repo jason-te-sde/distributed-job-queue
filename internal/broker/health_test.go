@@ -67,7 +67,7 @@ func TestHealthServesMetricsOnlyOnceGivenAGatherer(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg)
-	m.enqueuedFor("q").Add(3)
+	m.enqueued.For("q").Add(3)
 	h.SetGatherer(reg)
 	code, body := get(h.Handler(), "/metrics")
 	if code != http.StatusOK {

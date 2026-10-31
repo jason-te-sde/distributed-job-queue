@@ -452,7 +452,7 @@ func (d *Dispatcher) onArrive(now dispatch.Mono, w *waiter) {
 	w.arrived = now
 	d.waiters[w.id] = w
 	qi.waiters++
-	d.m.waitersFor(w.call.Queue).Inc()
+	d.m.waiters.For(w.call.Queue).Inc()
 	d.apply(now, d.core.Arrive(now, dispatch.Waiter{
 		ID: w.id, Queue: w.call.Queue, Max: w.call.Max,
 		Arrived: now, Deadline: now + w.call.Wait,
@@ -488,9 +488,9 @@ func (d *Dispatcher) onFetchDone(now dispatch.Mono, ev evFetchDone) {
 	case len(grants) == 0:
 		result = fetchEmpty
 	}
-	d.m.fetchesFor(ev.queue, result).Inc()
+	d.m.fetches.For(ev.queue, result).Inc()
 	if len(grants) > 0 {
-		d.m.leasedFor(ev.queue).Add(float64(len(grants)))
+		d.m.leased.For(ev.queue).Add(float64(len(grants)))
 	}
 	if qi := d.queues[ev.queue]; qi != nil && qi.drr != nil && ev.err == nil {
 		settle(qi.drr, ev.planned, grants)
@@ -819,7 +819,7 @@ func (d *Dispatcher) forget(now dispatch.Mono, w *waiter) {
 	if qi.waiters == 0 {
 		qi.lastWaiter = now
 	}
-	d.m.waitersFor(w.call.Queue).Dec()
+	d.m.waiters.For(w.call.Queue).Dec()
 }
 
 // releaseAsync gives jobs back to the store from a goroutine of its own, which

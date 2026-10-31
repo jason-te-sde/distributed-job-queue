@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // testConfig is a valid configuration that never reaches a database: tests of
@@ -111,5 +112,22 @@ func TestNewValidatesTheConfiguration(t *testing.T) {
 	cfg.Scheduler = "lifo"
 	if _, err := New(t.Context(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil || !strings.Contains(err.Error(), "--scheduler") {
 		t.Fatalf("New with a bad scheduler = %v, want the validation error", err)
+	}
+}
+
+func TestKeepaliveEnforcementAdmitsTheSDKPing(t *testing.T) {
+	// gRPC would otherwise apply its default, a ping every 5 minutes and no
+	// pings on an idle connection, and close the connection of a worker whose
+	// SDK pings every 30s. A ping every 30s must be later than MinTime, and
+	// an idle connection must be allowed to send it.
+	p := keepaliveEnforcement()
+	if p.MinTime <= 0 || p.MinTime > sdkPingEvery {
+		t.Errorf("MinTime = %v, want above 0 and at most the SDK's ping interval of %v", p.MinTime, sdkPingEvery)
+	}
+	if !p.PermitWithoutStream {
+		t.Error("PermitWithoutStream is false: an idle connection of a worker between long polls could not ping")
+	}
+	if p.MinTime >= 5*time.Minute {
+		t.Errorf("MinTime = %v is gRPC's default or worse", p.MinTime)
 	}
 }

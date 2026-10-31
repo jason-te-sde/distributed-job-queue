@@ -60,6 +60,10 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	log := newLogger(stderr, cfg.LogLevel, cfg.LogFormat)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
+	// The first signal starts the graceful shutdown. Handing the signals back
+	// to the runtime then makes a second SIGTERM or Ctrl-C end the process at
+	// once, for an operator who does not want to wait out the grace period.
+	context.AfterFunc(ctx, stop)
 
 	b, err := broker.New(ctx, cfg, log)
 	if err != nil {

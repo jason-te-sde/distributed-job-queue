@@ -30,7 +30,21 @@ const (
 	// httpShutdownTimeout bounds closing the health endpoint at the end of a
 	// shutdown.
 	httpShutdownTimeout = 5 * time.Second
+	// sdkPingEvery is how often the SDK pings a connection while a call is in
+	// flight (keepalive.ClientParameters.Time of 30s, with a timeout of 10s).
+	sdkPingEvery = 30 * time.Second
 )
+
+// keepaliveEnforcement is the policy for the pings that clients send. gRPC's
+// default admits a ping only every 5 minutes, and closes a connection whose
+// client sends a third one early, so the SDK's ping every sdkPingEvery would
+// cost a worker its connection and every call on it. A MinTime of 10s admits
+// that ping, and PermitWithoutStream admits it while the connection is idle,
+// which a worker's is between long polls; a client that pings faster than that
+// still earns its strikes.
+func keepaliveEnforcement() keepalive.EnforcementPolicy {
+	return keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}
+}
 
 // Broker is the whole server: the gRPC API over a PostgreSQL store, the
 // dispatcher and listener that serve long polls, the reaper and pruner, and
@@ -138,6 +152,7 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*Broker, error) {
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			MaxConnectionAge: cfg.MaxConnectionAge, MaxConnectionAgeGrace: cfg.MaxConnectionAgeGrace,
 		}),
+		grpc.KeepaliveEnforcementPolicy(keepaliveEnforcement()),
 		grpc.MaxRecvMsgSize(maxMessageBytes),
 		grpc.MaxSendMsgSize(maxMessageBytes),
 	}

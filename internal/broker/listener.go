@@ -23,10 +23,18 @@ const (
 	// reconnectCap.
 	reconnectBase = 100 * time.Millisecond
 	reconnectCap  = 5 * time.Second
-	// connectTimeout bounds opening the connection, and pingTimeout one
-	// liveness check.
+	// connectTimeout bounds opening the connection, listenTimeout the LISTEN
+	// that follows, and pingTimeout one liveness check. Each bound is there so
+	// that a connection that accepts and then says nothing cannot stall the
+	// listener.
 	connectTimeout = 10 * time.Second
+	listenTimeout  = 10 * time.Second
 	pingTimeout    = 5 * time.Second
+	// healthyAfter is how long a connection must have listened before an
+	// outage that ends it counts as a new one. A connection that listens and
+	// then drops at once, again and again, keeps its backoff growing instead
+	// of reconnecting at the fastest rate for ever.
+	healthyAfter = 10 * time.Second
 	// defaultPingEvery is how long the connection may be silent before it is
 	// checked. A connection that a firewall dropped without a reset would
 	// otherwise leave the listener deaf, with nothing but the fallback poll to
@@ -53,6 +61,9 @@ type Listener struct {
 	backoff func(attempt int) time.Duration
 	// pingEvery is how long the connection may be idle before it is checked.
 	pingEvery time.Duration
+	// listenTimeout bounds the LISTEN statement, and healthyAfter is how long a
+	// session must have listened before the backoff starts over.
+	listenTimeout, healthyAfter time.Duration
 	// listens counts the times the connection has started to listen.
 	listens atomic.Int64
 }
@@ -64,8 +75,10 @@ func NewListener(url string, d *Dispatcher, m *Metrics, log *slog.Logger) *Liste
 	seed := uint64(time.Now().UnixNano())
 	l := &Listener{
 		url: url, d: d, m: m, log: log,
-		rng:       rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15)),
-		pingEvery: defaultPingEvery,
+		rng:           rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15)),
+		pingEvery:     defaultPingEvery,
+		listenTimeout: listenTimeout,
+		healthyAfter:  healthyAfter,
 	}
 	l.backoff = func(attempt int) time.Duration { return reconnectDelay(attempt, l.rng.Float64()) }
 	return l
@@ -85,21 +98,22 @@ func reconnectDelay(attempt int, u float64) time.Duration {
 // Run connects, listens and forwards notifications until ctx is done, when it
 // returns nil. Any error, in connecting or listening or while waiting,
 // counts as a reconnect: the listener backs off with full jitter and starts
-// again, and after each LISTEN it asks the dispatcher to resync.
+// again, and after each LISTEN it asks the dispatcher to resync. The backoff
+// starts over only after a connection has listened for a while.
 func (l *Listener) Run(ctx context.Context) error {
 	attempt := 0
 	for ctx.Err() == nil {
-		listened, err := l.session(ctx)
+		lived, err := l.session(ctx)
 		if ctx.Err() != nil {
 			return nil
 		}
 		l.m.notifyReconnects.Inc()
-		if listened {
-			attempt = 0 // the connection worked, so this is a new outage
+		if lived >= l.healthyAfter {
+			attempt = 0 // the connection worked for a while, so this is a new outage
 		}
 		delay := l.backoff(attempt)
 		attempt++
-		l.log.Warn("notify listener lost its connection", slog.Any("err", err), slog.Duration("retry_in", delay))
+		l.log.Warn("notify listener lost its connection", slog.Any("err", err), slog.Duration("lived", lived), slog.Duration("retry_in", delay))
 		timer := time.NewTimer(delay)
 		select {
 		case <-timer.C:
@@ -112,19 +126,19 @@ func (l *Listener) Run(ctx context.Context) error {
 }
 
 // session is one connection: connect, LISTEN, then forward notifications until
-// something fails. It always returns an error, and says whether LISTEN had
-// succeeded by then.
-func (l *Listener) session(ctx context.Context) (listened bool, err error) {
+// something fails. It always returns an error, and how long the connection
+// listened, which is zero if LISTEN never succeeded.
+func (l *Listener) session(ctx context.Context) (lived time.Duration, err error) {
 	cfg, err := pgx.ParseConfig(l.url)
 	if err != nil {
-		return false, fmt.Errorf("parse the database url: %w", err)
+		return 0, fmt.Errorf("parse the database url: %w", err)
 	}
 	cfg.RuntimeParams["application_name"] = listenerAppName
 	connectCtx, cancel := context.WithTimeout(ctx, connectTimeout)
 	conn, err := pgx.ConnectConfig(connectCtx, cfg)
 	cancel()
 	if err != nil {
-		return false, fmt.Errorf("connect: %w", err)
+		return 0, fmt.Errorf("connect: %w", err)
 	}
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pingTimeout)
@@ -132,9 +146,13 @@ func (l *Listener) session(ctx context.Context) (listened bool, err error) {
 		_ = conn.Close(closeCtx)
 	}()
 
-	if _, err := conn.Exec(ctx, "LISTEN "+pgx.Identifier{pgstore.NotifyChannel}.Sanitize()); err != nil {
-		return false, fmt.Errorf("listen: %w", err)
+	listenCtx, cancel := context.WithTimeout(ctx, l.listenTimeout)
+	_, err = conn.Exec(listenCtx, "LISTEN "+pgx.Identifier{pgstore.NotifyChannel}.Sanitize())
+	cancel()
+	if err != nil {
+		return 0, fmt.Errorf("listen: %w", err)
 	}
+	listening := time.Now()
 	// Whatever was enqueued while the connection was down was announced to
 	// nobody.
 	l.d.Resync()
@@ -150,17 +168,17 @@ func (l *Listener) session(ctx context.Context) (listened bool, err error) {
 		switch {
 		case err == nil:
 		case ctx.Err() != nil:
-			return true, ctx.Err()
+			return time.Since(listening), ctx.Err()
 		case pgconn.Timeout(err):
 			// Idle for pingEvery: make sure the connection is still there.
 			pingCtx, cancel := context.WithTimeout(ctx, pingTimeout)
 			err := conn.Ping(pingCtx)
 			cancel()
 			if err != nil {
-				return true, fmt.Errorf("ping: %w", err)
+				return time.Since(listening), fmt.Errorf("ping: %w", err)
 			}
 		default:
-			return true, fmt.Errorf("wait for a notification: %w", err)
+			return time.Since(listening), fmt.Errorf("wait for a notification: %w", err)
 		}
 	}
 }

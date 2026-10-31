@@ -2,9 +2,7 @@ package broker
 
 import (
 	"context"
-	"maps"
 	"runtime"
-	"slices"
 	"sync"
 	"time"
 
@@ -12,6 +10,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
+	"github.com/jason-te-sde/distributed-job-queue/internal/broker/queuelabel"
 	"github.com/jason-te-sde/distributed-job-queue/internal/core/job"
 	"github.com/jason-te-sde/distributed-job-queue/internal/store"
 )
@@ -49,24 +48,28 @@ const (
 // handlers of Server use the counters below; the maintenance loops, the
 // dispatcher and the health endpoint add theirs here.
 //
-// A collector with a queue label is reached only through a method that takes
-// the queue name, such as enqueuedFor, and that method applies queueLabel.
+// A collector with a queue label is a queuelabel type, whose vector is
+// unexported there: the only way to reach a series is For(queue), which
+// applies the cap on distinct queue labels, so a series cannot be labelled
+// with a raw queue name.
 type Metrics struct {
+	// queues caps the distinct values of the queue label.
+	queues *queuelabel.Cap
 	// enqueued and deduplicated count the jobs that an Enqueue created, and
 	// the items that named a job an idempotency key already held, per queue.
-	enqueued, deduplicated *prometheus.CounterVec
+	enqueued, deduplicated *queuelabel.Counters
 	// acks counts what became of the leases that workers reported on, by
 	// operation (complete, fail, release, heartbeat) and result (accepted,
 	// duplicate, fenced). A heartbeat that held its lease counts as accepted
 	// and one that lost it as fenced.
 	acks *prometheus.CounterVec
 	// leased counts the jobs the store leased to the dispatcher, per queue.
-	leased *prometheus.CounterVec
+	leased *queuelabel.Counters
 	// fetches counts the dispatcher's store fetches, by queue and result
 	// (jobs, empty, error).
-	fetches *prometheus.CounterVec
+	fetches *queuelabel.Counters
 	// waiters is the number of long-polling Lease calls in the dispatcher.
-	waiters *prometheus.GaugeVec
+	waiters *queuelabel.Gauges
 	// leaseWait is how long a Lease call waited before it was given jobs.
 	leaseWait prometheus.Histogram
 	// orphanReleases counts jobs the dispatcher gave back because the caller
@@ -82,14 +85,10 @@ type Metrics struct {
 	storeCall *prometheus.HistogramVec
 	// queueJobs is the number of jobs of a queue in each state, refreshed
 	// periodically from the store.
-	queueJobs *prometheus.GaugeVec
+	queueJobs *queuelabel.Gauges
 	// buildInfo is 1 for the version of this build.
 	buildInfoMu sync.Mutex
 	buildInfo   *prometheus.GaugeVec
-
-	// labeled holds the queue names that have a label value of their own.
-	labelMu sync.Mutex
-	labeled map[string]struct{}
 }
 
 // NewMetrics creates the collectors and registers them with reg, together with
@@ -101,31 +100,33 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 	if reg != nil {
 		reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	}
+	queues := queuelabel.NewCap(maxQueueLabels, otherQueueLabel)
 	return &Metrics{
-		enqueued: f.NewCounterVec(prometheus.CounterOpts{
+		queues: queues,
+		enqueued: queuelabel.NewCounters(f, queues, prometheus.CounterOpts{
 			Namespace: "jobqueue", Name: "jobs_enqueued_total",
 			Help: "Jobs created by Enqueue, by queue.",
-		}, []string{"queue"}),
-		deduplicated: f.NewCounterVec(prometheus.CounterOpts{
+		}),
+		deduplicated: queuelabel.NewCounters(f, queues, prometheus.CounterOpts{
 			Namespace: "jobqueue", Name: "jobs_deduplicated_total",
 			Help: "Enqueue items whose idempotency key already named a job, by queue.",
-		}, []string{"queue"}),
+		}),
 		acks: f.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "jobqueue", Name: "acks_total",
 			Help: "Reports from workers on their leases, by operation and result.",
 		}, []string{"op", "result"}),
-		leased: f.NewCounterVec(prometheus.CounterOpts{
+		leased: queuelabel.NewCounters(f, queues, prometheus.CounterOpts{
 			Namespace: "jobqueue", Name: "jobs_leased_total",
 			Help: "Jobs the store leased to the dispatcher, by queue.",
-		}, []string{"queue"}),
-		fetches: f.NewCounterVec(prometheus.CounterOpts{
+		}),
+		fetches: queuelabel.NewCounters(f, queues, prometheus.CounterOpts{
 			Namespace: "jobqueue", Name: "dispatch_fetches_total",
 			Help: "Store fetches of the dispatcher, by queue and result (jobs, empty, error).",
-		}, []string{"queue", "result"}),
-		waiters: f.NewGaugeVec(prometheus.GaugeOpts{
+		}, "result"),
+		waiters: queuelabel.NewGauges(f, queues, prometheus.GaugeOpts{
 			Namespace: "jobqueue", Name: "waiters",
 			Help: "Long-polling Lease calls waiting in the dispatcher, by queue.",
-		}, []string{"queue"}),
+		}),
 		leaseWait: f.NewHistogram(prometheus.HistogramOpts{
 			Namespace: "jobqueue", Name: "lease_wait_seconds",
 			Help:    "How long a Lease call waited before it was given jobs.",
@@ -156,62 +157,15 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Help:    "How long store calls took, by operation.",
 			Buckets: prometheus.ExponentialBucketsRange(0.0001, 10, 18),
 		}, []string{"op"}),
-		queueJobs: f.NewGaugeVec(prometheus.GaugeOpts{
+		queueJobs: queuelabel.NewGauges(f, queues, prometheus.GaugeOpts{
 			Namespace: "jobqueue", Name: "queue_jobs",
 			Help: "Jobs of a queue by state (ready, scheduled, leased, dead), refreshed every 15s for the queues this broker has seen.",
-		}, []string{"queue", "state"}),
+		}, "state"),
 		buildInfo: f.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "jobqueue", Name: "build_info",
 			Help: "A constant 1, labelled with the version of the build and the Go version that built it.",
 		}, []string{"version", "go_version"}),
-		labeled: map[string]struct{}{},
 	}
-}
-
-// queueLabel returns the value of the queue label for a queue name: the name
-// itself for each of the first maxQueueLabels distinct names the broker sees,
-// and "other" for every later one. A name keeps its label for the life of the
-// process.
-func (m *Metrics) queueLabel(queue string) string {
-	m.labelMu.Lock()
-	defer m.labelMu.Unlock()
-	if _, ok := m.labeled[queue]; ok {
-		return queue
-	}
-	if len(m.labeled) >= maxQueueLabels {
-		return otherQueueLabel
-	}
-	m.labeled[queue] = struct{}{}
-	return queue
-}
-
-func (m *Metrics) enqueuedFor(queue string) prometheus.Counter {
-	return m.enqueued.WithLabelValues(m.queueLabel(queue))
-}
-
-func (m *Metrics) deduplicatedFor(queue string) prometheus.Counter {
-	return m.deduplicated.WithLabelValues(m.queueLabel(queue))
-}
-
-func (m *Metrics) leasedFor(queue string) prometheus.Counter {
-	return m.leased.WithLabelValues(m.queueLabel(queue))
-}
-
-func (m *Metrics) fetchesFor(queue, result string) prometheus.Counter {
-	return m.fetches.WithLabelValues(m.queueLabel(queue), result)
-}
-
-func (m *Metrics) waitersFor(queue string) prometheus.Gauge {
-	return m.waiters.WithLabelValues(m.queueLabel(queue))
-}
-
-// labeledQueues returns the queue names that have a label value of their own,
-// in order. Past the cap a queue shares "other" with others, so a series per
-// queue cannot be kept for it.
-func (m *Metrics) labeledQueues() []string {
-	m.labelMu.Lock()
-	defer m.labelMu.Unlock()
-	return slices.Sorted(maps.Keys(m.labeled))
 }
 
 // queueJobCounts is the number of jobs of one queue in each state.
@@ -219,11 +173,10 @@ type queueJobCounts struct{ ready, scheduled, leased, dead int64 }
 
 // setQueueJobs sets the jobs-by-state gauges of a queue.
 func (m *Metrics) setQueueJobs(queue string, c queueJobCounts) {
-	label := m.queueLabel(queue)
-	m.queueJobs.WithLabelValues(label, "ready").Set(float64(c.ready))
-	m.queueJobs.WithLabelValues(label, "scheduled").Set(float64(c.scheduled))
-	m.queueJobs.WithLabelValues(label, "leased").Set(float64(c.leased))
-	m.queueJobs.WithLabelValues(label, "dead").Set(float64(c.dead))
+	m.queueJobs.For(queue, "ready").Set(float64(c.ready))
+	m.queueJobs.For(queue, "scheduled").Set(float64(c.scheduled))
+	m.queueJobs.For(queue, "leased").Set(float64(c.leased))
+	m.queueJobs.For(queue, "dead").Set(float64(c.dead))
 }
 
 // observeStoreCall records how long a store call of the given operation took.

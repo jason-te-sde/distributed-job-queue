@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -76,17 +77,17 @@ func TestQueueLabelCapsCardinality(t *testing.T) {
 	m := NewMetrics(prometheus.NewRegistry())
 	for i := range maxQueueLabels {
 		q := fmt.Sprintf("q%03d", i)
-		if got := m.queueLabel(q); got != q {
+		if got := m.queues.Label(q); got != q {
 			t.Fatalf("queueLabel(%q) = %q, want the name itself: it is among the first %d", q, got, maxQueueLabels)
 		}
 	}
-	if got := m.queueLabel("one-too-many"); got != otherQueueLabel {
+	if got := m.queues.Label("one-too-many"); got != otherQueueLabel {
 		t.Fatalf("queueLabel of the %dth name = %q, want %q", maxQueueLabels+1, got, otherQueueLabel)
 	}
-	if got := m.queueLabel("q000"); got != "q000" {
+	if got := m.queues.Label("q000"); got != "q000" {
 		t.Errorf("queueLabel(q000) = %q after the cap was reached, want q000: a name keeps its label", got)
 	}
-	if got := m.queueLabel("one-too-many"); got != otherQueueLabel {
+	if got := m.queues.Label("one-too-many"); got != otherQueueLabel {
 		t.Errorf("queueLabel(one-too-many) = %q on the second call, want %q", got, otherQueueLabel)
 	}
 }
@@ -128,15 +129,15 @@ func TestMetricsRegistersEveryName(t *testing.T) {
 	m := NewMetrics(reg)
 
 	// One observation of each metric, so that every series exists.
-	m.enqueuedFor("q").Inc()
-	m.deduplicatedFor("q").Inc()
-	m.leasedFor("q").Inc()
+	m.enqueued.For("q").Inc()
+	m.deduplicated.For("q").Inc()
+	m.leased.For("q").Inc()
 	m.acks.WithLabelValues(opComplete, resultAccepted).Inc()
 	m.reaped.Inc()
 	m.pruned.Inc()
 	m.orphanReleases.Inc()
-	m.fetchesFor("q", fetchJobs).Inc()
-	m.waitersFor("q").Inc()
+	m.fetches.For("q", fetchJobs).Inc()
+	m.waiters.For("q").Inc()
 	m.leaseWait.Observe(0.01)
 	m.observeStoreCall("lease", 0.001)
 	m.setQueueJobs("q", queueJobCounts{ready: 1})
@@ -368,12 +369,21 @@ func TestStatsRefresherSetsQueueJobs(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg)
-	m.queueLabel("q") // the broker has seen the queue
+	m.queues.Label("q") // the broker has seen the queue
+	runCtx, cancel := context.WithCancel(ctx)
 	runDone := make(chan struct{})
 	go func() {
 		defer close(runDone)
-		runStatsRefresher(ctx, mem, 5*time.Millisecond, m, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		runStatsRefresher(runCtx, mem, 5*time.Millisecond, m, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-runDone:
+		case <-time.After(10 * time.Second):
+			t.Error("the stats refresher did not return after its context ended")
+		}
+	})
 	for state, want := range map[string]float64{"ready": 2, "scheduled": 1, "leased": 1, "dead": 1} {
 		labels := map[string]string{"queue": "q", "state": state}
 		waitFor(t, "queue_jobs "+state, quickly, func() bool { return metricValue(t, reg, "jobqueue_queue_jobs", labels) == want })
@@ -388,13 +398,13 @@ func TestStatsRefresherSkipsQueuesWithoutALabel(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg)
 	for i := range maxQueueLabels {
-		m.queueLabel(fmt.Sprintf("q%03d", i))
+		m.queues.Label(fmt.Sprintf("q%03d", i))
 	}
 	if _, err := mem.Enqueue(t.Context(), []job.Spec{{Queue: "late", Tenant: "t", Payload: []byte("p")}}); err != nil {
 		t.Fatal(err)
 	}
-	if got := m.labeledQueues(); len(got) != maxQueueLabels || slices.Contains(got, "late") {
-		t.Fatalf("labeledQueues() has %d names, including late: %v", len(got), slices.Contains(got, "late"))
+	if got := m.queues.Names(); len(got) != maxQueueLabels || slices.Contains(got, "late") {
+		t.Fatalf("Names() has %d names, including late: %v", len(got), slices.Contains(got, "late"))
 	}
 	refreshQueueJobs(t.Context(), mem, m, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if n := seriesCount(t, reg, "jobqueue_queue_jobs"); n != maxQueueLabels*4 {
@@ -402,5 +412,41 @@ func TestStatsRefresherSkipsQueuesWithoutALabel(t *testing.T) {
 	}
 	if got := metricValue(t, reg, "jobqueue_queue_jobs", map[string]string{"queue": otherQueueLabel, "state": "ready"}); got != 0 {
 		t.Errorf("queue_jobs{queue=other} = %v, want no series", got)
+	}
+}
+
+// queueLabelValues returns, for every metric family that has a "queue" label,
+// the distinct values of that label.
+func queueLabelValues(t testing.TB, g prometheus.Gatherer) map[string]map[string]struct{} {
+	t.Helper()
+	families, err := g.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]map[string]struct{}{}
+	for _, mf := range families {
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() != "queue" {
+					continue
+				}
+				if out[mf.GetName()] == nil {
+					out[mf.GetName()] = map[string]struct{}{}
+				}
+				out[mf.GetName()][l.GetValue()] = struct{}{}
+			}
+		}
+	}
+	return out
+}
+
+// wantQueueLabelsWithinTheCap fails for every family with more than
+// maxQueueLabels+1 values of its queue label.
+func wantQueueLabelsWithinTheCap(t testing.TB, g prometheus.Gatherer) {
+	t.Helper()
+	for name, values := range queueLabelValues(t, g) {
+		if len(values) > maxQueueLabels+1 {
+			t.Errorf("%s has %d distinct queue labels, want at most %d: every queue label must go through the cap", name, len(values), maxQueueLabels+1)
+		}
 	}
 }

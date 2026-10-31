@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -255,7 +256,7 @@ func TestDispatcherDeliversOnNotify(t *testing.T) {
 	start := time.Now()
 	e.d.Notify("q", "t")
 
-	grants := wantGrants(t, recv(t, res, quickly), 1)
+	grants := wantGrants(t, recv(t, res, 100*time.Millisecond), 1)
 	if grants[0].Job.ID != ids[0] {
 		t.Errorf("leased job %d, want %d", grants[0].Job.ID, ids[0])
 	}
@@ -278,8 +279,9 @@ func TestDispatcherLongPollTimesOutEmpty(t *testing.T) {
 	if len(ans.Grants) != 0 {
 		t.Fatalf("Lease returned %d jobs from an empty queue", len(ans.Grants))
 	}
-	if elapsed < wait || elapsed > quickly {
-		t.Errorf("Lease returned after %v, want between %v and %v", elapsed, wait, quickly)
+	t.Logf("Lease returned after %v", elapsed)
+	if elapsed < wait || elapsed > 2*wait {
+		t.Errorf("Lease returned after %v, want between %v and %v", elapsed, wait, 2*wait)
 	}
 	if ans.Waited < wait-10*time.Millisecond {
 		t.Errorf("answer says it waited %v, want about %v", ans.Waited, wait)
@@ -291,8 +293,10 @@ func TestDispatcherPollFindsWorkWithoutNotify(t *testing.T) {
 	e := newDispEnv(t, DispatcherConfig{PollInterval: 100 * time.Millisecond}, nil)
 	res := e.leaseAsync("q", 1, 30*time.Second)
 	e.waitFetches("q", fetchEmpty, 1)
+	start := time.Now()
 	e.add("q", "t", 1) // no Notify
-	wantGrants(t, recv(t, res, quickly), 1)
+	wantGrants(t, recv(t, res, 300*time.Millisecond), 1)
+	t.Logf("delivered %v after the enqueue", time.Since(start))
 }
 
 func TestDispatcherReleasesOrphanedGrants(t *testing.T) {
@@ -331,13 +335,16 @@ func TestDispatcherDrainAnswersWaiters(t *testing.T) {
 	}
 	e.waitWaiters("q", 5)
 
+	start := time.Now()
 	e.d.Drain()
+	deadline := start.Add(100 * time.Millisecond) // all five, not each
 	for i, res := range results {
-		r := recv(t, res, quickly)
+		r := recv(t, res, max(time.Until(deadline), time.Millisecond))
 		if r.err != nil || len(r.ans.Grants) != 0 {
 			t.Errorf("waiter %d got %v, %v; want an empty answer", i, r.ans, r.err)
 		}
 	}
+	t.Logf("all five answered %v after Drain", time.Since(start))
 
 	_, err := e.lease("q", 1, time.Second)
 	if status.Code(err) != codes.Unavailable || status.Convert(err).Message() != "broker is draining" {
@@ -411,8 +418,9 @@ func TestDispatcherDelayedJobWakesAtDue(t *testing.T) {
 	if err != nil || len(ans.Grants) != 1 {
 		t.Fatalf("Lease = %v, %v; want the delayed job", ans, err)
 	}
-	if elapsed < delay || elapsed > quickly {
-		t.Errorf("job delivered after %v, want between %v and %v", elapsed, delay, quickly)
+	t.Logf("job delivered after %v", elapsed)
+	if elapsed < delay || elapsed > 450*time.Millisecond {
+		t.Errorf("job delivered after %v, want between %v and 450ms", elapsed, delay)
 	}
 }
 
@@ -694,4 +702,187 @@ func TestDispatcherActivityFindsReadyJobForParkedWaiter(t *testing.T) {
 	e.waitFetches("q", fetchEmpty, 1)
 	e.add("q", "t", 1)
 	wantGrants(t, recv(t, res, quickly), 1)
+}
+
+func TestDispatcherQueueLabelsStayWithinTheCap(t *testing.T) {
+	// More queues than the cap, each leased once through the dispatcher: the
+	// series of its fetches, leases and waiters must stop at the cap, and the
+	// late queues must share "other".
+	e := newDispEnv(t, DispatcherConfig{}, nil)
+	const late = 50
+	for i := range maxQueueLabels + late {
+		queue := fmt.Sprintf("q%03d", i)
+		e.add(queue, "t", 1)
+		if ans, err := e.lease(queue, 1, 0); err != nil || len(ans.Grants) != 1 {
+			t.Fatalf("Lease on %s = %v, %v", queue, ans, err)
+		}
+	}
+
+	wantQueueLabelsWithinTheCap(t, e.reg)
+	values := queueLabelValues(t, e.reg)
+	for _, name := range []string{"jobqueue_jobs_leased_total", "jobqueue_dispatch_fetches_total", "jobqueue_waiters"} {
+		if n := len(values[name]); n != maxQueueLabels+1 {
+			t.Errorf("%s has %d queue labels, want %d: the first %d queues and %q", name, n, maxQueueLabels+1, maxQueueLabels, otherQueueLabel)
+		}
+	}
+	other := map[string]string{"queue": otherQueueLabel}
+	if got := e.metric("jobqueue_jobs_leased_total", other); got != late {
+		t.Errorf("leased{queue=other} = %v, want %d", got, late)
+	}
+	if got := e.metric("jobqueue_dispatch_fetches_total", map[string]string{"queue": otherQueueLabel, "result": fetchJobs}); got != late {
+		t.Errorf("fetches{queue=other,result=jobs} = %v, want %d", got, late)
+	}
+	if got := e.metric("jobqueue_waiters", other); got != 0 {
+		t.Errorf("waiters{queue=other} = %v after every call returned, want 0: the shared gauge must count up and down", got)
+	}
+}
+
+// bareDispatcher is a dispatcher whose loop is not running, so that a test can
+// call the pieces the loop owns from its own goroutine.
+func bareDispatcher(t *testing.T) (*Dispatcher, *memstore.Store, *prometheus.Registry) {
+	t.Helper()
+	mem := memstore.New(memstore.Options{Clock: time.Now})
+	reg := prometheus.NewRegistry()
+	d := NewDispatcher(mem, DispatcherConfig{Scheduler: "drr"}, NewMetrics(reg), slog.New(slog.NewTextHandler(&syncBuffer{}, nil)))
+	return d, mem, reg
+}
+
+// leasedJob enqueues a job and leases it straight from the store, as a fetch
+// of the dispatcher would, and returns its id and the grant.
+func leasedJob(t *testing.T, mem *memstore.Store) (int64, []store.Grant) {
+	t.Helper()
+	res, err := mem.Enqueue(t.Context(), []job.Spec{{Queue: "q", Tenant: "t", Payload: []byte("p")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grants, err := mem.Lease(t.Context(), store.LeaseRequest{
+		Queue: "q", Takes: []store.TenantTake{{Limit: 1}}, TTL: time.Minute, Worker: "w",
+	})
+	if err != nil || len(grants) != 1 {
+		t.Fatalf("Lease = %v, %v", grants, err)
+	}
+	if j := grants[0].Job; j.State != job.StateLeased || j.Attempts != 1 {
+		t.Fatalf("leased job is %v with %d attempts, want leased with 1", j.State, j.Attempts)
+	}
+	return res[0].ID, grants
+}
+
+func wantReleased(t *testing.T, mem *memstore.Store, id int64) {
+	t.Helper()
+	j, err := mem.Get(t.Context(), id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.State != job.StateReady || j.Attempts != 0 {
+		t.Errorf("job is %v with %d attempts, want ready with 0: the release must refund the attempt", j.State, j.Attempts)
+	}
+}
+
+func wantStillLeased(t *testing.T, mem *memstore.Store, id int64) {
+	t.Helper()
+	j, err := mem.Get(t.Context(), id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.State != job.StateLeased {
+		t.Errorf("job is %v, want it still leased: nothing should have released it", j.State)
+	}
+}
+
+func TestFinishReleasesJobsForACallerWhoseContextEnded(t *testing.T) {
+	// The answer reached the caller's goroutine at the moment its context
+	// ended, so the client is gone and nobody will run the jobs.
+	d, mem, reg := bareDispatcher(t)
+	id, grants := leasedJob(t, mem)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	ans, err := d.finish(ctx, outcome{ans: LeaseAnswer{Grants: grants}})
+	if status.Code(err) != codes.Canceled || len(ans.Grants) != 0 {
+		t.Fatalf("finish = %v, %v; want no jobs and Canceled", ans, err)
+	}
+	wantReleased(t, mem, id)
+	if got := metricValue(t, reg, "jobqueue_orphan_releases_total", nil); got != 1 {
+		t.Errorf("orphan_releases_total = %v, want 1", got)
+	}
+}
+
+func TestFinishKeepsJobsForACallerWhoIsStillThere(t *testing.T) {
+	d, mem, reg := bareDispatcher(t)
+	id, grants := leasedJob(t, mem)
+
+	ans, err := d.finish(t.Context(), outcome{ans: LeaseAnswer{Grants: grants}})
+	if err != nil || len(ans.Grants) != 1 {
+		t.Fatalf("finish = %v, %v; want the job", ans, err)
+	}
+	wantStillLeased(t, mem, id)
+	if got := metricValue(t, reg, "jobqueue_orphan_releases_total", nil); got != 0 {
+		t.Errorf("orphan_releases_total = %v, want 0", got)
+	}
+
+	// An error of the loop passes through untouched, and releases nothing.
+	boom := status.Error(codes.Unavailable, "store unavailable")
+	if _, err := d.finish(t.Context(), outcome{err: boom}); !errors.Is(err, boom) {
+		t.Errorf("finish of an error = %v, want it unchanged", err)
+	}
+}
+
+func TestAnswerReleasesJobsForAnAbandonedWaiter(t *testing.T) {
+	// The caller gave up first, so the loop must not answer: the jobs fetched
+	// for the waiter go back to the store. The loop is not running, so the
+	// test may call answer and read what it owns.
+	d, mem, reg := bareDispatcher(t)
+	id, grants := leasedJob(t, mem)
+	w := &waiter{id: 1, call: LeaseCall{Queue: "q"}, answer: make(chan outcome, 1)}
+	w.state.Store(waiterAbandoned)
+
+	d.answer(w, outcome{ans: LeaseAnswer{Grants: grants}})
+
+	select {
+	case out := <-w.answer:
+		t.Fatalf("an abandoned waiter was answered with %+v", out)
+	default:
+	}
+	waitFor(t, "the orphaned job to be released", quickly, func() bool {
+		return metricValue(t, reg, "jobqueue_orphan_releases_total", nil) == 1
+	})
+	wantReleased(t, mem, id)
+	if d.pending != 1 {
+		t.Errorf("pending = %d, want 1: the loop waits for the release it started", d.pending)
+	}
+	select {
+	case ev := <-d.events:
+		if _, ok := ev.(evSettled); !ok {
+			t.Errorf("the release reported %T, want evSettled", ev)
+		}
+	case <-time.After(quickly):
+		t.Error("the release did not report back to the loop")
+	}
+}
+
+func TestAnswerHandsAWaitingWaiterItsAnswer(t *testing.T) {
+	d, mem, reg := bareDispatcher(t)
+	id, grants := leasedJob(t, mem)
+	w := &waiter{id: 1, call: LeaseCall{Queue: "q"}, answer: make(chan outcome, 1)}
+
+	d.answer(w, outcome{ans: LeaseAnswer{Grants: grants}})
+
+	select {
+	case out := <-w.answer:
+		if out.err != nil || len(out.ans.Grants) != 1 {
+			t.Errorf("answer = %+v, want the job", out)
+		}
+	default:
+		t.Fatal("a waiting waiter was not answered")
+	}
+	if got := w.state.Load(); got != waiterAnswered {
+		t.Errorf("waiter state = %d, want waiterAnswered", got)
+	}
+	wantStillLeased(t, mem, id)
+	if d.pending != 0 {
+		t.Errorf("pending = %d, want 0: nothing was released", d.pending)
+	}
+	if got := metricValue(t, reg, "jobqueue_orphan_releases_total", nil); got != 0 {
+		t.Errorf("orphan_releases_total = %v, want 0", got)
+	}
 }

@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math/rand/v2"
 	"time"
@@ -18,8 +19,11 @@ const (
 	pingInterval = 2 * time.Second
 	// dbPingTimeout bounds one database check.
 	dbPingTimeout = 2 * time.Second
-	// statsTimeout bounds one Stats call of the refresher.
-	statsTimeout = 10 * time.Second
+	// statsTimeout bounds one Stats call of the refresher, and
+	// maintenanceCallTimeout one Reap or Prune call, so that a hung connection
+	// stalls a pass and not the loop.
+	statsTimeout           = 10 * time.Second
+	maintenanceCallTimeout = 10 * time.Second
 )
 
 // RunReaper takes back expired leases until ctx is done. Every `every` it calls
@@ -28,8 +32,12 @@ const (
 // took back a full batch is followed at once by another, because more are
 // probably waiting. A failed call is logged and the loop carries on. The
 // reaper runs on every broker: the store's Reap locks the rows it takes, so
-// several of them do not take the same job twice.
+// several of them do not take the same job twice. It panics if every is not
+// positive, which Config.Validate rules out.
 func RunReaper(ctx context.Context, st store.Store, every time.Duration, batch int, seed uint64, m *Metrics, log *slog.Logger) {
+	if every <= 0 {
+		panic(fmt.Sprintf("broker.RunReaper: every must be positive, got %v", every))
+	}
 	rng := rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15))
 	// The store calls this synchronously inside Reap, so the generator is only
 	// ever used from this goroutine.
@@ -51,8 +59,12 @@ func RunReaper(ctx context.Context, st store.Store, every time.Duration, batch i
 // RunPruner deletes finished jobs that outlived their retention until ctx is
 // done. Every `every` it calls Prune for up to batch jobs, and a call that
 // deleted a full batch is followed at once by another. A failed call is logged
-// and the loop carries on.
+// and the loop carries on. It panics if every is not positive, which
+// Config.Validate rules out.
 func RunPruner(ctx context.Context, st store.Store, every time.Duration, batch int, r store.Retention, m *Metrics, log *slog.Logger) {
+	if every <= 0 {
+		panic(fmt.Sprintf("broker.RunPruner: every must be positive, got %v", every))
+	}
 	runWhileFull(ctx, every, batch, func(ctx context.Context) (int, error) {
 		n, err := st.Prune(ctx, r, batch)
 		if err != nil {
@@ -68,8 +80,9 @@ func RunPruner(ctx context.Context, st store.Store, every time.Duration, batch i
 }
 
 // runWhileFull calls pass on every tick until ctx is done. A pass that returns
-// batch repeats at once; one that returns less, or fails, waits for the next
-// tick.
+// batch repeats at once; one that returns less, or nothing, or fails, waits
+// for the next tick. A pass that returned nothing never repeats, so a batch
+// below 1 cannot make the loop spin. Each call has a timeout of its own.
 func runWhileFull(ctx context.Context, every time.Duration, batch int, pass func(context.Context) (int, error)) {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
@@ -80,7 +93,10 @@ func runWhileFull(ctx context.Context, every time.Duration, batch int, pass func
 		case <-ticker.C:
 		}
 		for ctx.Err() == nil {
-			if n, err := pass(ctx); err != nil || n < batch {
+			callCtx, cancel := context.WithTimeout(ctx, maintenanceCallTimeout)
+			n, err := pass(callCtx)
+			cancel()
+			if err != nil || n == 0 || n < batch {
 				break
 			}
 		}
@@ -106,7 +122,7 @@ func runStatsRefresher(ctx context.Context, st store.Store, every time.Duration,
 // and sets its gauges. The store cannot list queues, so the queues are the ones
 // this broker has seen.
 func refreshQueueJobs(ctx context.Context, st store.Store, m *Metrics, log *slog.Logger) {
-	for _, queue := range m.labeledQueues() {
+	for _, queue := range m.queues.Names() {
 		if ctx.Err() != nil {
 			return
 		}

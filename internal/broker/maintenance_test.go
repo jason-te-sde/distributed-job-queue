@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -148,32 +149,135 @@ func TestReaperPassesBackoffForTheAttemptCount(t *testing.T) {
 	}
 }
 
-// maintFailingStore fails every Reap and Prune call.
-type maintFailingStore struct{ store.Store }
+// callCounter counts the Reap and Prune calls that reach it, answers each with
+// the given result, and records the deadline of the context of the last one.
+type callCounter struct {
+	store.Store
+	n   int
+	err error
 
-func (maintFailingStore) Reap(context.Context, int, store.BackoffFunc) (int, error) {
-	return 0, errors.New("boom")
+	reaps, prunes atomic.Int64
+	deadlines     chan time.Duration // time left on the context of each call, as it arrives
 }
 
-func (maintFailingStore) Prune(context.Context, store.Retention, int) (int, error) {
-	return 0, errors.New("boom")
+func newCallCounter(n int, err error) *callCounter {
+	return &callCounter{n: n, err: err, deadlines: make(chan time.Duration, 64)}
+}
+
+func (c *callCounter) note(ctx context.Context) {
+	left := time.Duration(-1) // no deadline
+	if dl, ok := ctx.Deadline(); ok {
+		left = time.Until(dl)
+	}
+	select {
+	case c.deadlines <- left:
+	default:
+	}
+}
+
+func (c *callCounter) Reap(ctx context.Context, _ int, _ store.BackoffFunc) (int, error) {
+	c.reaps.Add(1)
+	c.note(ctx)
+	return c.n, c.err
+}
+
+func (c *callCounter) Prune(ctx context.Context, _ store.Retention, _ int) (int, error) {
+	c.prunes.Add(1)
+	c.note(ctx)
+	return c.n, c.err
+}
+
+// wantAtMostOnePerTick fails if the loop called the store more often than it
+// ticked: once per tick, plus one for a tick that has just fired.
+func wantAtMostOnePerTick(t *testing.T, name string, calls int64, since time.Time, every time.Duration) {
+	t.Helper()
+	if maxCalls := int64(time.Since(since)/every) + 1; calls > maxCalls {
+		t.Errorf("%s made %d calls in %v with a tick every %v, want at most %d: it is spinning", name, calls, time.Since(since), every, maxCalls)
+	}
 }
 
 func TestMaintenanceLoopsSurviveStoreErrors(t *testing.T) {
 	e := newMaintEnv(t)
 	logs := &syncBuffer{}
 	log := slog.New(slog.NewTextHandler(logs, nil))
+	st := newCallCounter(0, errors.New("boom"))
+	const every = 50 * time.Millisecond
+	started := time.Now()
+	e.start(func(ctx context.Context) { RunReaper(ctx, st, every, 10, 1, e.m, log) })
 	e.start(func(ctx context.Context) {
-		RunReaper(ctx, maintFailingStore{e.mem}, 5*time.Millisecond, 10, 1, e.m, log)
+		RunPruner(ctx, st, every, 10, store.Retention{Done: time.Hour, Dead: time.Hour}, e.m, log)
 	})
-	e.start(func(ctx context.Context) {
-		RunPruner(ctx, maintFailingStore{e.mem}, 5*time.Millisecond, 10, store.Retention{Done: time.Hour, Dead: time.Hour}, e.m, log)
-	})
-	// Both keep ticking after an error: the log gets more than one line each.
+	// Both keep ticking after an error, and each call waits for its tick: an
+	// error is not a reason to call again at once.
 	waitFor(t, "repeated errors", quickly, func() bool {
-		s := logs.String()
-		return strings.Count(s, "reap failed") >= 2 && strings.Count(s, "prune failed") >= 2
+		return st.reaps.Load() >= 3 && st.prunes.Load() >= 3
 	})
+	wantAtMostOnePerTick(t, "the reaper", st.reaps.Load(), started, every)
+	wantAtMostOnePerTick(t, "the pruner", st.prunes.Load(), started, every)
+	if s := logs.String(); !strings.Contains(s, "reap failed") || !strings.Contains(s, "prune failed") {
+		t.Errorf("the errors were not logged: %s", s)
+	}
+}
+
+func TestMaintenanceLoopsDoNotSpinOnABatchBelowOne(t *testing.T) {
+	// A pass that found nothing never repeats, whatever the batch is, so a
+	// batch of 0 (which Config.Validate rules out) cannot make the loop spin.
+	e := newMaintEnv(t)
+	st := newCallCounter(0, nil)
+	const every = 50 * time.Millisecond
+	started := time.Now()
+	e.start(func(ctx context.Context) { RunReaper(ctx, st, every, 0, 1, e.m, e.log) })
+	e.start(func(ctx context.Context) {
+		RunPruner(ctx, st, every, 0, store.Retention{Done: time.Hour, Dead: time.Hour}, e.m, e.log)
+	})
+	waitFor(t, "a few ticks", quickly, func() bool { return st.reaps.Load() >= 3 && st.prunes.Load() >= 3 })
+	wantAtMostOnePerTick(t, "the reaper", st.reaps.Load(), started, every)
+	wantAtMostOnePerTick(t, "the pruner", st.prunes.Load(), started, every)
+}
+
+func TestMaintenanceCallsHaveATimeoutOfTheirOwn(t *testing.T) {
+	// A call on a connection that hangs must end by itself, or it would stall
+	// its loop for good.
+	e := newMaintEnv(t)
+	st := newCallCounter(0, nil)
+	e.start(func(ctx context.Context) { RunReaper(ctx, st, 5*time.Millisecond, 10, 1, e.m, e.log) })
+	e.start(func(ctx context.Context) {
+		RunPruner(ctx, st, 5*time.Millisecond, 10, store.Retention{Done: time.Hour, Dead: time.Hour}, e.m, e.log)
+	})
+	// The reaper's and the pruner's first calls arrive in either order.
+	for range 2 {
+		select {
+		case left := <-st.deadlines:
+			if left < 8*time.Second || left > maintenanceCallTimeout {
+				t.Errorf("a call has %v left on its context, want a deadline of about %v", left, maintenanceCallTimeout)
+			}
+		case <-time.After(quickly):
+			t.Fatal("a loop did not call the store")
+		}
+	}
+}
+
+func TestMaintenanceLoopsRejectANonPositiveInterval(t *testing.T) {
+	// A ticker cannot have one, and the panic says which call was wrong.
+	retention := store.Retention{Done: time.Hour, Dead: time.Hour}
+	for name, call := range map[string]func(){
+		"RunReaper": func() {
+			RunReaper(t.Context(), newCallCounter(0, nil), 0, 10, 1, NewMetrics(prometheus.NewRegistry()), slog.New(slog.NewTextHandler(io.Discard, nil)))
+		},
+		"RunPruner": func() {
+			RunPruner(t.Context(), newCallCounter(0, nil), -time.Second, 10, retention, NewMetrics(prometheus.NewRegistry()), slog.New(slog.NewTextHandler(io.Discard, nil)))
+		},
+	} {
+		func() {
+			defer func() {
+				msg, _ := recover().(string)
+				if !strings.Contains(msg, name) || !strings.Contains(msg, "must be positive") {
+					t.Errorf("%s with a non-positive interval panicked with %q, want a message naming the call", name, msg)
+				}
+			}()
+			call()
+		}()
+	}
 }
 
 func TestPrunerHonorsRetention(t *testing.T) {
