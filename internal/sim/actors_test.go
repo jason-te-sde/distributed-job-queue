@@ -36,6 +36,10 @@ type rig struct {
 	changes   []memstore.Change
 	hooks     []func(memstore.Change)
 	completed int // OpComplete changes so far
+
+	// step fires one event; a scenario that checks something after every
+	// event replaces it.
+	step func() bool
 }
 
 // newRig builds a cluster over a quiet network with 1ms to 3ms latency, and
@@ -53,7 +57,7 @@ func newRigNet(t *testing.T, seed uint64, cfg sim.NetConfig) *rig {
 		}
 	})
 	w := sim.NewWorld(seed)
-	r := &rig{t: t, w: w, net: sim.NewNetwork(w, cfg), sink: sim.NewSink()}
+	r := &rig{t: t, w: w, net: sim.NewNetwork(w, cfg), sink: sim.NewSink(), step: w.Step}
 	r.st = sim.NewStoreNode(w, r.observe)
 	return r
 }
@@ -138,7 +142,7 @@ func (r *rig) producer(id string, mod func(*sim.ProducerConfig), onConfirm func(
 // reports whether cond holds.
 func (r *rig) runUntil(limit time.Duration, cond func() bool) bool {
 	for !cond() {
-		if r.w.Now >= limit || !r.w.Step() {
+		if r.w.Now >= limit || !r.step() {
 			return false
 		}
 	}
@@ -148,7 +152,7 @@ func (r *rig) runUntil(limit time.Duration, cond func() bool) bool {
 // runFor fires events until d of virtual time has passed.
 func (r *rig) runFor(d time.Duration) {
 	end := r.w.Now + d
-	for r.w.Now < end && r.w.Step() {
+	for r.w.Now < end && r.step() {
 	}
 }
 
@@ -216,50 +220,59 @@ func TestHappyPathAllJobsSucceed(t *testing.T) {
 	}
 }
 
+// runStalledHolder runs a job through two workers that never cooperate with
+// cancellation. The one that leases it is stalled for twice the TTL just after
+// its handler starts. Its lease expires, the reaper gives the job to the other
+// worker, and the scenario ends after the stalled worker has woken up and
+// sent its late ack. Every handler runs for handler.
+func (r *rig) runStalledHolder(handler time.Duration) {
+	r.t.Helper()
+	r.addBroker("b1", nil)
+	byID := map[string]*sim.WorkerNode{}
+	for _, id := range []string{"wa", "wb"} {
+		byID[id] = r.addWorker(id, func(c *sim.WorkerConfig) {
+			c.Lease.Concurrency = 1
+			c.CooperativeP = 0
+			c.Handler = sim.HandlerModel{Duration: [2]time.Duration{handler, handler}}
+		})
+	}
+	stalled := false
+	r.onChange(func(ch memstore.Change) {
+		if ch.Op != memstore.OpLease || stalled {
+			return
+		}
+		stalled = true
+		holder := byID[ch.After.LeasedBy]
+		r.w.After(100*time.Millisecond, "stall holder", func() { holder.Stall(2 * testTTL) })
+	})
+	r.producer("p1", nil, nil, nil)
+
+	if !r.runUntil(5*time.Minute, func() bool { return r.completed == 1 }) {
+		r.t.Fatalf("job did not complete by %v", r.w.Now)
+	}
+	r.runFor(2 * testTTL)
+}
+
+// stalledHolderCases are the two orders in which the stalled worker's late
+// write can reach the sink and the store.
+var stalledHolderCases = []struct {
+	name string
+	// handler is how long every handler runs.
+	handler time.Duration
+	// rejected says that the stalled worker's sink write comes after the
+	// other worker's, so that the sink rejects it. Otherwise it comes first,
+	// the sink takes it, and the store fences the Complete.
+	rejected bool
+}{
+	{"sink rejects the late write", time.Second, true},
+	{"store fences the late Complete", 40 * time.Second, false},
+}
+
 func TestStalledWorkerIsFencedAndJobRedelivered(t *testing.T) {
-	// Two workers that never cooperate with cancellation share one job. The
-	// one that leases it is stalled for twice the TTL just after the handler
-	// starts. Its lease expires, the reaper gives the job to the other worker
-	// and, when the stalled one wakes up, its late handler is fenced.
-	for _, tc := range []struct {
-		name string
-		// handler is how long every handler runs.
-		handler time.Duration
-		// rejected says that the stalled worker's sink write comes after
-		// the other worker's, so that the sink rejects it. Otherwise it
-		// comes first, the sink takes it, and the store fences the Complete.
-		rejected bool
-	}{
-		{"sink rejects the late write", time.Second, true},
-		{"store fences the late Complete", 40 * time.Second, false},
-	} {
+	for _, tc := range stalledHolderCases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newRig(t, 21)
-			r.addBroker("b1", nil)
-			byID := map[string]*sim.WorkerNode{}
-			for _, id := range []string{"wa", "wb"} {
-				byID[id] = r.addWorker(id, func(c *sim.WorkerConfig) {
-					c.Lease.Concurrency = 1
-					c.CooperativeP = 0
-					c.Handler = sim.HandlerModel{Duration: [2]time.Duration{tc.handler, tc.handler}}
-				})
-			}
-			stalled := false
-			r.onChange(func(ch memstore.Change) {
-				if ch.Op != memstore.OpLease || stalled {
-					return
-				}
-				stalled = true
-				holder := byID[ch.After.LeasedBy]
-				r.w.After(100*time.Millisecond, "stall holder", func() { holder.Stall(2 * testTTL) })
-			})
-			r.producer("p1", nil, nil, nil)
-
-			if !r.runUntil(5*time.Minute, func() bool { return r.completed == 1 }) {
-				t.Fatalf("job did not complete by %v", r.w.Now)
-			}
-			// Let the stalled worker wake up and send its late ack.
-			r.runFor(2 * testTTL)
+			r.runStalledHolder(tc.handler)
 
 			jobs := r.requireState(job.StateSucceeded)
 			if len(jobs) != 1 || jobs[0].Epoch != 2 {

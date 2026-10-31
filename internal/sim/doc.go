@@ -22,6 +22,11 @@
 // ScheduleFaults, which crashes, stalls and partitions them. Nodes talk only
 // through Network.Send, and each measures time on its own Clock.
 //
+// Checker is the oracle. A run feeds it every row change of the store, every
+// confirmation and cancel a client hears, and every worker's view of its
+// leases after each event; it names the first invariant that breaks, S1 to S8
+// while the faults run and L1 and L2 once the system has healed.
+//
 // Epoch is the wall-clock instant that virtual time zero stands for when a
 // simulated database needs a timestamp; see World.StoreTime.
 package sim
