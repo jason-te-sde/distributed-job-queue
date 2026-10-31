@@ -13,15 +13,15 @@ Two rules hold everywhere. A test that needs a database or a cluster **fails lou
 | Architecture test | `internal/archtest` | A core that imports `os` or `net`, calls `time.Now`, starts a goroutine or uses a channel; a layering violation; an import outside the dependency list. It needs no linter | `go test ./...` |
 | Broker and SDK tests | `internal/broker`, root package | Handlers over an in-process gRPC connection and the memory store: validation before authorization, role and tenant scope, error mapping, the dispatcher shell, the reaper and pruner, the metrics, the SDK producer and worker, the zombie handler, graceful drain. Race builds also check that the cores are entered from one goroutine | `go test -race ./...` |
 | Deterministic simulator | `internal/sim` | Whole-system safety and liveness under crashes, stalls, partitions, loss, duplication, reordering, clock drift and lost notifications; see below | `go test -race ./...` (500 seeds) |
-| Planted flaws | build tag `jobqueue_flaws`, `scripts/check-flaws.sh` | That the suite goes red when the code is wrong; see below | the `flaws` CI job |
+| Planted flaws | build tag `jobqueue_flaws`, `scripts/check-flaws.sh`, `scripts/flaws.tsv` | That the suite goes red when the code is wrong, and that the build that carries the flaws is inert otherwise; see below | `make flaws`, and the `flaws` CI job |
 | Differential test | `internal/store/pgstore` (`TestPGDifferential`) | Any divergence between PostgreSQL and the reference store over random operation sequences, with the clock moving, reaping and pruning; shrinks to a minimal sequence | `-tags pg` |
 | PostgreSQL concurrency tests | `internal/store/pgstore` (`TestPGConcurrent...`) | Double leases, a duplicate idempotency key under concurrent enqueues, an acknowledgement racing the reaper, lost or invented jobs under load, deadlocks between opposite-order acknowledgements | `-tags pg`, always with `-race` |
 | PostgreSQL integration tests | `internal/broker`, `internal/store/pgstore/migrate`, `cmd/jobqueue-server` | The real broker over a real database: schema mismatch refused, tokens enforced, graceful shutdown, the NOTIFY listener reconnecting and resyncing, migrations applied once under concurrency, the schema's constraints and indexes | `-tags pg` |
-| End-to-end on PostgreSQL | `e2e_pg_test.go` (lands with the end-to-end task) | The whole stack on real time: three brokers, the SDK, no test doubles; a zombie worker fenced; a rolling restart of every broker; delayed jobs on time; a noisy neighbour under `drr` and `fifo` | `-tags pg` |
-| Chaos | `test/chaos` (lands with the chaos task) | The real processes: 3 `jobqueue-server`, workers and a fault-injecting proxy, with `kill -9`, `SIGSTOP`, delays, partitions and PostgreSQL restarts. Checks S1, S4, S7 and L1 on the recorded history | `-tags chaos`, Linux CI |
-| Kubernetes end-to-end | `test/e2e` (lands with the end-to-end task) | Helm install in a kind cluster, a broker pod deleted and all brokers restarted under load with zero lost jobs, KEDA scaling a worker from 0 to N and back | `-tags e2e`, Linux CI |
+| End-to-end on PostgreSQL | `e2e_pg_test.go` | The whole stack on real time, with no test doubles: 1000 jobs of three tenants through three brokers (`TestPGEndToEnd`); a zombie worker fenced (`TestPGZombieWorkerIsFenced`); every broker replaced one after the other (`TestPGRollingBrokerRestart`); delayed jobs neither early nor late (`TestPGDelayedJobsRunOnTime`); a noisy neighbour under `drr` and under `fifo` (`TestPGNoisyNeighbor`) | `-tags pg` |
+| Chaos | `test/chaos` (`TestChaos`) | The real processes: 3 `jobqueue-server` and 4 workers over a real PostgreSQL, with a Toxiproxy between them, while a seeded generator kills and restarts brokers and workers, freezes workers for twice the TTL, partitions brokers and the database, adds latency and restarts PostgreSQL. Every process records a history, and `internal/history` checks S1, S4, S7 and L1 against the final state. It asserts that every kind of fault fired and that some job was delivered twice | `-tags chaos`, Linux CI |
+| Kubernetes end-to-end | `test/e2e` (`TestE2E`) | The image, the chart, the example worker and the KEDA scaler on a kind cluster: the stack installs and processes jobs while the worker starts at zero replicas; a broker pod is deleted and all brokers are restarted under load with no job lost or dead and none slower than 30 s; the worker scales from zero up and back to zero. The tests that guard the run's own safety (it refuses to start on a cluster that is not a local kind cluster) run in every `go test` | `-tags e2e`, Linux CI |
 | Fuzzing | `Fuzz...` functions | Request and spec validation, the transition functions (any input leaves the table intact), the NOTIFY payload parser, the tokens file parser and the flag parser never panic | seed corpus in `go test`; the nightly job fuzzes each target |
-| Script and documentation tests | `scripts/tests`, `docs_test.go` | The hygiene check (no CJK text, no attribution), the pg test count floor, the Helm render checks, and that the README cites tests that exist, every link resolves and every design record has its sections | `make test-scripts`, `go test` |
+| Script and documentation tests | `scripts/tests`, `docs_test.go` | The hygiene check (no CJK text, no attribution), the pg test count floor, the flaws script, the Helm render checks, and that the README cites tests that exist, every link resolves and every design record has its sections | `make test-scripts`, `go test` |
 
 ### The simulator
 
@@ -45,9 +45,9 @@ and, after the faults stop and the system has had time to heal:
 | L1 | Every confirmed job that was not cancelled is `succeeded` or `dead` |
 | L2 | No lease outlives its expiry by more than the reap interval |
 
-Each batch of seeds must also be *rough enough to mean something*: it asserts that duplicate deliveries, fenced acknowledgements, sink rejections, reaps, prunes, worker crashes and stalls, broker crashes, store outages, partitions and dropped notifications all happened. A system that is left alone passes every safety check. The checker itself has tests: hand-built bad histories must raise the right alarm and good ones must not.
+A sweep of at least 100 seeds must also be *rough enough to mean something*: it asserts that duplicate deliveries, fenced acknowledgements, sink rejections, reaps, prunes, worker crashes and stalls, broker crashes, store outages, partitions and dropped notifications all happened. A system that is left alone passes every safety check. The checker itself has tests: hand-built bad histories must raise the right alarm and good ones must not.
 
-CI runs 500 seeds on every run, which took 62 s under `-race` on an Apple M2. The nightly job runs 20,000; a run of 20,000 seeds found no violation.
+CI runs 500 seeds on every run, which took 62 s under `-race` on an Apple M2. The nightly job runs 20,000 seeds without `-race`; a run of 20,000 seeds found no violation.
 
 ## How to run each layer
 
@@ -60,21 +60,50 @@ make test-pg                              # everything behind the pg tag, with -
 go test -race -count=1 -tags pg -run '^TestPGDifferential$' ./internal/store/pgstore/
 go test -race -count=1 -tags pg -run '^TestPGConcurrent' ./internal/store/pgstore/
 
-make sim                                  # the simulator alone, 500 seeds under -race (lands with the simulator)
+make sim                                  # the simulator alone, 500 seeds under -race
 JOBQUEUE_SIM_SEEDS=20000 go test -count=1 -timeout 60m -run TestSimSeeds ./internal/sim/    # what the nightly job runs
 
-scripts/check-flaws.sh                    # every planted flaw must turn its tests red (lands with the flaws job)
+make flaws                                # every planted flaw must turn its tests red (the pg rows need JOBQUEUE_TEST_DSN)
 
 go test -run '^$' -fuzz '^FuzzTransitions$' -fuzztime 30s ./internal/core/job/    # one fuzz target
 
-go test -tags chaos -count=1 -timeout 25m ./test/chaos/                           # needs Docker and Toxiproxy (lands with the chaos task)
-go test -tags e2e -count=1 -timeout 40m ./test/e2e/                               # needs kind, Helm and an image (lands with the end-to-end task)
-
 make test-scripts                         # the tests of the scripts
 make hygiene                              # no CJK text, no attribution, in files and in commit messages
-make lint                                 # golangci-lint, buf, govulncheck
-make preflight                            # everything CI runs that can run on a laptop
+make lint                                 # golangci-lint (twice: the second pass compiles the flaw sites in), buf, govulncheck
+make preflight                            # everything CI runs that can run on a laptop, flaws included
 ```
+
+The two multi-process layers need more than Go and are run from their own CI jobs. Each fails, and never skips, when something is missing.
+
+```sh
+# Chaos: a PostgreSQL in a Docker container, started under a fixed name because the test restarts it,
+# and a toxiproxy-server (v2.13.0 in CI, checked against the release's checksums).
+docker run -d --name jq-chaos-pg -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:18
+toxiproxy-server -host 127.0.0.1 -port 8474 &
+export JOBQUEUE_CHAOS_PG_CONTAINER=jq-chaos-pg
+export JOBQUEUE_CHAOS_PG_DSN='postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable'
+JOBQUEUE_CHAOS_SEED=2 go test -tags chaos -count=1 -timeout 25m -v ./test/chaos/
+
+# Kubernetes: a kind cluster with KEDA in the namespace keda, kubectl pointed at it, helm,
+# and the image loaded into the cluster.
+kind create cluster --name jq-e2e --config deploy/kind/kind-config.yaml
+helm repo add kedacore https://kedacore.github.io/charts
+helm install keda kedacore/keda --version 2.21.0 --namespace keda --create-namespace --wait
+docker build -t jq:e2e . && kind load docker-image jq:e2e --name jq-e2e
+JOBQUEUE_E2E_IMAGE=jq:e2e go test -tags e2e -count=1 -timeout 40m -v ./test/e2e/
+```
+
+| Variable | Layer | Meaning |
+| --- | --- | --- |
+| `JOBQUEUE_CHAOS_PG_CONTAINER` | chaos | Name of the Docker container that runs PostgreSQL (the test restarts it) |
+| `JOBQUEUE_CHAOS_PG_DSN` | chaos | `postgres://` URL of a superuser of that server |
+| `JOBQUEUE_CHAOS_TOXIPROXY_ADDR` | chaos | API address of `toxiproxy-server`, `127.0.0.1:8474` by default |
+| `JOBQUEUE_CHAOS_SEED` | chaos | Seed of the fault schedule and the workload, 1 by default. CI runs seeds 1, 2 and 3 through a manual run |
+| `JOBQUEUE_CHAOS_DURATION` | chaos | Length of the fault phase, 2m by default; the number of jobs (2000 for the default) scales with it |
+| `JOBQUEUE_E2E_IMAGE` | kubernetes | An image already loaded into the cluster, as `name:tag` (required) |
+| `JOBQUEUE_E2E_NAMESPACE` | kubernetes | Namespace of the run, `jobqueue-e2e` by default; the run refuses to start where it exists and leaves it behind for inspection |
+
+A failing chaos run saves the process logs and every history file under `test/chaos/artifacts/`, and CI uploads them. The Kubernetes run pins itself to the current kubectl context and starts only on a kind cluster whose API server is on a loopback address; a failing run dumps the state of the cluster, which CI uploads.
 
 **The `pg` tag.** The PostgreSQL tests sit behind the build tag `pg`, and every test function in such a file is named `TestPG...`. Without the tag they are not compiled, so the macOS jobs run only the rest. With the tag and no `JOBQUEUE_TEST_DSN`, or a database that cannot be reached, they **fail**: there is no switch to skip them. The pg job also counts the tests that actually ran and fails if the count is below the floor in `scripts/pg-min-tests.txt`, so that a whole group accidentally excluded cannot leave the build green. The tests use a local PostgreSQL 17 on a laptop, and 15 and 18 in CI. Each test creates a private, migrated database on the server that the DSN names (`jobqueue_test_<pid>_<n>`) and drops it afterwards, so the role needs `CREATEDB`.
 
@@ -90,13 +119,15 @@ A suite that has never failed has not shown that it can. Nine defects can be pla
 | F2-mem, F2-pg | Lease does not advance the epoch | `TestConformance/LeaseIncrementsEpochAndAttempts`, simulator S3 (mem); `TestPGDifferential` (pg) |
 | F3-mem, F3-pg | The reaper ignores `max_attempts` | `TestConformance/ReapExhaustedGoesDead`, simulator S6 (mem); `TestPGDifferential` (pg) |
 | F4-mem, F4-pg | Heartbeat does not compare the epoch | `TestConformance/HeartbeatStaleTokenIsFenced`, simulator S4 (mem); `TestPGDifferential` (pg) |
-| F5 | The lease tracker anchors the deadline at the arrival of the response | the tracker tests (`TestGrantDeadlineAnchorsAtSendTime`, `TestDeadlineIgnoresResponseLatency`), the property test `TestTrackerProperties`, `TestWorkerDiscardsAGrantThatArrivedPastItsLocalDeadline`, simulator S5 |
+| F5 | The lease tracker anchors the deadline at the arrival of the response | `TestDeadlineIgnoresResponseLatency` (the other tracker tests, `TestTrackerProperties` and the root `TestWorkerDiscardsAGrantThatArrivedPastItsLocalDeadline` go red too), simulator S5 |
 | F6 | The PostgreSQL idempotency check is a check followed by an insert | `TestPGConcurrentEnqueueSameKey` |
 | F7 | The PostgreSQL lease select has no `FOR UPDATE SKIP LOCKED` | `TestPGConcurrentLeaseNoDoubleGrant` |
 | F8 | The planner drops the unused part of a turn that a batch cut short | `TestPlanBatchIndependence`, `TestPlanShareBound` |
 | F9-mem, F9-pg | Lease ignores `run_at` | `TestConformance/LeaseRespectsRunAt`, simulator S8 (mem); `TestPGDifferential` (pg) |
 
-`scripts/check-flaws.sh` (the `flaws` CI job; it lands with the flaws task, and the simulator rows join it when the simulator lands) reads `scripts/flaws.tsv` and, for each row, runs `JOBQUEUE_FLAW=<id> go test -count=1 -tags "jobqueue_flaws[,pg]" -run <regex> <package>` and requires it to fail, then runs the whole suite with no flaw active and requires it to pass. A flaw that no test notices fails the job. You can do one by hand:
+Fourteen sites in all, and `scripts/flaws.tsv` has a row for every site and test pair (21 rows). `TestEveryFlawHasARow` in `internal/flaw` fails when a flaw has no row.
+
+`scripts/check-flaws.sh` (`make flaws`, and the `flaws` CI job) reads `scripts/flaws.tsv` and does four things. It fails if `internal/flaw/flaw.go` quotes a flaw that no row names. For each row it runs `JOBQUEUE_FLAW=<id> go test -count=1 -tags "jobqueue_flaws[,pg]" -run <regex> <package>` and requires a test to fail, and, where the row has an `expect` text, that text in the output: a package that panics at start, does not build or times out has not noticed the flaw, and a pg test without a database fails for another reason. It runs the whole suite with no flaw selected and requires it to pass. And it exits 1 if any row was not caught. The simulator rows name the invariant that the flaw must break, so a flaw is caught by the check meant to catch it; the sweep of 500 seeds finds each memory-store flaw and F5, and the rarest, F1-mem, is found by 17 of the 500. Without `JOBQUEUE_TEST_DSN`, `make flaws` passes `--no-pg`, which skips the pg rows and says how many; the script refuses `--no-pg` on GitHub Actions, so the CI job cannot turn green without them. You can do one row by hand:
 
 ```sh
 JOBQUEUE_FLAW=F8 go test -count=1 -tags jobqueue_flaws -run 'TestPlanBatchIndependence|TestPlanShareBound' ./internal/core/fair/   # fails

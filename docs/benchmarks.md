@@ -2,7 +2,7 @@
 
 What was measured, how, and what it means. Every performance figure that the README or any other document quotes comes from this file, with the command that produced it and the raw output under `docs/benchmarks/`.
 
-This file holds the method and the commands. The measurements are taken by the benchmark run and written into the Results section below. The harness, `jobqueue-bench`, lands with the benchmark task; the commands are its planned interface, so check `jobqueue-bench <experiment> -h` for the exact flags once it exists.
+This file holds the method and the commands. The measurements are taken by the benchmark run and written into the Results section below. The harness is `jobqueue-bench`, in the `bench` directory, which is a Go module of its own; `jobqueue-bench <experiment> -h` lists the flags of each experiment.
 
 ## Method
 
@@ -15,14 +15,14 @@ This file holds the method and the commands. The measurements are taken by the b
 
 ## Experiments
 
-| | Question | Command (planned interface) |
+| | Question | Command |
 | --- | --- | --- |
-| E1 | What is the highest sustained throughput with 1 and with 3 brokers, and what is the enqueue-to-start latency at 50% and 80% of it? | `jobqueue-bench throughput --brokers 1 --find-max --duration <D> --payload-bytes <B> --concurrency <C>`, then `--rate <50% and 80% of the maximum>`; the same with `--brokers 3` |
-| E2 | What does each optimisation buy? Batched leases (1 vs 64 jobs per call), coalesced acknowledgements (off vs the 2 ms or 128 window), `NOTIFY` against polling alone (the latency of an enqueue on an idle queue) | `jobqueue-bench ablate --what batch`, `--what coalesce`, `--what notify` |
-| E3 | How long does a small tenant wait while another floods the queue, under first-come-first-served and under deficit round robin? Tenant A enqueues 100,000 jobs, tenant B 10 per second | `jobqueue-bench noisy --scheduler fifo`, `jobqueue-bench noisy --scheduler drr`, then `jobqueue-bench plot --in noisy-fifo.json --in noisy-drr.json --out docs/benchmarks/noisy-neighbor.svg` |
+| E1 | What is the highest sustained throughput with 1 and with 3 brokers, and what is the enqueue-to-start latency at 50% and 80% of it? | `jobqueue-bench throughput --brokers 1 --find-max --duration <D> --payload-bytes <B> --concurrency <C>`, which searches for the highest rate that holds and then measures at 50% and 80% of it; the same with `--brokers 3`. `--rate <R>` offers one fixed load instead |
+| E2 | What does each optimisation buy? Batched leases (1 vs 64 jobs per call), coalesced acknowledgements (off vs the 2 ms or 128 window), `NOTIFY` against polling alone (the latency of an enqueue on an idle queue) | `jobqueue-bench ablate --what batch`, `--what coalesce`, `--what notify` (the last starts the broker with `--disable-listen`) |
+| E3 | How long does a small tenant wait while another floods the queue, under first-come-first-served and under deficit round robin? Tenant A enqueues 100,000 jobs, tenant B 10 per second; each handler takes `--service-time` (2 ms by default), which sets the capacity that the flood exceeds | `jobqueue-bench noisy --scheduler fifo`, `jobqueue-bench noisy --scheduler drr`, then `jobqueue-bench plot --in noisy-fifo.json --in noisy-drr.json --out docs/benchmarks/noisy-neighbor.svg` |
 | E4 | How long until the jobs of a killed worker run again, against the bound TTL + reap interval + first backoff (up to 1 s) + dispatch latency? How long is the error window that workers see when a broker dies? | `jobqueue-bench recovery --kill worker`, `jobqueue-bench recovery --kill broker` |
 | E5 | Does throughput drift, and does the size of `jobqueue.jobs` plateau, over 30 minutes at half the maximum rate, with pruning on? | `jobqueue-bench soak --duration 30m --rate <50% of the maximum>` |
-| E6 | How does it compare with River on the same machine and PostgreSQL? River runs as a library with no network hop, so this is a reference point and not a comparison of like with like | `jobqueue-bench river --duration <D>` |
+| E6 | How does it compare with River on the same machine and PostgreSQL? River runs as a library with no network hop, so this is a reference point and not a comparison of like with like | `jobqueue-bench river --find-max --duration <D>` |
 
 E3 is the experiment behind the noisy-neighbour graph: the empirical distribution of tenant B's wait under the two schedulers.
 
@@ -46,7 +46,7 @@ Nothing below is a measurement until that run has written it. The run produces, 
 ## How to reproduce
 
 1. Use a machine you can leave alone, with a local PostgreSQL 15 to 18 and `synchronous_commit = on`. Quiet other work.
-2. Run the migrations against an empty database (`jobqueuectl migrate`) and point the harness at it with the database setting that `jobqueue-bench -h` names.
+2. Run the migrations against an empty database (`jobqueuectl migrate`) and point the harness at it with `--database-url` or `$JOBQUEUE_DATABASE_URL`.
 3. Record the machine and the server settings as described under Method.
 4. From the `bench` directory (it is a separate Go module): `go run ./cmd/jobqueue-bench <experiment> ...`, three times each, with the commands in the table above, and the parameters (`<D>`, `<B>`, `<C>`) written down next to each result. One JSON line per result goes to standard output and a summary to standard error; `--out <file>` appends the JSON to a file.
 5. Commit the raw outputs next to this file and update the tables from the median runs.

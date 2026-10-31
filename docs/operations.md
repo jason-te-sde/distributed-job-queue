@@ -86,6 +86,7 @@ The values that matter:
 | `pdb.minAvailable` | 1 | PodDisruptionBudget |
 | `terminationGracePeriodSeconds`, `preStopSleepSeconds` | 40, 5 | The chart refuses to render if the sleep plus the 25 s shutdown grace is not less than the grace period |
 | `example.enabled`, `example.keda.enabled` | `false` | The thumbnail example worker, and its `ScaledObject` |
+| `example.tokenSecret`, `example.tokenKey` | empty | The Secret key with the example worker's bearer token (a worker token for the queue `thumbnails`), required when the brokers require tokens. With `tls.secretName` the TLS Secret also needs a `ca.crt` key, which the worker trusts |
 | `migrations.enabled` | `true` | The migration hook |
 
 ### Rolling updates and restarts
@@ -240,20 +241,19 @@ A `backend_start` that keeps getting newer is the reconnect loop.
 
 ### KEDA is not scaling
 
-(The scaler endpoint lands with the KEDA task. This is the behaviour it is built to have.)
-
-**What it means.** KEDA asks a broker for a queue's backlog through the external scaler on port 7072, and scales the worker Deployment to match: backlog is the number of **ready plus leased** jobs; scheduled jobs are not counted until they fall due. Leased jobs are included, so KEDA never scales workers to zero while they hold leases.
+**What it means.** KEDA asks a broker for a queue's backlog through the broker's external scaler, a gRPC service on its own port (`--scaler-addr`, which the chart sets to `:7072`), and scales the worker Deployment to match. The backlog is the number of **ready plus leased** jobs of the queue; scheduled jobs are not counted until they fall due. Leased jobs are included, so KEDA never scales workers to zero while they hold leases: the scaler is active whenever a job is leased, whatever `activationBacklog` says, and otherwise when the backlog is **greater than** `activationBacklog`. The metric is named `jobqueue-<queue>-backlog`. A backlog that a broker has just read is reused for half a second, so many KEDA streams do not mean many database queries.
 
 **Check, in this order.**
 
 1. *The queue and the numbers.* `jobqueuectl stats --queue Q`: is the backlog there, and is it the queue the `ScaledObject` names (`metadata.queue`)? A typo in `queue`, `targetBacklog` (an integer of at least 1, default 10) or `activationBacklog` (an integer of at least 0, default 0) is refused by every call.
-2. *Activation.* A scaler is active only when the backlog is **greater than** `activationBacklog`. Scale-to-zero also waits for `cooldownPeriod` after the last activity.
-3. *The ScaledObject.* `kubectl describe scaledobject <name>` shows conditions and errors; `kubectl get hpa` shows what KEDA created.
-4. *Reachability.* The scaler Service is `<fullname>-scaler` on port 7072. The chart's NetworkPolicy admits that port only from the namespace `scaler.allowNamespace` (default `keda`); if KEDA runs in another namespace, set it. From a pod in the KEDA namespace, check that the address in `scalerAddress` connects.
+2. *Activation and cooldown.* With no job leased, the scaler is inactive until the backlog exceeds `activationBacklog`. Scale-to-zero waits for `cooldownPeriod` after the last activity, and for the Deployment's pods to terminate.
+3. *The ScaledObject.* `kubectl describe scaledobject <name>` shows conditions and errors; `kubectl get hpa` shows what KEDA created. With the chart, `example.keda.enabled` renders one for the example worker, with `minReplicas`, `maxReplicas`, `targetBacklog`, `pollingInterval` and `cooldownPeriod` from the values.
+4. *Reachability.* The scaler Service is `<fullname>-scaler` on port 7072, and the trigger's `scalerAddress` is `<fullname>-scaler.<namespace>.svc.cluster.local:7072`. The chart's NetworkPolicy admits that port only from the namespace `scaler.allowNamespace` (default `keda`); if KEDA runs in another namespace, set it. From a pod in the KEDA namespace, check that the address connects. KEDA dials it without TLS.
 5. *KEDA's own logs.* `kubectl logs -n keda deploy/keda-operator` shows the external scaler errors.
-6. *The brokers.* The scaler is served by the brokers, so brokers that are not ready cannot answer; see above.
+6. *The brokers.* The scaler is served by the brokers, so brokers that are not ready cannot answer; see above. A broker with no `--scaler-addr` does not serve it: with the chart, `scaler.enabled` must be `true`.
+7. *The example worker's own access.* The example worker still needs a way into the brokers: `--set insecure=true` for a plaintext test cluster, or the Secret named by `example.tokenSecret` and `example.tokenKey` (a worker token for the queue `thumbnails`) and, with TLS, a `ca.crt` key in the TLS Secret. A worker that is refused stops, and the backlog does not drain.
 
-**Mind the exposure.** The scaler port has no token authentication, because KEDA's external scaler does not send tokens. It reads job counts only. The NetworkPolicy is what restricts it, and a cluster whose network plugin does not enforce NetworkPolicy leaves it open to the cluster.
+**Mind the exposure.** The scaler port is **unauthenticated, plaintext gRPC on a port of its own, and it must stay inside the cluster behind the chart's NetworkPolicy.** KEDA's external scaler protocol sends no token, so the broker puts no authentication in front of it, and it is served without TLS, which is how KEDA dials it unless the trigger asks for TLS. What the chart does: when `scaler.enabled` is true it renders a NetworkPolicy that selects the broker pods and admits TCP 7070 and 7071 from anywhere and TCP 7072 (`scaler.port`) only from namespaces labelled `kubernetes.io/metadata.name: <scaler.allowNamespace>`. The `<fullname>-scaler` Service is of type ClusterIP. The policy is enforced only by a network plugin that supports NetworkPolicy; on a cluster that has none, the port is open to every pod. Within the KEDA namespace any pod can reach it. What a caller learns is the job count of a queue it names (the cache of queue names is capped at 1024 so that this cannot be used to grow memory), and it changes nothing. Do not publish the port outside the cluster, whether by a `LoadBalancer`, a `NodePort` or an ingress, and do not point `scaler.allowNamespace` at a namespace whose pods you do not trust.
 
 ## Reference
 
@@ -267,7 +267,7 @@ Every flag has a default; `--database-url` (or `$JOBQUEUE_DATABASE_URL`) is the 
 | `--max-db-conns` | 20 | Size of the database connection pool |
 | `--grpc-addr` | `:7070` | Listen address of the gRPC API |
 | `--http-addr` | `:7071` | Listen address of `/healthz`, `/readyz` and `/metrics` |
-| `--scaler-addr` | empty (off) | Listen address of the KEDA external scaler |
+| `--scaler-addr` | empty (off) | Listen address of the autoscaler service: unauthenticated plaintext gRPC, to be reachable only by KEDA through a NetworkPolicy |
 | `--tokens-file` | none | File of token hashes |
 | `--tls-cert`, `--tls-key` | none | TLS certificate and key of the gRPC listener, both or neither |
 | `--insecure` | false | Serve a non-loopback address without TLS and tokens |
@@ -275,6 +275,7 @@ Every flag has a default; `--database-url` (or `$JOBQUEUE_DATABASE_URL`) is the 
 | `--tenant-weights` | none | `tenant=weight,tenant=weight`, weights 1 to 1000, others weigh 1 |
 | `--quantum` | 8 | Jobs a tenant of weight 1 takes per turn under `drr` |
 | `--max-in-flight` | 4 | Most store fetches in flight per queue |
+| `--disable-listen` | false | Do not listen for notifications; find work by polling only. For measurements: production leaves it off |
 | `--poll-interval` | 1s | Fallback poll for work when no notification arrives |
 | `--activity-interval` | 1s | How often the dispatcher asks which tenants have work |
 | `--reap-interval`, `--reap-batch` | 1s, 1000 | How often expired leases are taken back, and how many at once |

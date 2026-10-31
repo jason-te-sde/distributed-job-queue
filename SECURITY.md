@@ -31,7 +31,7 @@ A flaw in these is a vulnerability: bypassing authentication or authorization (r
 These are known properties, described in the documentation, and not vulnerabilities:
 
 - **The HTTP port** (`--http-addr`: `/healthz`, `/readyz`, `/metrics`) has no authentication, because probes and scrapers send no tokens. Keep it inside the cluster.
-- **The KEDA scaler port** has no token authentication, because KEDA's external scaler protocol sends none. It reads job counts only. The Helm chart's NetworkPolicy restricts it to the KEDA namespace, which depends on a network plugin that enforces NetworkPolicy.
+- **The KEDA scaler port** is unauthenticated plaintext gRPC on a port of its own, because KEDA's external scaler protocol sends no token and KEDA dials it without TLS. It must stay inside the cluster. It reads job counts only. The Helm chart's NetworkPolicy restricts it to the KEDA namespace, which depends on a network plugin that enforces NetworkPolicy.
 - **`--insecure`** and **`WithInsecure`** turn protection off on purpose. A token sent over a plaintext connection is visible to the network.
 - **A token on a command line** (`jobqueuectl --token`) shows in the process list. Use `JOBQUEUE_TOKEN`.
 - **Delivery is at-least-once.** A job can run more than once; side effects in your own systems need the fencing token or idempotency ([README](README.md)).

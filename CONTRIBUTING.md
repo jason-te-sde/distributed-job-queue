@@ -17,6 +17,8 @@ make test                 # go test -race ./...  (unit, property, simulator, arc
 
 export JOBQUEUE_TEST_DSN='postgres://localhost:5432/postgres?sslmode=disable'
 make test-pg              # the PostgreSQL tests; the role needs CREATEDB
+make sim                  # the simulator alone, 500 seeds under -race
+make flaws                # every planted flaw must turn its tests red
 make preflight            # everything CI runs that can run on a laptop
 ```
 
@@ -37,7 +39,7 @@ A `pg`-tagged test that cannot reach a database fails; it never skips. [docs/tes
 
 1. **Test first.** Write the test that fails for the right reason, see it fail, then write the code. Put the test on the cheapest layer that can catch the bug: a transition in `internal/core/job`, a contract rule in `internal/store/storetest`, an interleaving in the simulator, SQL behaviour in a `pg` test. A bug found by a higher layer (a simulator seed, the chaos test) gets a test on a lower one too, where that is possible.
 2. **Keep a change to one thing.** A failing seed is kept in `internal/sim/testdata/regression_seeds.txt`, as docs/testing.md describes.
-3. **Show that a new guard can fail.** If you add a safety property or a defence, plant its opposite behind the `jobqueue_flaws` tag and add a row to `scripts/flaws.tsv`.
+3. **Show that a new guard can fail.** If you add a safety property or a defence, plant its opposite behind the `jobqueue_flaws` tag, name it in `internal/flaw/flaw.go` and add a row to `scripts/flaws.tsv` for the test that must catch it (`TestEveryFlawHasARow` fails without one), then run `make flaws`.
 4. **Run `make preflight` before you push.** CI runs the same checks, and more.
 
 ### Generated code and the protocol
