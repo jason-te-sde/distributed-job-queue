@@ -16,4 +16,16 @@
 // the store is the authority on jobs and on time. Waiting for work, and
 // sharing it between tenants, is the job of a LeaseDispatcher that Lease
 // calls. Metrics holds the Prometheus collectors that the handlers update.
+//
+// Dispatcher is the LeaseDispatcher of the broker. It is the shell around the
+// pure dispatch core: one goroutine owns the core and the fair-share planners,
+// carries out the effects the core returns, and talks to the store through
+// goroutines of its own that report back. Listener feeds it the notifications
+// of the store.
+//
+// Broker assembles everything: the gRPC server behind the authentication
+// interceptor, the dispatcher and listener, the reaper and pruner (RunReaper,
+// RunPruner), the HTTP endpoint with /healthz, /readyz and /metrics (Health,
+// Metrics), and the ordered shutdown. cmd/jobqueue-server is a thin command
+// around New and Run.
 package broker

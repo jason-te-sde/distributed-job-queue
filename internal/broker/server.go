@@ -181,9 +181,9 @@ func (s *Server) Enqueue(ctx context.Context, req *jobqueuev1.EnqueueRequest) (*
 	for i, r := range results {
 		resp.Results[i] = &jobqueuev1.EnqueueResult{Id: r.ID, Deduplicated: r.Deduplicated}
 		if r.Deduplicated {
-			s.metrics.deduplicated.WithLabelValues(specs[i].Queue).Inc()
+			s.metrics.deduplicated.For(specs[i].Queue).Inc()
 		} else {
-			s.metrics.enqueued.WithLabelValues(specs[i].Queue).Inc()
+			s.metrics.enqueued.For(specs[i].Queue).Inc()
 		}
 	}
 	return resp, nil

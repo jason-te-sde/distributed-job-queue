@@ -354,32 +354,7 @@ func (ts *testServer) stored() int {
 // that does not exist reads as 0.
 func (ts *testServer) counter(name string, labels map[string]string) float64 {
 	ts.t.Helper()
-	families, err := ts.reg.Gather()
-	if err != nil {
-		ts.t.Fatal(err)
-	}
-	for _, mf := range families {
-		if mf.GetName() != name {
-			continue
-		}
-	metric:
-		for _, m := range mf.GetMetric() {
-			got := map[string]string{}
-			for _, l := range m.GetLabel() {
-				got[l.GetName()] = l.GetValue()
-			}
-			if len(got) != len(labels) {
-				continue
-			}
-			for k, v := range labels {
-				if got[k] != v {
-					continue metric
-				}
-			}
-			return m.GetCounter().GetValue()
-		}
-	}
-	return 0
+	return metricValue(ts.t, ts.reg, name, labels)
 }
 
 func wantCode(t *testing.T, err error, want codes.Code) {
