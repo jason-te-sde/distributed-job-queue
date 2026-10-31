@@ -16,4 +16,10 @@
 // the store is the authority on jobs and on time. Waiting for work, and
 // sharing it between tenants, is the job of a LeaseDispatcher that Lease
 // calls. Metrics holds the Prometheus collectors that the handlers update.
+//
+// Dispatcher is the LeaseDispatcher of the broker. It is the shell around the
+// pure dispatch core: one goroutine owns the core and the fair-share planners,
+// carries out the effects the core returns, and talks to the store through
+// goroutines of its own that report back. Listener feeds it the notifications
+// of the store.
 package broker
