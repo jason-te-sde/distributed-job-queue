@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/jason-te-sde/distributed-job-queue/internal/core/job"
+	jobqueuev1 "github.com/jason-te-sde/distributed-job-queue/internal/gen/jobqueue/v1"
 )
 
 // hashOf returns the line form of a token: the lower-case hex SHA-256.
@@ -178,11 +180,78 @@ func TestLoadTokensRejectsMalformed(t *testing.T) {
 	}
 }
 
+// A tokens file is a place where a token or a hash gets pasted into the wrong
+// column. Whatever column it lands in, the error must not repeat it.
 func TestLoadTokensErrorDoesNotEchoTheHash(t *testing.T) {
 	h := hashOf("secret")
-	_, err := LoadTokens(strings.NewReader("producer tenant=a " + h + "\nproducer tenant=b " + h))
-	if err == nil || strings.Contains(err.Error(), h) {
-		t.Fatalf("err = %v", err)
+	good := hashOf("good")
+	const token = "s3cret-Token/value"
+	tests := []struct {
+		name string
+		file string
+		leak string // text that must not appear in the error
+	}{
+		{"a duplicate hash", "producer tenant=a " + h + "\nproducer tenant=b " + h, h},
+		{"a hash in the role column", h + " tenant=a " + good, h},
+		{"a token in the role column", token + " tenant=a " + good, token},
+		{"a hash in the role column of a line of three words", h + " - " + good, h},
+		{"a token in the binding column", "producer tenant=" + token + " " + good, token},
+		{"a token in the queue list", "worker queues=a," + token + " " + good, token},
+		{"a token in the hash column", "producer tenant=a " + token, token},
+		{"a hash of the wrong length in the hash column", "producer tenant=a " + h + "0", h},
+		{"a hash in uppercase", "producer tenant=a " + strings.ToUpper(h), h},
+		{"a token on a line with too many columns", "producer tenant=a extra " + token, token},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadTokens(strings.NewReader(tc.file))
+			if err == nil {
+				t.Fatal("LoadTokens accepted the file")
+			}
+			for _, leak := range []string{tc.leak, strings.ToLower(tc.leak), strings.ToUpper(tc.leak)} {
+				if strings.Contains(err.Error(), leak) {
+					t.Fatalf("error %q repeats %q", err, leak)
+				}
+			}
+		})
+	}
+}
+
+// rpcMethods returns the names of the methods of JobQueueService as the
+// generated service descriptor lists them, sorted.
+func rpcMethods(t *testing.T) []string {
+	t.Helper()
+	desc := jobqueuev1.JobQueueService_ServiceDesc
+	if len(desc.Streams) != 0 {
+		t.Fatalf("the service has %d streaming methods, which UnaryAuth does not guard", len(desc.Streams))
+	}
+	names := make([]string, 0, len(desc.Methods))
+	for _, m := range desc.Methods {
+		names = append(names, m.MethodName)
+	}
+	if len(names) == 0 {
+		t.Fatal("the service descriptor lists no methods")
+	}
+	slices.Sort(names)
+	return names
+}
+
+// TestEveryRPCHasARoleEntry fails when a method is added to the service
+// without a row in the role table, or a row stays after its method is gone.
+// An RPC that is missing from the table is denied to everybody, which is safe
+// but breaks it for every caller, so the omission should show up in a test.
+func TestEveryRPCHasARoleEntry(t *testing.T) {
+	want := rpcMethods(t)
+	if got := slices.Sorted(maps.Keys(methodRoles)); !slices.Equal(got, want) {
+		t.Errorf("methodRoles covers %v, but the service has %v", got, want)
+	}
+	if got := slices.Sorted(maps.Keys(allowedRoles)); !slices.Equal(got, want) {
+		t.Errorf("the test's own table covers %v, but the service has %v", got, want)
+	}
+	for method, roles := range methodRoles {
+		if len(roles) == 0 {
+			t.Errorf("%s may be called by nobody", method)
+		}
 	}
 }
 

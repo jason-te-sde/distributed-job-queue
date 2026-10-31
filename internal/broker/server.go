@@ -536,7 +536,7 @@ func (s *Server) adminOutcome(ctx context.Context, op string, outcome job.Outcom
 		}
 		return status.Errorf(codes.FailedPrecondition, "job is %s", j.State)
 	case job.Fenced, job.Expired:
-		return s.fail(op, fmt.Errorf("store answered %s for job %d", outcome, id))
+		// Neither is an answer to a Cancel or a Requeue.
 	}
 	return s.fail(op, fmt.Errorf("store answered %s for job %d", outcome, id))
 }

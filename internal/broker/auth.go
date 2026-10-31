@@ -145,7 +145,7 @@ func parseTokenLine(fields []string) ([32]byte, Principal, error) {
 		}
 		p = Principal{Role: RoleAdmin}
 	default:
-		return hash, Principal{}, fmt.Errorf("unknown role %q: want producer, worker or admin", role)
+		return hash, Principal{}, errors.New("unknown role in column 1: want producer, worker or admin")
 	}
 
 	if len(hexHash) != 2*len(hash) || strings.ToLower(hexHash) != hexHash {

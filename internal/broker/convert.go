@@ -15,8 +15,10 @@ import (
 // toStatus maps an error of the core, the store or the standard library to
 // the gRPC status that a client sees, in this order of precedence:
 //
-//   - an error that already is a gRPC status stays as it is, so that errors
-//     of the dispatcher pass through;
+//   - an error that carries a gRPC status keeps that status, with the status's
+//     own message and never the text of the chain around it, so that errors
+//     of the dispatcher pass through; a status of Internal or Unknown, or of
+//     OK next to an error, is Internal like any other unexpected error;
 //   - a job.InvalidError, or any other error wrapping job.ErrInvalid, is
 //     InvalidArgument with the error's own message, which names the field;
 //   - store.ErrNotFound is NotFound;
@@ -25,17 +27,27 @@ import (
 //     DeadlineExceeded;
 //   - a *store.InternalError, and everything else, is Internal.
 //
-// Only an InvalidArgument carries the error's text. The others get a fixed
-// message, because their errors may hold host names, SQL and row contents that
-// are the operator's business and not the caller's. The fixed message of an
-// Internal error is "internal error"; toStatusLogged records what it hides.
-// toStatus(nil) is nil.
+// Only an InvalidArgument carries the error's text, and a status that was
+// passed through its own. The others get a fixed message, because their errors
+// may hold host names, SQL and row contents that are the operator's business
+// and not the caller's. The fixed message of an Internal error is "internal
+// error"; toStatusLogged records what it hides. toStatus(nil) is nil.
 func toStatus(err error) error {
 	if err == nil {
 		return nil
 	}
-	if s, ok := status.FromError(err); ok {
-		return s.Err()
+	var carrier interface{ GRPCStatus() *status.Status }
+	if errors.As(err, &carrier) {
+		// status.FromError would give a wrapped status the text of the whole
+		// chain, which may hold addresses and SQL; ask the inner status itself.
+		if s := carrier.GRPCStatus(); s != nil {
+			// An error must not become a success, and the text of an internal
+			// failure is not for the client.
+			if c := s.Code(); c != codes.OK && c != codes.Unknown && c != codes.Internal {
+				return s.Err()
+			}
+		}
+		return status.Error(codes.Internal, "internal error")
 	}
 	var invalid *job.InvalidError
 	switch {
