@@ -1,10 +1,19 @@
 package broker
 
 import (
+	"context"
+	"maps"
+	"runtime"
+	"slices"
 	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+
+	"github.com/jason-te-sde/distributed-job-queue/internal/core/job"
+	"github.com/jason-te-sde/distributed-job-queue/internal/store"
 )
 
 // The values of the "op" and "result" labels of jobqueue_acks_total.
@@ -66,16 +75,32 @@ type Metrics struct {
 	// notifyReconnects counts the times the listener lost its connection,
 	// and notifyMalformed the notifications it could not parse.
 	notifyReconnects, notifyMalformed prometheus.Counter
+	// reaped and pruned count the jobs the maintenance loops took back from
+	// expired leases and deleted after their retention.
+	reaped, pruned prometheus.Counter
+	// storeCall is how long each store call took, by operation.
+	storeCall *prometheus.HistogramVec
+	// queueJobs is the number of jobs of a queue in each state, refreshed
+	// periodically from the store.
+	queueJobs *prometheus.GaugeVec
+	// buildInfo is 1 for the version of this build.
+	buildInfoMu sync.Mutex
+	buildInfo   *prometheus.GaugeVec
 
 	// labeled holds the queue names that have a label value of their own.
 	labelMu sync.Mutex
 	labeled map[string]struct{}
 }
 
-// NewMetrics creates the collectors and registers them with reg. It panics,
-// as prometheus does, if one of them is already registered there.
+// NewMetrics creates the collectors and registers them with reg, together with
+// the collectors of the Go runtime and of the process. It panics, as
+// prometheus does, if one of them is already registered there, which is why a
+// broker registers on a registry of its own and not on the default one.
 func NewMetrics(reg prometheus.Registerer) *Metrics {
 	f := promauto.With(reg)
+	if reg != nil {
+		reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	}
 	return &Metrics{
 		enqueued: f.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "jobqueue", Name: "jobs_enqueued_total",
@@ -118,6 +143,27 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Namespace: "jobqueue", Name: "notify_malformed_total",
 			Help: "Notifications whose payload was not a queue and a tenant.",
 		}),
+		reaped: f.NewCounter(prometheus.CounterOpts{
+			Namespace: "jobqueue", Name: "jobs_reaped_total",
+			Help: "Jobs taken back from expired leases by the reaper.",
+		}),
+		pruned: f.NewCounter(prometheus.CounterOpts{
+			Namespace: "jobqueue", Name: "jobs_pruned_total",
+			Help: "Finished jobs deleted by the pruner after their retention.",
+		}),
+		storeCall: f.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: "jobqueue", Name: "store_call_seconds",
+			Help:    "How long store calls took, by operation.",
+			Buckets: prometheus.ExponentialBucketsRange(0.0001, 10, 18),
+		}, []string{"op"}),
+		queueJobs: f.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "jobqueue", Name: "queue_jobs",
+			Help: "Jobs of a queue by state (ready, scheduled, leased, dead), refreshed every 15s for the queues this broker has seen.",
+		}, []string{"queue", "state"}),
+		buildInfo: f.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "jobqueue", Name: "build_info",
+			Help: "A constant 1, labelled with the version of the build and the Go version that built it.",
+		}, []string{"version", "go_version"}),
 		labeled: map[string]struct{}{},
 	}
 }
@@ -157,4 +203,128 @@ func (m *Metrics) fetchesFor(queue, result string) prometheus.Counter {
 
 func (m *Metrics) waitersFor(queue string) prometheus.Gauge {
 	return m.waiters.WithLabelValues(m.queueLabel(queue))
+}
+
+// labeledQueues returns the queue names that have a label value of their own,
+// in order. Past the cap a queue shares "other" with others, so a series per
+// queue cannot be kept for it.
+func (m *Metrics) labeledQueues() []string {
+	m.labelMu.Lock()
+	defer m.labelMu.Unlock()
+	return slices.Sorted(maps.Keys(m.labeled))
+}
+
+// queueJobCounts is the number of jobs of one queue in each state.
+type queueJobCounts struct{ ready, scheduled, leased, dead int64 }
+
+// setQueueJobs sets the jobs-by-state gauges of a queue.
+func (m *Metrics) setQueueJobs(queue string, c queueJobCounts) {
+	label := m.queueLabel(queue)
+	m.queueJobs.WithLabelValues(label, "ready").Set(float64(c.ready))
+	m.queueJobs.WithLabelValues(label, "scheduled").Set(float64(c.scheduled))
+	m.queueJobs.WithLabelValues(label, "leased").Set(float64(c.leased))
+	m.queueJobs.WithLabelValues(label, "dead").Set(float64(c.dead))
+}
+
+// observeStoreCall records how long a store call of the given operation took.
+func (m *Metrics) observeStoreCall(op string, seconds float64) {
+	m.storeCall.WithLabelValues(op).Observe(seconds)
+}
+
+// SetBuildInfo sets jobqueue_build_info to the version, replacing the series of
+// an earlier version: one build runs in one process.
+func (m *Metrics) SetBuildInfo(version string) {
+	m.buildInfoMu.Lock()
+	defer m.buildInfoMu.Unlock()
+	m.buildInfo.Reset()
+	m.buildInfo.WithLabelValues(version, runtime.Version()).Set(1)
+}
+
+// timedStore is a store.Store that records how long each call takes, as
+// jobqueue_store_call_seconds. A test lists the methods of the interface and
+// fails when one is missing here.
+type timedStore struct {
+	store.Store
+	m *Metrics
+}
+
+// done records the time since start for op; it is deferred with the start
+// time taken at the defer statement.
+func (t timedStore) done(op string, start time.Time) {
+	t.m.observeStoreCall(op, time.Since(start).Seconds())
+}
+
+func (t timedStore) Enqueue(ctx context.Context, specs []job.Spec) ([]store.EnqueueResult, error) {
+	defer t.done("enqueue", time.Now())
+	return t.Store.Enqueue(ctx, specs)
+}
+
+func (t timedStore) Lease(ctx context.Context, req store.LeaseRequest) ([]store.Grant, error) {
+	defer t.done("lease", time.Now())
+	return t.Store.Lease(ctx, req)
+}
+
+func (t timedStore) Heartbeat(ctx context.Context, refs []store.Ref, ttl time.Duration) ([]store.HeartbeatResult, error) {
+	defer t.done("heartbeat", time.Now())
+	return t.Store.Heartbeat(ctx, refs, ttl)
+}
+
+func (t timedStore) Complete(ctx context.Context, reqs []store.CompleteRequest) ([]job.Outcome, error) {
+	defer t.done("complete", time.Now())
+	return t.Store.Complete(ctx, reqs)
+}
+
+func (t timedStore) Fail(ctx context.Context, reqs []store.FailRequest) ([]job.Outcome, error) {
+	defer t.done("fail", time.Now())
+	return t.Store.Fail(ctx, reqs)
+}
+
+func (t timedStore) Release(ctx context.Context, refs []store.Ref) ([]job.Outcome, error) {
+	defer t.done("release", time.Now())
+	return t.Store.Release(ctx, refs)
+}
+
+func (t timedStore) Cancel(ctx context.Context, id int64, tenant string) (job.Outcome, error) {
+	defer t.done("cancel", time.Now())
+	return t.Store.Cancel(ctx, id, tenant)
+}
+
+func (t timedStore) Requeue(ctx context.Context, id int64) (job.Outcome, error) {
+	defer t.done("requeue", time.Now())
+	return t.Store.Requeue(ctx, id)
+}
+
+func (t timedStore) Reap(ctx context.Context, limit int, backoff store.BackoffFunc) (int, error) {
+	defer t.done("reap", time.Now())
+	return t.Store.Reap(ctx, limit, backoff)
+}
+
+func (t timedStore) Prune(ctx context.Context, r store.Retention, limit int) (int, error) {
+	defer t.done("prune", time.Now())
+	return t.Store.Prune(ctx, r, limit)
+}
+
+func (t timedStore) Purge(ctx context.Context, req store.PurgeRequest) (int, error) {
+	defer t.done("purge", time.Now())
+	return t.Store.Purge(ctx, req)
+}
+
+func (t timedStore) Get(ctx context.Context, id int64, tenant string) (job.Job, error) {
+	defer t.done("get", time.Now())
+	return t.Store.Get(ctx, id, tenant)
+}
+
+func (t timedStore) ListDead(ctx context.Context, queue string, afterID int64, limit int) ([]job.Job, error) {
+	defer t.done("list_dead", time.Now())
+	return t.Store.ListDead(ctx, queue, afterID, limit)
+}
+
+func (t timedStore) Stats(ctx context.Context, queue string) ([]store.TenantStats, error) {
+	defer t.done("stats", time.Now())
+	return t.Store.Stats(ctx, queue)
+}
+
+func (t timedStore) Activity(ctx context.Context, queue string) (store.Activity, error) {
+	defer t.done("activity", time.Now())
+	return t.Store.Activity(ctx, queue)
 }

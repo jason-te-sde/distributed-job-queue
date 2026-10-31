@@ -135,10 +135,10 @@ func (l *Listener) session(ctx context.Context) (listened bool, err error) {
 	if _, err := conn.Exec(ctx, "LISTEN "+pgx.Identifier{pgstore.NotifyChannel}.Sanitize()); err != nil {
 		return false, fmt.Errorf("listen: %w", err)
 	}
-	l.listens.Add(1)
 	// Whatever was enqueued while the connection was down was announced to
 	// nobody.
 	l.d.Resync()
+	l.listens.Add(1)
 
 	for {
 		waitCtx, cancel := context.WithTimeout(ctx, l.pingEvery)

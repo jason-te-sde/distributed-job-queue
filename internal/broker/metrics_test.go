@@ -2,9 +2,21 @@ package broker
 
 import (
 	"fmt"
+	"io"
+	"log/slog"
+	"math"
+	"reflect"
+	"runtime"
+	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/jason-te-sde/distributed-job-queue/internal/core/job"
+	"github.com/jason-te-sde/distributed-job-queue/internal/store"
+	"github.com/jason-te-sde/distributed-job-queue/internal/store/memstore"
 )
 
 // metricValue reads one series of a counter or a gauge from g; a series that
@@ -108,5 +120,287 @@ func TestEnqueueMetricsUseTheQueueLabelCap(t *testing.T) {
 	}
 	if n := seriesCount(t, ts.reg, "jobqueue_jobs_enqueued_total"); n != maxQueueLabels+1 {
 		t.Errorf("jobqueue_jobs_enqueued_total has %d series, want %d", n, maxQueueLabels+1)
+	}
+}
+
+func TestMetricsRegistersEveryName(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg)
+
+	// One observation of each metric, so that every series exists.
+	m.enqueuedFor("q").Inc()
+	m.deduplicatedFor("q").Inc()
+	m.leasedFor("q").Inc()
+	m.acks.WithLabelValues(opComplete, resultAccepted).Inc()
+	m.reaped.Inc()
+	m.pruned.Inc()
+	m.orphanReleases.Inc()
+	m.fetchesFor("q", fetchJobs).Inc()
+	m.waitersFor("q").Inc()
+	m.leaseWait.Observe(0.01)
+	m.observeStoreCall("lease", 0.001)
+	m.setQueueJobs("q", queueJobCounts{ready: 1})
+	m.notifyReconnects.Inc()
+	m.notifyMalformed.Inc()
+	m.SetBuildInfo("v1.2.3")
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string][]string{} // name -> label names of its first series
+	for _, mf := range families {
+		var labels []string
+		for _, l := range mf.GetMetric()[0].GetLabel() {
+			labels = append(labels, l.GetName())
+		}
+		slices.Sort(labels)
+		got[mf.GetName()] = labels
+	}
+	want := map[string][]string{ // name -> label names
+		"jobqueue_jobs_enqueued_total":     {"queue"},
+		"jobqueue_jobs_deduplicated_total": {"queue"},
+		"jobqueue_jobs_leased_total":       {"queue"},
+		"jobqueue_acks_total":              {"op", "result"},
+		"jobqueue_jobs_reaped_total":       nil,
+		"jobqueue_jobs_pruned_total":       nil,
+		"jobqueue_orphan_releases_total":   nil,
+		"jobqueue_dispatch_fetches_total":  {"queue", "result"},
+		"jobqueue_waiters":                 {"queue"},
+		"jobqueue_lease_wait_seconds":      nil,
+		"jobqueue_store_call_seconds":      {"op"},
+		"jobqueue_queue_jobs":              {"queue", "state"},
+		"jobqueue_notify_reconnects_total": nil,
+		"jobqueue_notify_malformed_total":  nil,
+		"jobqueue_build_info":              {"go_version", "version"},
+	}
+	for name, labels := range want {
+		gotLabels, ok := got[name]
+		if !ok {
+			t.Errorf("metric %s is not registered", name)
+			continue
+		}
+		if !slices.Equal(gotLabels, labels) {
+			t.Errorf("metric %s has labels %v, want %v", name, gotLabels, labels)
+		}
+	}
+	for name := range got {
+		if _, ok := want[name]; !ok && strings.HasPrefix(name, "jobqueue_") {
+			t.Errorf("metric %s is registered but not in the list of the design", name)
+		}
+	}
+	if _, ok := got["go_goroutines"]; !ok {
+		t.Error("the Go collector is not registered: go_goroutines is missing")
+	}
+	var process bool
+	for name := range got {
+		process = process || strings.HasPrefix(name, "process_")
+	}
+	if !process {
+		t.Error("the process collector is not registered: no process_ metric")
+	}
+
+	if v := metricValue(t, reg, "jobqueue_build_info", map[string]string{"version": "v1.2.3", "go_version": runtime.Version()}); v != 1 {
+		t.Errorf("build_info = %v, want 1", v)
+	}
+	// A second SetBuildInfo replaces the first: there is one build.
+	m.SetBuildInfo("v2")
+	if n := seriesCount(t, reg, "jobqueue_build_info"); n != 1 {
+		t.Errorf("build_info has %d series after a second SetBuildInfo, want 1", n)
+	}
+}
+
+func TestHistogramBucketsSpanTheDocumentedRanges(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg)
+	m.leaseWait.Observe(0.01)
+	m.observeStoreCall("lease", 0.001)
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bounds := map[string][]float64{}
+	for _, mf := range families {
+		h := mf.GetMetric()[0].GetHistogram()
+		if h == nil {
+			continue
+		}
+		for _, b := range h.GetBucket() {
+			bounds[mf.GetName()] = append(bounds[mf.GetName()], b.GetUpperBound())
+		}
+	}
+	for name, want := range map[string]struct{ first, last float64 }{
+		"jobqueue_lease_wait_seconds": {0.001, 32.768}, // 1ms doubling to about 32s
+		"jobqueue_store_call_seconds": {0.0001, 10},    // 100µs up to 10s
+	} {
+		b := bounds[name]
+		if len(b) == 0 {
+			t.Fatalf("no buckets for %s", name)
+		}
+		if math.Abs(b[0]-want.first) > 1e-9 || math.Abs(b[len(b)-1]-want.last) > 1e-9 {
+			t.Errorf("%s buckets run from %v to %v, want %v to %v", name, b[0], b[len(b)-1], want.first, want.last)
+		}
+	}
+}
+
+func TestTimedStoreObservesEveryStoreMethod(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg)
+	clock := &fakeClock{now: t0}
+	mem := memstore.New(memstore.Options{Clock: clock.Now})
+	st := timedStore{Store: mem, m: m}
+	ctx := t.Context()
+
+	res, err := st.Enqueue(ctx, []job.Spec{{Queue: "q", Tenant: "t", Payload: []byte("p")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := res[0].ID
+	grants, err := st.Lease(ctx, store.LeaseRequest{Queue: "q", Takes: []store.TenantTake{{Limit: 1}}, TTL: time.Minute, Worker: "w"})
+	if err != nil || len(grants) != 1 {
+		t.Fatalf("Lease = %v, %v", grants, err)
+	}
+	ref := store.Ref{ID: id, Queue: "q", Token: grants[0].Job.Epoch}
+	calls := []struct {
+		op string
+		do func() error
+	}{
+		{"heartbeat", func() error { _, err := st.Heartbeat(ctx, []store.Ref{ref}, time.Minute); return err }},
+		{"fail", func() error {
+			_, err := st.Fail(ctx, []store.FailRequest{{Ref: ref, Permanent: true, Error: "x"}})
+			return err
+		}},
+		{"requeue", func() error { _, err := st.Requeue(ctx, id); return err }},
+		{"get", func() error { _, err := st.Get(ctx, id, ""); return err }},
+		{"list_dead", func() error { _, err := st.ListDead(ctx, "q", 0, 10); return err }},
+		{"stats", func() error { _, err := st.Stats(ctx, "q"); return err }},
+		{"activity", func() error { _, err := st.Activity(ctx, "q"); return err }},
+		{"cancel", func() error { _, err := st.Cancel(ctx, id, "t"); return err }},
+		{"reap", func() error { _, err := st.Reap(ctx, 10, func(int32) time.Duration { return 0 }); return err }},
+		{"prune", func() error {
+			_, err := st.Prune(ctx, store.Retention{Done: time.Hour, Dead: time.Hour}, 10)
+			return err
+		}},
+		{"purge", func() error {
+			_, err := st.Purge(ctx, store.PurgeRequest{Queue: "q", State: job.StateSucceeded, FinishedBefore: t0})
+			return err
+		}},
+	}
+	// Complete and Release need a leased job of their own.
+	res, err = st.Enqueue(ctx, []job.Spec{{Queue: "q2", Tenant: "t", Payload: []byte("p")}, {Queue: "q2", Tenant: "t", Payload: []byte("p")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grants, err = st.Lease(ctx, store.LeaseRequest{Queue: "q2", Takes: []store.TenantTake{{Limit: 2}}, TTL: time.Minute, Worker: "w"})
+	if err != nil || len(grants) != 2 {
+		t.Fatalf("Lease = %v, %v", grants, err)
+	}
+	calls = append(calls, []struct {
+		op string
+		do func() error
+	}{
+		{"complete", func() error {
+			_, err := st.Complete(ctx, []store.CompleteRequest{{Ref: store.Ref{ID: res[0].ID, Queue: "q2", Token: grants[0].Job.Epoch}}})
+			return err
+		}},
+		{"release", func() error {
+			_, err := st.Release(ctx, []store.Ref{{ID: res[1].ID, Queue: "q2", Token: grants[1].Job.Epoch}})
+			return err
+		}},
+	}...)
+	for _, c := range calls {
+		if err := c.do(); err != nil {
+			t.Fatalf("%s: %v", c.op, err)
+		}
+	}
+
+	// Every method of the interface, and nothing else, has a series, each
+	// observed once (enqueue and lease twice, because the setup made two calls).
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ops []string
+	for _, mf := range families {
+		if mf.GetName() != "jobqueue_store_call_seconds" {
+			continue
+		}
+		for _, metric := range mf.GetMetric() {
+			ops = append(ops, metric.GetLabel()[0].GetValue())
+			want := uint64(1)
+			if op := metric.GetLabel()[0].GetValue(); op == "enqueue" || op == "lease" {
+				want = 2
+			}
+			if n := metric.GetHistogram().GetSampleCount(); n != want {
+				t.Errorf("op %q was observed %d times, want %d", metric.GetLabel()[0].GetValue(), n, want)
+			}
+		}
+	}
+	slices.Sort(ops)
+	if methods := reflect.TypeFor[store.Store]().NumMethod(); len(ops) != methods {
+		t.Errorf("store_call_seconds has %d ops %v, but store.Store has %d methods: a new method needs a timed wrapper", len(ops), ops, methods)
+	}
+}
+
+func TestStatsRefresherSetsQueueJobs(t *testing.T) {
+	clock := &fakeClock{now: t0}
+	mem := memstore.New(memstore.Options{Clock: clock.Now})
+	ctx := t.Context()
+	specs := []job.Spec{
+		{Queue: "q", Tenant: "a", Payload: []byte("p")},
+		{Queue: "q", Tenant: "b", Payload: []byte("p")},
+		{Queue: "q", Tenant: "b", Payload: []byte("p")},
+		{Queue: "q", Tenant: "b", Payload: []byte("p"), Delay: time.Hour},
+		{Queue: "q", Tenant: "a", Payload: []byte("p")},
+	}
+	if _, err := mem.Enqueue(ctx, specs); err != nil {
+		t.Fatal(err)
+	}
+	// Lease the first job, kill the second.
+	grants, err := mem.Lease(ctx, store.LeaseRequest{Queue: "q", Takes: []store.TenantTake{{Limit: 2}}, TTL: time.Minute, Worker: "w"})
+	if err != nil || len(grants) != 2 {
+		t.Fatalf("Lease = %v, %v", grants, err)
+	}
+	g := grants[1].Job
+	if _, err := mem.Fail(ctx, []store.FailRequest{{Ref: store.Ref{ID: g.ID, Queue: "q", Token: g.Epoch}, Permanent: true, Error: "x"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg)
+	m.queueLabel("q") // the broker has seen the queue
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		runStatsRefresher(ctx, mem, 5*time.Millisecond, m, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}()
+	for state, want := range map[string]float64{"ready": 2, "scheduled": 1, "leased": 1, "dead": 1} {
+		labels := map[string]string{"queue": "q", "state": state}
+		waitFor(t, "queue_jobs "+state, quickly, func() bool { return metricValue(t, reg, "jobqueue_queue_jobs", labels) == want })
+	}
+}
+
+func TestStatsRefresherSkipsQueuesWithoutALabel(t *testing.T) {
+	// Past the cap a queue shares "other" with every other late queue, so its
+	// gauge could not be told apart: the refresher leaves such queues out.
+	clock := &fakeClock{now: t0}
+	mem := memstore.New(memstore.Options{Clock: clock.Now})
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg)
+	for i := range maxQueueLabels {
+		m.queueLabel(fmt.Sprintf("q%03d", i))
+	}
+	if _, err := mem.Enqueue(t.Context(), []job.Spec{{Queue: "late", Tenant: "t", Payload: []byte("p")}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.labeledQueues(); len(got) != maxQueueLabels || slices.Contains(got, "late") {
+		t.Fatalf("labeledQueues() has %d names, including late: %v", len(got), slices.Contains(got, "late"))
+	}
+	refreshQueueJobs(t.Context(), mem, m, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if n := seriesCount(t, reg, "jobqueue_queue_jobs"); n != maxQueueLabels*4 {
+		t.Errorf("queue_jobs has %d series, want %d (4 states of each of the %d labelled queues)", n, maxQueueLabels*4, maxQueueLabels)
+	}
+	if got := metricValue(t, reg, "jobqueue_queue_jobs", map[string]string{"queue": otherQueueLabel, "state": "ready"}); got != 0 {
+		t.Errorf("queue_jobs{queue=other} = %v, want no series", got)
 	}
 }
