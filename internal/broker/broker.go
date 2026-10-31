@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 
+	"github.com/jason-te-sde/distributed-job-queue/internal/gen/externalscaler"
 	jobqueuev1 "github.com/jason-te-sde/distributed-job-queue/internal/gen/jobqueue/v1"
 	"github.com/jason-te-sde/distributed-job-queue/internal/store"
 	"github.com/jason-te-sde/distributed-job-queue/internal/store/pgstore"
@@ -47,9 +48,10 @@ func keepaliveEnforcement() keepalive.EnforcementPolicy {
 }
 
 // Broker is the whole server: the gRPC API over a PostgreSQL store, the
-// dispatcher and listener that serve long polls, the reaper and pruner, and
-// the HTTP endpoint with health checks and metrics. New builds it and binds its
-// ports, and Run serves until its context ends and then shuts down in order.
+// dispatcher and listener that serve long polls, the reaper and pruner, the
+// HTTP endpoint with health checks and metrics, and, when ScalerAddr is set,
+// the autoscaler service for KEDA. New builds it and binds its ports, and Run
+// serves until its context ends and then shuts down in order.
 type Broker struct {
 	cfg  Config
 	log  *slog.Logger
@@ -68,6 +70,13 @@ type Broker struct {
 	httpServer *http.Server
 	grpcLis    net.Listener
 	httpLis    net.Listener
+
+	// scaler, scalerServer and scalerLis are nil unless Config.ScalerAddr is
+	// set. The scaler is served by a gRPC server of its own, so that the
+	// authentication interceptor of grpcServer does not reach it.
+	scaler       *Scaler
+	scalerServer *grpc.Server
+	scalerLis    net.Listener
 }
 
 // loadAuth reads the tokens file named by path. The result is nil, which makes
@@ -94,7 +103,8 @@ func loadAuth(path string) (*Authenticator, error) {
 // connects, and refuses to go on if the schema is not the one this binary was
 // built for: the error is a *migrate.SchemaMismatchError, unchanged. Finally
 // it binds the gRPC and HTTP addresses, so that GRPCAddr and HTTPAddr are
-// known, and a listener on port 0 has its port, before Run.
+// known, and a listener on port 0 has its port, before Run. The scaler address
+// is bound last, and only if it is set.
 //
 // The caller must call Run, which releases what New acquired. The version
 // that jobqueue_build_info reports is "dev" until SetVersion says otherwise.
@@ -108,12 +118,6 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*Broker, error) {
 	}
 	if cfg.TokensFile != "" && auth == nil {
 		return nil, errors.New("tokens file configured but no authenticator built: refusing to serve unauthenticated")
-	}
-	if cfg.ScalerAddr != "" {
-		// The scaler is served on a port of its own without UnaryAuth, because
-		// KEDA cannot send tokens; nothing here puts it behind the interceptor
-		// below. Until that server exists the address is refused, not ignored.
-		return nil, errors.New("--scaler-addr is set but this build does not serve the autoscaler")
 	}
 	var creds credentials.TransportCredentials
 	if cfg.TLSCert != "" {
@@ -162,6 +166,18 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*Broker, error) {
 	b.grpcServer = grpc.NewServer(opts...)
 	jobqueuev1.RegisterJobQueueServiceServer(b.grpcServer, b.server)
 	b.httpServer = &http.Server{Handler: b.health.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	if cfg.ScalerAddr != "" {
+		// The scaler is served on a port of its own, without UnaryAuth: KEDA
+		// cannot send bearer tokens. Nothing here puts it behind the
+		// interceptor above, and the deployment's network policy is what
+		// restricts who can reach the port. It is served without TLS, which
+		// is how KEDA dials an external scaler unless the trigger asks
+		// for TLS.
+		b.scaler = NewScaler(b.st, 0)
+		b.scaler.log = log
+		b.scalerServer = grpc.NewServer()
+		externalscaler.RegisterExternalScalerServer(b.scalerServer, b.scaler)
+	}
 
 	if b.grpcLis, err = net.Listen("tcp", cfg.GRPCAddr); err != nil {
 		pool.Close()
@@ -171,6 +187,14 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*Broker, error) {
 		_ = b.grpcLis.Close()
 		pool.Close()
 		return nil, fmt.Errorf("listen on the HTTP address: %w", err)
+	}
+	if b.scaler != nil {
+		if b.scalerLis, err = net.Listen("tcp", cfg.ScalerAddr); err != nil {
+			_ = b.grpcLis.Close()
+			_ = b.httpLis.Close()
+			pool.Close()
+			return nil, fmt.Errorf("listen on the scaler address: %w", err)
+		}
 	}
 	return b, nil
 }
@@ -184,15 +208,26 @@ func (b *Broker) GRPCAddr() net.Addr { return b.grpcLis.Addr() }
 // HTTPAddr returns the address the health and metrics endpoint is bound to.
 func (b *Broker) HTTPAddr() net.Addr { return b.httpLis.Addr() }
 
+// ScalerAddr returns the address the autoscaler service is bound to, or nil
+// if Config.ScalerAddr was empty and there is none.
+func (b *Broker) ScalerAddr() net.Addr {
+	if b.scalerLis == nil {
+		return nil
+	}
+	return b.scalerLis.Addr()
+}
+
 // Run serves until ctx is done, then shuts down and returns nil; it returns an
 // error only if a component failed on its own, after the same shutdown.
 //
 // The shutdown goes in this order: /readyz starts to fail, so that the
-// endpoint is taken out of rotation; Lease calls are refused and long polls end
-// empty; the gRPC server stops accepting calls and waits for the running ones,
+// endpoint is taken out of rotation; Lease calls are refused, long polls end
+// empty and the streams of the autoscaler end; the gRPC server and the
+// autoscaler server stop accepting calls and wait for the running ones,
 // workers still being able to heartbeat and acknowledge, for at most
-// ShutdownGrace, after which it cuts them off; the background loops stop; the
-// health endpoint closes; and the database pool is released.
+// ShutdownGrace between them, after which they cut the rest off; the
+// background loops stop; the health endpoint closes; and the database pool is
+// released.
 func (b *Broker) Run(ctx context.Context) error {
 	// The loops outlive ctx: they run until the calls that need them are done.
 	bg, stopBackground := context.WithCancel(context.WithoutCancel(ctx))
@@ -214,6 +249,9 @@ func (b *Broker) Run(ctx context.Context) error {
 	}
 	cfg := b.cfg
 	start("gRPC server", func() error { return b.grpcServer.Serve(b.grpcLis) })
+	if b.scalerServer != nil {
+		start("scaler server", func() error { return b.scalerServer.Serve(b.scalerLis) })
+	}
 	start("HTTP server", func() error {
 		if err := b.httpServer.Serve(b.httpLis); !errors.Is(err, http.ErrServerClosed) {
 			return err
@@ -238,7 +276,11 @@ func (b *Broker) Run(ctx context.Context) error {
 		runPinger(bg, b.pool, b.health, pingInterval, b.log)
 		return nil
 	})
-	b.log.Info("broker started", slog.String("grpc", b.GRPCAddr().String()), slog.String("http", b.HTTPAddr().String()))
+	attrs := []any{slog.String("grpc", b.GRPCAddr().String()), slog.String("http", b.HTTPAddr().String())}
+	if addr := b.ScalerAddr(); addr != nil {
+		attrs = append(attrs, slog.String("scaler", addr.String()))
+	}
+	b.log.Info("broker started", attrs...)
 
 	var runErr error
 	select {
@@ -251,6 +293,9 @@ func (b *Broker) Run(ctx context.Context) error {
 	b.health.SetDraining()
 	b.server.SetDraining()
 	b.dispatcher.Drain()
+	if b.scaler != nil {
+		b.scaler.Drain()
+	}
 	b.stopGRPC()
 	stopBackground()
 	b.stopHTTP()
@@ -260,12 +305,22 @@ func (b *Broker) Run(ctx context.Context) error {
 	return runErr
 }
 
-// stopGRPC stops the gRPC server gracefully, which waits for running calls, and
-// cuts them off if they outlast ShutdownGrace.
+// stopGRPC stops the gRPC server and, if there is one, the autoscaler server
+// gracefully, which waits for running calls, and cuts them off if they outlast
+// ShutdownGrace. The two stop side by side, so that together they have one
+// grace period and not two.
 func (b *Broker) stopGRPC() {
+	servers := []*grpc.Server{b.grpcServer}
+	if b.scalerServer != nil {
+		servers = append(servers, b.scalerServer)
+	}
+	var stopping sync.WaitGroup
+	for _, srv := range servers {
+		stopping.Go(srv.GracefulStop)
+	}
 	done := make(chan struct{})
 	go func() {
-		b.grpcServer.GracefulStop()
+		stopping.Wait()
 		close(done)
 	}()
 	timer := time.NewTimer(b.cfg.ShutdownGrace)
@@ -274,7 +329,9 @@ func (b *Broker) stopGRPC() {
 	case <-done:
 	case <-timer.C:
 		b.log.Warn("calls outlasted the shutdown grace period, cutting them off", slog.Duration("grace", b.cfg.ShutdownGrace))
-		b.grpcServer.Stop()
+		for _, srv := range servers {
+			srv.Stop()
+		}
 		<-done
 	}
 }

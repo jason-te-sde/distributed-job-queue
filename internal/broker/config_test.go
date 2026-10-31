@@ -246,6 +246,32 @@ func TestParseFlagsHelp(t *testing.T) {
 	}
 }
 
+func TestScalerFlagHelpSaysThePortIsOpen(t *testing.T) {
+	// The scaler port has no authentication and no TLS, because KEDA cannot
+	// send tokens. Whoever reads --help should not have to guess that.
+	_, err := ParseFlags([]string{"-h"}, noEnv)
+	usage := err.Error()
+	_, help, found := strings.Cut(usage, "-scaler-addr")
+	if !found {
+		t.Fatalf("usage does not list -scaler-addr:\n%v", usage)
+	}
+	help, _, _ = strings.Cut(help, "\n  -") // up to the next flag
+	for _, word := range []string{"unauthenticated", "plaintext", "KEDA", "NetworkPolicy"} {
+		if !strings.Contains(help, word) {
+			t.Errorf("the help of -scaler-addr does not mention %q: %q", word, help)
+		}
+	}
+}
+
+func TestValidateMakesNoDemandOfTheScalerAddress(t *testing.T) {
+	// The scaler port is open by design; --insecure is about the API.
+	cfg := testConfig(t)
+	cfg.ScalerAddr = ":7072"
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate with a wildcard scaler address = %v, want nil", err)
+	}
+}
+
 func TestValidateRefusesInsecureNonLoopback(t *testing.T) {
 	tests := []struct {
 		name    string
