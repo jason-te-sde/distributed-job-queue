@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"runtime"
 	"strconv"
@@ -23,6 +24,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
 
+	"github.com/jason-te-sde/distributed-job-queue/internal/gen/externalscaler"
 	jobqueuev1 "github.com/jason-te-sde/distributed-job-queue/internal/gen/jobqueue/v1"
 	"github.com/jason-te-sde/distributed-job-queue/internal/pgtest"
 	"github.com/jason-te-sde/distributed-job-queue/internal/store/pgstore/migrate"
@@ -80,6 +82,21 @@ func startBroker(t *testing.T, pool *pgxpool.Pool, tune func(*Config)) *runningB
 	t.Cleanup(func() { _ = conn.Close() })
 	rb.client = jobqueuev1.NewJobQueueServiceClient(conn)
 	return rb
+}
+
+// scalerClient dials the scaler address of the broker, which must be set.
+func (rb *runningBroker) scalerClient() externalscaler.ExternalScalerClient {
+	rb.t.Helper()
+	addr := rb.b.ScalerAddr()
+	if addr == nil {
+		rb.t.Fatal("the broker has no scaler address")
+	}
+	conn, err := grpc.NewClient("passthrough:///"+addr.String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		rb.t.Fatal(err)
+	}
+	rb.t.Cleanup(func() { _ = conn.Close() })
+	return externalscaler.NewExternalScalerClient(conn)
 }
 
 func (rb *runningBroker) httpURL(path string) string {
@@ -199,6 +216,9 @@ func TestPGBrokerServesAndReportsItself(t *testing.T) {
 	rb := startBroker(t, pgtest.NewDB(t), nil)
 	rb.b.SetVersion("v9.9.9")
 	rb.waitReady()
+	if addr := rb.b.ScalerAddr(); addr != nil {
+		t.Errorf("ScalerAddr = %v without --scaler-addr, want nil: the scaler is off unless asked for", addr)
+	}
 
 	// Without a tokens file the caller is an admin, which the loopback address
 	// allows.
@@ -346,5 +366,186 @@ func TestPGBrokerGracefulShutdown(t *testing.T) {
 	}
 	if err := <-statsDone; err == nil {
 		t.Error("the blocked GetStats succeeded; the grace period should have cut it off")
+	}
+}
+
+func TestPGBrokerServesTheScalerWithoutTokens(t *testing.T) {
+	// The API is behind a tokens file; the scaler port is not, because KEDA
+	// cannot send a token. Both are served by the one broker.
+	file := writeTokens(t, "admin - "+hashOf("admin-token")+"\n")
+	rb := startBroker(t, pgtest.NewDB(t), func(c *Config) {
+		c.TokensFile = file
+		c.ScalerAddr = "127.0.0.1:0"
+	})
+	rb.waitReady()
+	scaler := rb.scalerClient()
+
+	if _, err := rb.client.GetStats(t.Context(), &jobqueuev1.GetStatsRequest{Queue: "q"}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("GetStats on the API without a token = %v, want Unauthenticated: the tokens file must still guard the API", err)
+	}
+
+	ref := &externalscaler.ScaledObjectRef{Name: "worker", Namespace: "jobs", ScalerMetadata: map[string]string{"queue": "q"}}
+	active, err := scaler.IsActive(t.Context(), ref)
+	if err != nil || active.GetResult() {
+		t.Fatalf("IsActive on an empty queue = %v, %v; want false, without a token", active, err)
+	}
+
+	items := []*jobqueuev1.EnqueueItem{{Queue: "q", Tenant: "t", Payload: []byte("p")}, {Queue: "q", Tenant: "t", Payload: []byte("p")}}
+	if _, err := rb.client.Enqueue(withToken(t.Context(), "admin-token"), &jobqueuev1.EnqueueRequest{Items: items}); err != nil {
+		t.Fatalf("Enqueue = %v", err)
+	}
+	if active, err = scaler.IsActive(t.Context(), ref); err != nil || !active.GetResult() {
+		t.Fatalf("IsActive with two jobs waiting = %v, %v; want true", active, err)
+	}
+	metrics, err := scaler.GetMetrics(t.Context(), &externalscaler.GetMetricsRequest{ScaledObjectRef: ref, MetricName: "jobqueue-q-backlog"})
+	if err != nil || len(metrics.GetMetricValues()) != 1 || metrics.GetMetricValues()[0].GetMetricValue() != 2 {
+		t.Fatalf("GetMetrics with two jobs waiting = %v, %v; want one value of 2", metrics, err)
+	}
+
+	// The scaler's openness does not loosen the API: it still answers a
+	// caller that has the token.
+	if _, err := rb.client.GetStats(withToken(t.Context(), "admin-token"), &jobqueuev1.GetStatsRequest{Queue: "q"}); err != nil {
+		t.Errorf("GetStats with the token = %v", err)
+	}
+}
+
+func TestPGBrokerShutdownEndsScalerStreams(t *testing.T) {
+	// A stream that KEDA holds open never ends by itself, so a graceful stop of
+	// the scaler server that waited for it would take the whole grace period.
+	const grace = 20 * time.Second
+	rb := startBroker(t, pgtest.NewDB(t), func(c *Config) {
+		c.ScalerAddr = "127.0.0.1:0"
+		c.ShutdownGrace = grace
+	})
+	rb.waitReady()
+	addr := rb.b.ScalerAddr().String()
+	scaler := rb.scalerClient()
+
+	stream, err := scaler.StreamIsActive(t.Context(), &externalscaler.ScaledObjectRef{ScalerMetadata: map[string]string{"queue": "q"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first, err := stream.Recv(); err != nil || first.GetResult() {
+		t.Fatalf("first message = %v, %v; want false", first, err)
+	}
+
+	start := time.Now()
+	rb.stop()
+	select {
+	case err := <-rb.done:
+		if err != nil {
+			t.Errorf("Run returned %v, want nil", err)
+		}
+		rb.done <- nil // for the cleanup
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Errorf("Run returned %v after the shutdown began; the open scaler stream held it up, and the grace period is %v", elapsed, grace)
+		}
+	case <-time.After(grace + 5*time.Second):
+		t.Fatal("Run did not return")
+	}
+	if _, err := stream.Recv(); !errors.Is(err, io.EOF) {
+		t.Errorf("the stream ended with %v, want a clean end", err)
+	}
+	if conn, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
+		_ = conn.Close()
+		t.Errorf("the scaler address %s still accepts connections after Run returned", addr)
+	}
+}
+
+func TestPGNewFailsWhenTheScalerAddressIsTaken(t *testing.T) {
+	pool := pgtest.NewDB(t)
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = taken.Close() }()
+
+	// The other ports are bound before the scaler's, and New must give them
+	// back when it fails: they are named here so that the test can bind them
+	// again afterwards.
+	free := func() string {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = l.Close() }()
+		return l.Addr().String()
+	}
+	grpcAddr, httpAddr := free(), free()
+	cfg, err := ParseFlags([]string{
+		"--grpc-addr=" + grpcAddr, "--http-addr=" + httpAddr, "--scaler-addr=" + taken.Addr().String(),
+		"--database-url=" + dbURL(t, pool),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := New(t.Context(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err == nil || !strings.Contains(err.Error(), "scaler") {
+		t.Fatalf("New = %v, %v; want an error about the scaler address", b, err)
+	}
+	for _, addr := range []string{grpcAddr, httpAddr} {
+		l, err := net.Listen("tcp", addr)
+		if err != nil {
+			t.Errorf("%s is still bound after New failed: %v", addr, err)
+			continue
+		}
+		_ = l.Close()
+	}
+}
+
+func TestPGBrokerCutsOffScalerCallsAfterTheGracePeriod(t *testing.T) {
+	// The scaler server shares the grace period of the API server: a call
+	// that outlasts it is cut off, and Run returns.
+	pool := pgtest.NewDB(t)
+	const grace = 1500 * time.Millisecond
+	rb := startBroker(t, pool, func(c *Config) {
+		c.ScalerAddr = "127.0.0.1:0"
+		c.ShutdownGrace = grace
+		c.PollInterval, c.ActivityInterval = time.Hour, time.Hour
+		c.ReapInterval, c.PruneInterval = time.Hour, time.Hour
+	})
+	rb.waitReady()
+	rb.settleListener()
+	scaler := rb.scalerClient()
+
+	// A lock on the table makes the scaler's call to the store block.
+	lock, err := pool.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lock.Rollback(context.Background()) })
+	if _, err := lock.Exec(t.Context(), "LOCK TABLE jobqueue.jobs IN ACCESS EXCLUSIVE MODE"); err != nil {
+		t.Fatal(err)
+	}
+	blocked := make(chan error, 1)
+	go func() {
+		_, err := scaler.IsActive(context.Background(), &externalscaler.ScaledObjectRef{ScalerMetadata: map[string]string{"queue": "q"}})
+		blocked <- err
+	}()
+	waitFor(t, "IsActive to block on the lock", 10*time.Second, func() bool {
+		var n int
+		err := pool.QueryRow(t.Context(),
+			`SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&n)
+		return err == nil && n >= 1
+	})
+
+	start := time.Now()
+	rb.stop()
+	select {
+	case err := <-rb.done:
+		if err != nil {
+			t.Errorf("Run returned %v, want nil", err)
+		}
+		rb.done <- nil // for the cleanup
+		if elapsed := time.Since(start); elapsed > grace+time.Second {
+			t.Errorf("Run returned %v after the shutdown began, want within %v", elapsed, grace+time.Second)
+		} else if elapsed < grace/2 {
+			t.Errorf("Run returned after %v: it did not wait for the blocked scaler call", elapsed)
+		}
+	case <-time.After(grace + 5*time.Second):
+		t.Fatal("Run did not return: the scaler server was not cut off")
+	}
+	if err := <-blocked; err == nil {
+		t.Error("the blocked IsActive succeeded; the grace period should have cut it off")
 	}
 }

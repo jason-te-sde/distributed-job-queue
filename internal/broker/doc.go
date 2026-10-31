@@ -23,9 +23,13 @@
 // goroutines of its own that report back. Listener feeds it the notifications
 // of the store.
 //
+// Scaler answers KEDA's external scaler protocol from the backlog of a queue.
+// It has a gRPC server of its own, without the authentication interceptor,
+// because KEDA cannot send tokens.
+//
 // Broker assembles everything: the gRPC server behind the authentication
 // interceptor, the dispatcher and listener, the reaper and pruner (RunReaper,
 // RunPruner), the HTTP endpoint with /healthz, /readyz and /metrics (Health,
-// Metrics), and the ordered shutdown. cmd/jobqueue-server is a thin command
-// around New and Run.
+// Metrics), the Scaler's server when ScalerAddr is set, and the ordered
+// shutdown. cmd/jobqueue-server is a thin command around New and Run.
 package broker

@@ -4,6 +4,13 @@ modules:
 lint:
   use:
     - STANDARD
+  # Vendored from KEDA, whose naming does not follow the style rules. The file
+  # is kept as upstream wrote it, so it is not linted.
+  ignore:
+    - proto/externalscaler
 breaking:
   use:
     - FILE
+  # Upstream owns the wire contract of the vendored file.
+  ignore:
+    - proto/externalscaler

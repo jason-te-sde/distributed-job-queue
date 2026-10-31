@@ -95,18 +95,6 @@ func TestNewFailsWhenTheTokensFileCannotBeUsed(t *testing.T) {
 	}
 }
 
-func TestNewRefusesAScalerAddressUntilTheScalerIsServed(t *testing.T) {
-	// The scaler port carries no tokens by design, so it is never put behind
-	// UnaryAuth; until its own server exists the option is refused rather than
-	// silently ignored.
-	cfg := testConfig(t)
-	cfg.ScalerAddr = "127.0.0.1:0"
-	b, err := New(t.Context(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err == nil || !strings.Contains(err.Error(), "scaler") {
-		t.Fatalf("New = %v, %v; want an error about the scaler address", b, err)
-	}
-}
-
 func TestNewValidatesTheConfiguration(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Scheduler = "lifo"
