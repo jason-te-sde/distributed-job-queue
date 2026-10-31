@@ -12,6 +12,9 @@ import (
 	"github.com/jason-te-sde/distributed-job-queue/internal/core/job"
 )
 
+// maxRing is the most tenants the model's shell holds in a ring.
+const maxRing = 3
+
 // phase is where the model believes a waiter is.
 type phase uint8
 
@@ -39,6 +42,9 @@ type fetchDone struct {
 	got    int   // as reported to the core, even when the fetch failed
 	failed bool
 	full   bool // the fetch succeeded and found as many jobs as the waiter asked for
+	// perTenant says the fetch took from named tenants, as the shell does while
+	// its ring has tenants, and not across all of them.
+	perTenant bool
 }
 
 // modelQueue is the model's own account of what the core knows about a queue.
@@ -50,6 +56,12 @@ type modelQueue struct {
 	dirty      bool
 	lastFetch  Mono
 	dueAt      Mono
+	// ring is how many tenants the shell's fair ring holds for the queue. The
+	// shell fetches per tenant while it holds any, and across tenants once it
+	// holds none. A short fetch per tenant takes at least one tenant out, and
+	// only a notification puts one in: that is what keeps a chain of such
+	// fetches finite.
+	ring int
 }
 
 // expectation is what the model requires of the effects of the current call,
@@ -99,7 +111,7 @@ func newModel(rt *rapid.T, noDrain bool) *model {
 	for i := range rapid.IntRange(1, 3).Draw(rt, "queues") {
 		name := fmt.Sprintf("q%d", i)
 		m.queues = append(m.queues, name)
-		m.qs[name] = &modelQueue{}
+		m.qs[name] = &modelQueue{ring: rapid.IntRange(0, maxRing).Draw(rt, "ring")}
 	}
 	return m
 }
@@ -253,6 +265,7 @@ func (m *model) notify() {
 	mq := m.qs[q]
 	mq.knownEmpty = false
 	mq.dirty = true
+	mq.ring = min(mq.ring+1, maxRing) // the notification names a tenant, which joins the ring
 	m.newWant()
 	if f := m.pumpChoice(q, m.parkedIn(q), m.flyingIn(q)); f != 0 {
 		m.want.fetch[q] = f
@@ -292,21 +305,33 @@ func (m *model) fetchDone() {
 }
 
 // completeFetch ends the fetch of waiter id with a random result. A failed
-// fetch may still list jobs: the shell's report is not trusted to be tidy.
+// fetch may still list jobs: the shell's report is not trusted to be tidy. The
+// fetch is per tenant, at random, while the shell's ring holds a tenant.
 func (m *model) completeFetch(id WaiterID) {
 	mw := m.waiters[id]
-	got := rapid.IntRange(0, mw.w.Max).Draw(m.t, "got")
-	failed := rapid.IntRange(0, 9).Draw(m.t, "failed") == 0
-	fd := &fetchDone{id: id, prev: mw.phase, got: got, failed: failed, full: !failed && got == mw.w.Max}
-
 	q := mw.w.Queue
 	mq := m.qs[q]
+	got := rapid.IntRange(0, mw.w.Max).Draw(m.t, "got")
+	failed := rapid.IntRange(0, 9).Draw(m.t, "failed") == 0
+	perTenant := mq.ring > 0 && rapid.Bool().Draw(m.t, "perTenant")
+	fd := &fetchDone{id: id, prev: mw.phase, got: got, failed: failed, full: !failed && got == mw.w.Max, perTenant: perTenant}
+	scope := AcrossTenants
+	if perTenant {
+		scope = PerTenant
+	}
+	if perTenant && !failed && !fd.full {
+		mq.ring-- // a tenant came up short, and left the ring
+	}
+	// The fetch may have left jobs behind if it came back full, or if it took
+	// from named tenants and came back short. Only a short fetch across all
+	// tenants finds the queue empty.
+	more := fd.full || (!failed && perTenant)
 	// The waiter waits again only if its fetch found nothing, it did not fail,
 	// the broker is not draining, and its deadline is ahead.
 	returns := fd.prev == phFetching && !failed && got == 0 && !m.draining && m.now < mw.w.Deadline
 	if !failed {
 		switch {
-		case fd.full:
+		case more:
 			mq.knownEmpty = false
 		case !mq.dirty:
 			mq.knownEmpty = true
@@ -319,7 +344,7 @@ func (m *model) completeFetch(id WaiterID) {
 		}
 	}
 	m.newWant()
-	if fd.full || mq.dirty {
+	if more || mq.dirty {
 		parked := m.parkedIn(q)
 		if returns {
 			parked = append(parked, id)
@@ -329,7 +354,7 @@ func (m *model) completeFetch(id WaiterID) {
 			m.want.fetch[q] = f
 		}
 	}
-	m.call("FetchDone", fd, func() []Effect { return m.c.FetchDone(m.now, id, got, failed) })
+	m.call("FetchDone", fd, func() []Effect { return m.c.FetchDone(m.now, id, got, failed, scope) })
 }
 
 func (m *model) cancel() {

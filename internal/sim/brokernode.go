@@ -433,7 +433,7 @@ func (b *BrokerNode) startFetch(f dispatch.Fetch) {
 		return err
 	}, func(err error) {
 		if err != nil {
-			b.fetchDone(f.Waiter, nil, true)
+			b.fetchDone(f.Waiter, nil, true, dispatch.AcrossTenants) // nothing was planned
 			return
 		}
 		b.applyActivity(f.Queue, act)
@@ -465,7 +465,7 @@ func (b *BrokerNode) lease(id dispatch.WaiterID, queue string, max int) {
 		gen := b.gen
 		b.w.After(0, "broker empty fetch", func() {
 			if !b.stale(gen) {
-				b.fetchDone(id, nil, false)
+				b.fetchDone(id, nil, false, dispatch.AcrossTenants)
 			}
 		})
 		return
@@ -483,7 +483,7 @@ func (b *BrokerNode) lease(id dispatch.WaiterID, queue string, max int) {
 		if err != nil {
 			// The plan stays spent. Settling it would have to guess how many
 			// jobs each tenant has, and the next refresh corrects the ring.
-			b.fetchDone(id, nil, true)
+			b.fetchDone(id, nil, true, dispatch.PerTenant)
 			return
 		}
 		got := make([]int, len(takes))
@@ -495,16 +495,19 @@ func (b *BrokerNode) lease(id dispatch.WaiterID, queue string, max int) {
 			}
 		}
 		ring.Settle(takes, got)
-		b.fetchDone(id, grants, false)
+		b.fetchDone(id, grants, false, dispatch.PerTenant)
 	})
 }
 
-// fetchDone reports the end of a waiter's fetch to the core.
-func (b *BrokerNode) fetchDone(id dispatch.WaiterID, grants []store.Grant, failed bool) {
+// fetchDone reports the end of a waiter's fetch to the core. The scope says
+// what the fetch asked the store for: a take for each tenant of a plan, or no
+// plan at all, when the refresh found no tenant with due work and the answer
+// is empty for the whole queue.
+func (b *BrokerNode) fetchDone(id dispatch.WaiterID, grants []store.Grant, failed bool, scope dispatch.FetchScope) {
 	rec := b.waiter(id)
 	rec.fetching = false
 	rec.grants = grants
-	b.apply(b.core.FetchDone(b.mono(), id, len(grants), failed))
+	b.apply(b.core.FetchDone(b.mono(), id, len(grants), failed, scope))
 	if rec.cancelled {
 		b.forget(id)
 	}

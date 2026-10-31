@@ -42,6 +42,29 @@ type Waiter struct {
 	Deadline Mono
 }
 
+// FetchScope says what a fetch asked the store for. The shell reports it with
+// the result, because what a short answer proves depends on it.
+type FetchScope uint8
+
+// The scopes of a fetch. The zero FetchScope is deliberately not one of them,
+// so that a shell that forgets to say is caught by FetchDone and not read as
+// either.
+const (
+	// AcrossTenants means one take of the waiter's Max jobs from the whole
+	// queue, in arrival order, with no tenant named. The store looked at every
+	// tenant, so an answer short of Max says the queue has no more ready jobs.
+	AcrossTenants FetchScope = iota + 1
+	// PerTenant means a take from each of several named tenants, the limits
+	// adding up to the waiter's Max. The store serves each take from its own
+	// tenant only, so an answer short of Max says only that the tenants that
+	// came up short have no more ready jobs. The others may still have some,
+	// and so may tenants that no take named. The core chains another fetch
+	// after a short answer of this kind, and only an answer across tenants
+	// ends the chain, so a shell must fall back to AcrossTenants once the
+	// tenants it plans for have run dry.
+	PerTenant
+)
+
 // waiterState is where a waiter is in its life.
 type waiterState uint8
 
@@ -73,7 +96,9 @@ type queueState struct {
 	// inFlight counts the entries that are fetching or gone.
 	inFlight int
 	// knownEmpty says that the last answer found the queue empty, and that
-	// nothing since suggests otherwise.
+	// nothing since suggests otherwise. Only a fetch across all tenants can
+	// find that: a fetch that took from named tenants and came back short
+	// found only that those tenants ran dry.
 	knownEmpty bool
 	// dirty says that a notification arrived after the last fetch started,
 	// so an empty answer may be out of date.
@@ -178,7 +203,8 @@ func (c *Core) Arrive(now Mono, w Waiter) []Effect {
 
 // Notify reports that jobs may have become ready on a queue. It wakes the
 // oldest parked waiter and no more: a notification starts at most one fetch,
-// so the wakeups follow the work, and a full batch chains the next waiter.
+// so the wakeups follow the work, and a fetch that may have left jobs behind
+// chains the next waiter.
 func (c *Core) Notify(now Mono, queue string) []Effect {
 	q, ok := c.queues[queue]
 	if !ok {
@@ -207,13 +233,33 @@ func (c *Core) DueAt(now Mono, queue string, at Mono) []Effect {
 }
 
 // FetchDone reports the result of the fetch for waiter id: got jobs, or a
-// failure. It answers the waiter, releases the jobs if the waiter was
-// cancelled meanwhile, even when the fetch is reported as failed but lists
-// jobs, and chains one fetch for
-// the next parked waiter, but only when the batch was full or a notification
+// failure, and what the fetch asked the store for. It answers the waiter,
+// releases the jobs if the waiter was cancelled meanwhile, even when the fetch
+// is reported as failed but lists jobs, and chains one fetch for the next
+// parked waiter when the fetch may have left jobs behind, or a notification
 // came in since the last fetch started. A call for a waiter with no fetch out
 // changes nothing.
-func (c *Core) FetchDone(now Mono, id WaiterID, got int, failed bool) []Effect {
+//
+// What an answer proves depends on its scope. A fetch across all tenants that
+// came back full may have left jobs behind, and one that came back short found
+// the queue empty: the queue is then known empty and nothing chains, unless a
+// notification came in since the fetch started. A fetch
+// per tenant takes from named tenants only, so a short answer proves only that
+// the tenants that came up short ran dry, and the others may have more. It is
+// treated like a full one: the queue stays open and the next waiter is
+// chained. The chain is bounded because the shell's takes add up to the
+// waiter's Max, so a short fetch per tenant leaves at least one tenant out of
+// the shell's ring, and once the ring is empty the shell's next fetch is
+// across all tenants, which can find the queue empty.
+//
+// A failed fetch proves nothing, and its scope is ignored. FetchDone panics
+// if the scope is not one of the two, which is a bug in the shell.
+func (c *Core) FetchDone(now Mono, id WaiterID, got int, failed bool, scope FetchScope) []Effect {
+	switch scope {
+	case AcrossTenants, PerTenant:
+	default:
+		panic("dispatch: FetchDone: unknown scope " + strconv.Itoa(int(scope)))
+	}
 	e, ok := c.waiters[id]
 	if !ok || e.state == stateWaiting {
 		return c.arm(nil)
@@ -255,16 +301,18 @@ func (c *Core) FetchDone(now Mono, id WaiterID, got int, failed bool) []Effect {
 		e.state = stateWaiting // back in its original place
 	}
 
-	full := !failed && got >= e.w.Max
+	// The fetch may have left jobs behind if it came back full, or if it took
+	// from named tenants and came back short.
+	more := !failed && (got >= e.w.Max || scope == PerTenant)
 	if !failed {
 		switch {
-		case full:
+		case more:
 			q.knownEmpty = false
 		case !q.dirty:
 			q.knownEmpty = true
 		}
 	}
-	if full || q.dirty {
+	if more || q.dirty {
 		effs = c.pump(now, q, effs)
 	}
 	return c.arm(effs)

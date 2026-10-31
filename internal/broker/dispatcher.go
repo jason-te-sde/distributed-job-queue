@@ -504,10 +504,21 @@ func (d *Dispatcher) onFetchDone(now dispatch.Mono, ev evFetchDone) {
 	}
 	w.fetching = false
 	w.grants = grants
-	d.apply(now, d.core.FetchDone(now, ev.id, len(grants), ev.err != nil))
+	d.apply(now, d.core.FetchDone(now, ev.id, len(grants), ev.err != nil, fetchScope(ev.planned)))
 	if d.waiters[ev.id] == w && w.cancelled {
 		d.forget(now, w) // the core dropped it without an effect: nothing was fetched
 	}
+}
+
+// fetchScope tells the core what a fetch asked the store for: a take for each
+// tenant of the fair planner's plan, or a single take across all tenants when
+// there was no plan, under "fifo" and with an empty ring. The core needs it
+// because a short answer to the first only means that its tenants ran dry.
+func fetchScope(planned []fair.Take) dispatch.FetchScope {
+	if len(planned) == 0 {
+		return dispatch.AcrossTenants
+	}
+	return dispatch.PerTenant
 }
 
 // settle reports what a fetch delivered. A fetch planned by the fair planner

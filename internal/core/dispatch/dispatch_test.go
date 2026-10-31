@@ -143,7 +143,7 @@ func parked(t *testing.T, cfg Config, ids ...WaiterID) *Core {
 		effs := c.Arrive(0, wt(id, 0))
 		if i == 0 {
 			wantEffects(t, effs, Fetch{Waiter: id, Queue: testQueue, Max: 8})
-			c.FetchDone(0, id, 0, false)
+			c.FetchDone(0, id, 0, false, AcrossTenants)
 		} else if len(fetches(effs)) != 0 {
 			t.Fatalf("waiter %d fetched on a known empty queue", id)
 		}
@@ -162,7 +162,7 @@ func TestArriveFetchesImmediately(t *testing.T) {
 func TestArriveOnKnownEmptyQueueWaits(t *testing.T) {
 	c := New(Config{})
 	c.Arrive(0, wt(1, 0))
-	effs := c.FetchDone(0, 1, 0, false)
+	effs := c.FetchDone(0, 1, 0, false, AcrossTenants)
 	wantEffects(t, effs, Arm{At: sec}) // waiter 1 waits again; the poll is the earliest instant
 	effs = c.Arrive(0, wt(2, 0))
 	wantEffects(t, effs, Arm{At: sec})
@@ -235,7 +235,7 @@ func TestFullFetchChainsToNextWaiter(t *testing.T) {
 	if effs := c.Arrive(0, wt(2, 0)); len(fetches(effs)) != 0 {
 		t.Fatalf("waiter 2 fetched while the only slot was busy: %s", describeAll(effs))
 	}
-	effs := c.FetchDone(sec, 1, 8, false)
+	effs := c.FetchDone(sec, 1, 8, false, AcrossTenants)
 	wantEffects(t, effs, Deliver{Waiter: 1}, Fetch{Waiter: 2, Queue: testQueue, Max: 8, Waited: sec})
 	wantCounts(t, c, testQueue, 0, 1)
 }
@@ -244,7 +244,7 @@ func TestPartialFetchStopsChain(t *testing.T) {
 	c := New(Config{MaxInFlight: 1})
 	c.Arrive(0, wt(1, 0))
 	c.Arrive(0, wt(2, 0))
-	effs := c.FetchDone(0, 1, 3, false)
+	effs := c.FetchDone(0, 1, 3, false, AcrossTenants)
 	wantEffects(t, effs, Deliver{Waiter: 1}, Arm{At: sec})
 	wantCounts(t, c, testQueue, 1, 0)
 }
@@ -253,9 +253,9 @@ func TestFullBatchChainsExactlyOneWaiter(t *testing.T) {
 	c := parked(t, Config{}, 1, 2, 3, 4)
 	c.Notify(0, testQueue) // fetches 1
 	c.Notify(0, testQueue) // fetches 2
-	effs := c.FetchDone(0, 1, 8, false)
+	effs := c.FetchDone(0, 1, 8, false, AcrossTenants)
 	wantEffects(t, effs, Deliver{Waiter: 1}, Fetch{Waiter: 3, Queue: testQueue, Max: 8}, Arm{At: sec})
-	effs = c.FetchDone(0, 3, 8, false)
+	effs = c.FetchDone(0, 3, 8, false, AcrossTenants)
 	wantEffects(t, effs, Deliver{Waiter: 3}, Fetch{Waiter: 4, Queue: testQueue, Max: 8})
 }
 
@@ -265,18 +265,90 @@ func TestFullBatchReopensQueueClosedByPartialOne(t *testing.T) {
 	c := parked(t, Config{}, 1, 2, 3, 4)
 	c.Notify(0, testQueue) // fetches 1
 	c.Notify(0, testQueue) // fetches 2
-	effs := c.FetchDone(0, 2, 1, false)
+	effs := c.FetchDone(0, 2, 1, false, AcrossTenants)
 	wantEffects(t, effs, Deliver{Waiter: 2}, Arm{At: sec})
-	effs = c.FetchDone(0, 1, 8, false)
+	effs = c.FetchDone(0, 1, 8, false, AcrossTenants)
 	wantEffects(t, effs, Deliver{Waiter: 1}, Fetch{Waiter: 3, Queue: testQueue, Max: 8}, Arm{At: sec})
 	wantCounts(t, c, testQueue, 1, 1)
+}
+
+func TestShortFetchClosesTheQueueOnlyIfItAskedAcrossTenants(t *testing.T) {
+	// The same short answer, 3 jobs of the 8 asked for, with a second waiter
+	// parked behind the only fetch slot. Across tenants it is the end of the
+	// queue. Per tenant it is only the end of the tenants that came up short.
+	t.Run("across tenants", func(t *testing.T) {
+		c := New(Config{MaxInFlight: 1})
+		c.Arrive(0, wt(1, 0))
+		c.Arrive(0, wt(2, 0))
+		wantEffects(t, c.FetchDone(0, 1, 3, false, AcrossTenants), Deliver{Waiter: 1}, Arm{At: sec})
+		wantCounts(t, c, testQueue, 1, 0)
+		// The queue is known empty: a new waiter parks without a fetch.
+		wantEffects(t, c.Arrive(0, wt(3, 0)), Arm{At: sec})
+		wantCounts(t, c, testQueue, 2, 0)
+	})
+	t.Run("per tenant", func(t *testing.T) {
+		c := New(Config{MaxInFlight: 1})
+		c.Arrive(0, wt(1, 0))
+		c.Arrive(0, wt(2, 0))
+		wantEffects(t, c.FetchDone(0, 1, 3, false, PerTenant),
+			Deliver{Waiter: 1}, Fetch{Waiter: 2, Queue: testQueue, Max: 8})
+		wantCounts(t, c, testQueue, 0, 1)
+		// The queue is open: a new waiter takes the next free slot, in line.
+		wantEffects(t, c.FetchDone(0, 2, 8, false, PerTenant), Deliver{Waiter: 2})
+		wantEffects(t, c.Arrive(0, wt(3, 0)), Fetch{Waiter: 3, Queue: testQueue, Max: 8})
+	})
+}
+
+func TestEmptyPerTenantFetchTriesAgainUntilOneAcrossTenantsLooks(t *testing.T) {
+	// Every tenant of a per-tenant fetch came up empty. That proves nothing
+	// about the tenants the fetch did not name, so the waiter, still within
+	// its deadline, is fetched for again. The shell's ring is empty by now, so
+	// the next fetch looks across tenants, and only its empty answer closes
+	// the queue: the chain ends there.
+	c := New(Config{})
+	c.Arrive(0, wt(1, 0))
+	wantEffects(t, c.FetchDone(sec, 1, 0, false, PerTenant),
+		Fetch{Waiter: 1, Queue: testQueue, Max: 8, Waited: sec})
+	wantCounts(t, c, testQueue, 0, 1)
+	wantEffects(t, c.FetchDone(sec, 1, 0, false, AcrossTenants), Arm{At: 2 * sec})
+	wantCounts(t, c, testQueue, 1, 0)
+}
+
+func TestShortPerTenantFetchPastTheDeadlineTimesOutAndStillChains(t *testing.T) {
+	// An empty answer ends a waiter whose deadline has passed, as always. The
+	// fetch it leaves open still serves the next waiter.
+	c := New(Config{MaxInFlight: 1})
+	c.Arrive(0, wt(1, 0))
+	c.Arrive(0, Waiter{ID: 2, Queue: testQueue, Max: 8, Arrived: 0, Deadline: time.Hour})
+	wantEffects(t, c.FetchDone(20*sec, 1, 0, false, PerTenant),
+		Respond{Waiter: 1, Reason: ReasonTimeout}, Fetch{Waiter: 2, Queue: testQueue, Max: 8, Waited: 20 * sec})
+}
+
+func TestFailedFetchIgnoresTheScope(t *testing.T) {
+	// A failure says nothing about the tenants either way: nothing chains,
+	// whatever the fetch asked for. The poll serves the next waiter.
+	for _, scope := range []FetchScope{AcrossTenants, PerTenant} {
+		c := New(Config{MaxInFlight: 1})
+		c.Arrive(0, wt(1, 0))
+		c.Arrive(0, wt(2, 0))
+		wantEffects(t, c.FetchDone(0, 1, 0, true, scope), Respond{Waiter: 1, Reason: ReasonUnavailable}, Arm{At: sec})
+		wantCounts(t, c, testQueue, 1, 0)
+	}
+}
+
+func TestFetchDoneRejectsAnUnknownScope(t *testing.T) {
+	c := New(Config{})
+	c.Arrive(0, wt(1, 0))
+	mustPanic(t, "FetchDone: unknown scope 0", func() { c.FetchDone(0, 1, 0, false, 0) })
+	mustPanic(t, "FetchDone: unknown scope 3", func() { c.FetchDone(0, 1, 0, false, PerTenant+1) })
+	wantCounts(t, c, testQueue, 0, 1) // the refused calls changed nothing
 }
 
 func TestFailedFetchDoesNotChainAndThePollServesTheNextWaiter(t *testing.T) {
 	c := New(Config{MaxInFlight: 1})
 	c.Arrive(0, wt(1, 0))
 	c.Arrive(0, wt(2, 0))
-	effs := c.FetchDone(0, 1, 0, true)
+	effs := c.FetchDone(0, 1, 0, true, AcrossTenants)
 	wantEffects(t, effs, Respond{Waiter: 1, Reason: ReasonUnavailable}, Arm{At: sec})
 
 	// Waiter 2 was never fetched for. The poll gives it its fetch.
@@ -295,7 +367,7 @@ func TestFailedFetchLetsParkedWaitersTimeOut(t *testing.T) {
 	wantEffects(t, c.Arrive(0, w))
 	wantEffects(t, c.Tick(5*sec)) // still waiting for its turn at the slot
 
-	wantEffects(t, c.FetchDone(5*sec, 1, 0, true), Respond{Waiter: 1, Reason: ReasonUnavailable}, Arm{At: 5 * sec})
+	wantEffects(t, c.FetchDone(5*sec, 1, 0, true, AcrossTenants), Respond{Waiter: 1, Reason: ReasonUnavailable}, Arm{At: 5 * sec})
 	wantEffects(t, c.Tick(5*sec), Respond{Waiter: 2, Reason: ReasonTimeout})
 }
 
@@ -310,9 +382,9 @@ func TestNeverFetchedWaiterIsNotTimedOutByTick(t *testing.T) {
 	wantEffects(t, c.Arrive(0, w)) // parked: nothing to fetch with, nothing to arm
 	wantEffects(t, c.Tick(5*sec))  // far past its deadline: still not answered
 
-	effs := c.FetchDone(5*sec, 1, 8, false)
+	effs := c.FetchDone(5*sec, 1, 8, false, AcrossTenants)
 	wantEffects(t, effs, Deliver{Waiter: 1}, Fetch{Waiter: 2, Queue: testQueue, Max: 8, Waited: 5 * sec})
-	wantEffects(t, c.FetchDone(5*sec, 2, 0, false), Respond{Waiter: 2, Reason: ReasonTimeout})
+	wantEffects(t, c.FetchDone(5*sec, 2, 0, false, AcrossTenants), Respond{Waiter: 2, Reason: ReasonTimeout})
 	wantCounts(t, c, testQueue, 0, 0)
 }
 
@@ -322,13 +394,13 @@ func TestFetchedWaiterTimesOutWhileAnotherFetchHasTheQueueOpen(t *testing.T) {
 	// has been looked for, so its deadline still counts.
 	c := New(Config{})
 	c.Arrive(0, wt(1, 0))
-	c.FetchDone(0, 1, 0, false)
+	c.FetchDone(0, 1, 0, false, AcrossTenants)
 	c.Notify(0, testQueue) // fetches 1
 	w := wt(2, 0)
 	w.Deadline = 1500 * time.Millisecond
 	wantEffects(t, c.Arrive(0, w), Fetch{Waiter: 2, Queue: testQueue, Max: 8})
-	c.FetchDone(0, 1, 0, false)
-	c.FetchDone(0, 2, 0, false)
+	c.FetchDone(0, 1, 0, false, AcrossTenants)
+	c.FetchDone(0, 2, 0, false, AcrossTenants)
 
 	effs := c.Tick(sec)
 	wantEffects(t, effs, Fetch{Waiter: 1, Queue: testQueue, Max: 8, Waited: sec}, Arm{At: 1500 * time.Millisecond})
@@ -346,7 +418,7 @@ func TestParkedWaiterIsTimedOutOnceTheQueueIsKnownEmpty(t *testing.T) {
 	wantEffects(t, c.Arrive(0, w))
 	wantEffects(t, c.Tick(5*sec)) // the queue is open: not answered
 
-	wantArm(t, c.FetchDone(5*sec, 1, 0, false), 5*sec)
+	wantArm(t, c.FetchDone(5*sec, 1, 0, false, AcrossTenants), 5*sec)
 	wantEffects(t, c.Tick(5*sec), Respond{Waiter: 2, Reason: ReasonTimeout}, Arm{At: 20 * sec})
 }
 
@@ -390,13 +462,13 @@ func TestNotifyDuringFetchMarksDirty(t *testing.T) {
 	c := New(Config{})
 	c.Arrive(0, wt(1, 0))
 	wantEffects(t, c.Notify(0, testQueue)) // nobody is waiting: nothing to wake
-	effs := c.FetchDone(0, 1, 0, false)
+	effs := c.FetchDone(0, 1, 0, false, AcrossTenants)
 	wantEffects(t, effs, Fetch{Waiter: 1, Queue: testQueue, Max: 8}) // the empty answer may predate the job
 
 	// Without the notification the same answer parks the waiter.
 	c = New(Config{})
 	c.Arrive(0, wt(1, 0))
-	wantEffects(t, c.FetchDone(0, 1, 0, false), Arm{At: sec})
+	wantEffects(t, c.FetchDone(0, 1, 0, false, AcrossTenants), Arm{At: sec})
 }
 
 func TestRefetchAfterNotificationLeavesQueueOpen(t *testing.T) {
@@ -405,19 +477,19 @@ func TestRefetchAfterNotificationLeavesQueueOpen(t *testing.T) {
 	c := New(Config{})
 	c.Arrive(0, wt(1, 0))
 	c.Notify(0, testQueue)
-	wantEffects(t, c.FetchDone(0, 1, 0, false), Fetch{Waiter: 1, Queue: testQueue, Max: 8})
+	wantEffects(t, c.FetchDone(0, 1, 0, false, AcrossTenants), Fetch{Waiter: 1, Queue: testQueue, Max: 8})
 	wantEffects(t, c.Arrive(0, wt(2, 0)), Fetch{Waiter: 2, Queue: testQueue, Max: 8})
 
 	// Once an answer comes back empty with no notification since, it closes.
-	c.FetchDone(0, 1, 0, false)
-	c.FetchDone(0, 2, 0, false)
+	c.FetchDone(0, 1, 0, false, AcrossTenants)
+	c.FetchDone(0, 2, 0, false, AcrossTenants)
 	wantEffects(t, c.Arrive(0, wt(3, 0)), Arm{At: sec})
 }
 
 func TestTimeoutRespondsAtDeadline(t *testing.T) {
 	c := New(Config{PollInterval: time.Hour})
 	c.Arrive(0, wt(1, 0))
-	wantArm(t, c.FetchDone(0, 1, 0, false), 20*sec)
+	wantArm(t, c.FetchDone(0, 1, 0, false, AcrossTenants), 20*sec)
 
 	effs := c.Tick(20*sec - time.Microsecond)
 	if _, ok := respond(effs, 1); ok {
@@ -433,7 +505,7 @@ func TestTimeoutRespondsAtDeadline(t *testing.T) {
 func TestTimeoutAnswersExpiredWaitersInArrivalOrder(t *testing.T) {
 	c := New(Config{PollInterval: time.Hour})
 	c.Arrive(0, wt(1, 0))
-	c.FetchDone(0, 1, 0, false)
+	c.FetchDone(0, 1, 0, false, AcrossTenants)
 	for _, id := range []WaiterID{2, 3} {
 		w := wt(id, 0)
 		w.Deadline = 5 * sec
@@ -453,12 +525,12 @@ func TestFetchDoneAfterDeadlineRespondsTimeout(t *testing.T) {
 	w := wt(1, 0)
 	w.Deadline = 3 * sec
 	c.Arrive(0, w)
-	effs := c.FetchDone(3*sec, 1, 0, false)
+	effs := c.FetchDone(3*sec, 1, 0, false, AcrossTenants)
 	wantEffects(t, effs, Respond{Waiter: 1, Reason: ReasonTimeout})
 	// One instant earlier the same answer parks the waiter again.
 	c = New(Config{})
 	c.Arrive(0, w)
-	effs = c.FetchDone(3*sec-time.Microsecond, 1, 0, false)
+	effs = c.FetchDone(3*sec-time.Microsecond, 1, 0, false, AcrossTenants)
 	if _, ok := respond(effs, 1); ok {
 		t.Fatalf("responded before the deadline: %s", describeAll(effs))
 	}
@@ -470,7 +542,7 @@ func TestFetchDoneWithJobsAfterDeadlineStillDelivers(t *testing.T) {
 	w := wt(1, 0)
 	w.Deadline = 3 * sec
 	c.Arrive(0, w)
-	wantEffects(t, c.FetchDone(9*sec, 1, 2, false), Deliver{Waiter: 1})
+	wantEffects(t, c.FetchDone(9*sec, 1, 2, false, AcrossTenants), Deliver{Waiter: 1})
 }
 
 func TestWaitZeroFetchesOnceThenResponds(t *testing.T) {
@@ -478,7 +550,7 @@ func TestWaitZeroFetchesOnceThenResponds(t *testing.T) {
 	w := wt(1, 5*sec)
 	w.Deadline = w.Arrived
 	wantEffects(t, c.Arrive(5*sec, w), Fetch{Waiter: 1, Queue: testQueue, Max: 8})
-	wantEffects(t, c.FetchDone(5*sec, 1, 0, false), Respond{Waiter: 1, Reason: ReasonTimeout})
+	wantEffects(t, c.FetchDone(5*sec, 1, 0, false, AcrossTenants), Respond{Waiter: 1, Reason: ReasonTimeout})
 	wantCounts(t, c, testQueue, 0, 0)
 }
 
@@ -526,7 +598,7 @@ func TestWaitZeroArriveSeesAKnownEmptyQueueGoneStale(t *testing.T) {
 			w := wt(1, 0)
 			w.Deadline = sec / 2
 			c.Arrive(0, w)
-			c.FetchDone(0, 1, 0, false) // the queue is known empty
+			c.FetchDone(0, 1, 0, false, AcrossTenants) // the queue is known empty
 			if tc.dueAt != 0 {
 				c.DueAt(0, testQueue, tc.dueAt)
 			}
@@ -549,13 +621,13 @@ func TestWaitZeroDeliversWhatTheFetchFound(t *testing.T) {
 	w := wt(1, 0)
 	w.Deadline = w.Arrived
 	c.Arrive(0, w)
-	wantEffects(t, c.FetchDone(0, 1, 1, false), Deliver{Waiter: 1})
+	wantEffects(t, c.FetchDone(0, 1, 1, false, AcrossTenants), Deliver{Waiter: 1})
 }
 
 func TestPollRefetchesAfterInterval(t *testing.T) {
 	c := New(Config{})
 	c.Arrive(5*sec, wt(1, 5*sec))
-	c.FetchDone(5*sec, 1, 0, false)
+	c.FetchDone(5*sec, 1, 0, false, AcrossTenants)
 
 	effs := c.Tick(5*sec + 999*time.Millisecond)
 	if len(fetches(effs)) != 0 {
@@ -565,7 +637,7 @@ func TestPollRefetchesAfterInterval(t *testing.T) {
 	wantEffects(t, effs, Fetch{Waiter: 1, Queue: testQueue, Max: 8, Waited: sec})
 
 	// The poll restarts the interval.
-	c.FetchDone(6*sec, 1, 0, false)
+	c.FetchDone(6*sec, 1, 0, false, AcrossTenants)
 	if effs := c.Tick(6*sec + 999*time.Millisecond); len(fetches(effs)) != 0 {
 		t.Fatalf("polled early after a poll: %s", describeAll(effs))
 	}
@@ -577,7 +649,7 @@ func TestPollRefetchesAfterInterval(t *testing.T) {
 func TestPollIntervalIsConfigurable(t *testing.T) {
 	c := New(Config{PollInterval: 250 * time.Millisecond})
 	c.Arrive(0, wt(1, 0))
-	c.FetchDone(0, 1, 0, false)
+	c.FetchDone(0, 1, 0, false, AcrossTenants)
 	if effs := c.Tick(249 * time.Millisecond); len(fetches(effs)) != 0 {
 		t.Fatalf("polled early: %s", describeAll(effs))
 	}
@@ -596,14 +668,14 @@ func TestDueAtWakes(t *testing.T) {
 	} {
 		c := New(Config{PollInterval: tc.poll})
 		c.Arrive(0, wt(1, 0))
-		c.FetchDone(0, 1, 0, false)
+		c.FetchDone(0, 1, 0, false, AcrossTenants)
 		wantArm(t, c.DueAt(0, testQueue, 5*sec), tc.arm)
 	}
 
 	// With the poll out of the way, only the due time wakes the waiter.
 	c := New(Config{PollInterval: time.Hour})
 	c.Arrive(0, wt(1, 0))
-	c.FetchDone(0, 1, 0, false)
+	c.FetchDone(0, 1, 0, false, AcrossTenants)
 	wantEffects(t, c.DueAt(0, testQueue, 5*sec), Arm{At: 5 * sec})
 	if effs := c.Tick(5*sec - time.Microsecond); len(fetches(effs)) != 0 {
 		t.Fatalf("woke before the due time: %s", describeAll(effs))
@@ -612,13 +684,13 @@ func TestDueAtWakes(t *testing.T) {
 	wantEffects(t, effs, Fetch{Waiter: 1, Queue: testQueue, Max: 8, Waited: 5 * sec})
 
 	// The due time is spent: the next answer parks the waiter until its deadline.
-	wantEffects(t, c.FetchDone(5*sec, 1, 0, false), Arm{At: 20 * sec})
+	wantEffects(t, c.FetchDone(5*sec, 1, 0, false, AcrossTenants), Arm{At: 20 * sec})
 }
 
 func TestDueAtReplacesTheEarlierValue(t *testing.T) {
 	c := New(Config{PollInterval: time.Hour})
 	c.Arrive(0, wt(1, 0))
-	c.FetchDone(0, 1, 0, false)
+	c.FetchDone(0, 1, 0, false, AcrossTenants)
 	wantArm(t, c.DueAt(0, testQueue, 5*sec), 5*sec)
 	wantArm(t, c.DueAt(0, testQueue, 9*sec), 9*sec) // later, and it replaces
 	wantArm(t, c.DueAt(0, testQueue, 2*sec), 2*sec)
@@ -628,7 +700,7 @@ func TestDueAtReplacesTheEarlierValue(t *testing.T) {
 func TestDueAtInThePastWakesAtTheNextTick(t *testing.T) {
 	c := New(Config{PollInterval: time.Hour})
 	c.Arrive(sec, wt(1, sec))
-	c.FetchDone(sec, 1, 0, false)
+	c.FetchDone(sec, 1, 0, false, AcrossTenants)
 	wantEffects(t, c.DueAt(2*sec, testQueue, sec), Arm{At: sec})
 	wantEffects(t, c.Tick(2*sec), Fetch{Waiter: 1, Queue: testQueue, Max: 8, Waited: sec})
 }
@@ -657,7 +729,7 @@ func TestWakeWithNoFreeSlotMarksTheQueueDirty(t *testing.T) {
 			}
 			wantEffects(t, c.Tick(tc.tick)) // woken, but no slot: nothing to start
 
-			effs := c.FetchDone(3*sec, 1, 0, false)
+			effs := c.FetchDone(3*sec, 1, 0, false, AcrossTenants)
 			wantEffects(t, effs,
 				Respond{Waiter: 1, Reason: ReasonTimeout},
 				Fetch{Waiter: 2, Queue: testQueue, Max: 8, Waited: 3 * sec},
@@ -671,7 +743,7 @@ func TestWakeWithNoFreeSlotMarksTheQueueDirty(t *testing.T) {
 	first.Deadline = 3 * sec
 	c.Arrive(0, first)
 	c.Arrive(0, wt(2, 0))
-	effs := c.FetchDone(3*sec, 1, 0, false)
+	effs := c.FetchDone(3*sec, 1, 0, false, AcrossTenants)
 	if len(fetches(effs)) != 0 {
 		t.Fatalf("fetched without a wake: %s", describeAll(effs))
 	}
@@ -700,14 +772,14 @@ func TestCancelDuringFetchReleases(t *testing.T) {
 	wantEffects(t, c.Cancel(0, 2))
 	wantCounts(t, c, testQueue, 0, 2) // the fetches are still outstanding
 
-	wantEffects(t, c.FetchDone(0, 1, 3, false), Release{Waiter: 1})
+	wantEffects(t, c.FetchDone(0, 1, 3, false, AcrossTenants), Release{Waiter: 1})
 	wantCounts(t, c, testQueue, 0, 1)
-	wantEffects(t, c.FetchDone(0, 2, 0, false)) // nothing was fetched: nothing to release
+	wantEffects(t, c.FetchDone(0, 2, 0, false, AcrossTenants)) // nothing was fetched: nothing to release
 	wantCounts(t, c, testQueue, 0, 0)
 
 	// Both waiters are forgotten.
 	wantEffects(t, c.Cancel(0, 1))
-	wantEffects(t, c.FetchDone(0, 1, 3, false))
+	wantEffects(t, c.FetchDone(0, 1, 3, false, AcrossTenants))
 	wantCounts(t, c, testQueue, 0, 0)
 }
 
@@ -718,14 +790,14 @@ func TestCancelledFetchStillChainsOnFullBatch(t *testing.T) {
 	c.Arrive(0, wt(1, 0))
 	c.Arrive(0, wt(2, 0))
 	c.Cancel(0, 1)
-	effs := c.FetchDone(0, 1, 8, false)
+	effs := c.FetchDone(0, 1, 8, false, AcrossTenants)
 	wantEffects(t, effs, Release{Waiter: 1}, Fetch{Waiter: 2, Queue: testQueue, Max: 8})
 }
 
 func TestCancelAfterAnswerIsIgnored(t *testing.T) {
 	c := New(Config{})
 	c.Arrive(0, wt(1, 0))
-	wantEffects(t, c.FetchDone(0, 1, 2, false), Deliver{Waiter: 1})
+	wantEffects(t, c.FetchDone(0, 1, 2, false, AcrossTenants), Deliver{Waiter: 1})
 	wantEffects(t, c.Cancel(0, 1))
 	wantEffects(t, c.Cancel(0, 99))
 }
@@ -733,7 +805,7 @@ func TestCancelAfterAnswerIsIgnored(t *testing.T) {
 func TestFetchFailureRespondsUnavailable(t *testing.T) {
 	c := New(Config{})
 	c.Arrive(0, wt(1, 0))
-	effs := c.FetchDone(0, 1, 0, true)
+	effs := c.FetchDone(0, 1, 0, true, AcrossTenants)
 	wantEffects(t, effs, Respond{Waiter: 1, Reason: ReasonUnavailable})
 	wantCounts(t, c, testQueue, 0, 0)
 
@@ -745,29 +817,29 @@ func TestFetchFailureReleasesGrantsOfACancelledWaiter(t *testing.T) {
 	// A failure report that still lists jobs must not leave them to expire.
 	c := New(Config{})
 	c.Arrive(0, wt(1, 0))
-	wantEffects(t, c.FetchDone(0, 1, 5, true), Respond{Waiter: 1, Reason: ReasonUnavailable})
+	wantEffects(t, c.FetchDone(0, 1, 5, true, AcrossTenants), Respond{Waiter: 1, Reason: ReasonUnavailable})
 
 	c.Arrive(0, wt(2, 0))
 	c.Cancel(0, 2)
-	wantEffects(t, c.FetchDone(0, 2, 5, true), Release{Waiter: 2})
+	wantEffects(t, c.FetchDone(0, 2, 5, true, AcrossTenants), Release{Waiter: 2})
 
 	// A failure with nothing fetched releases nothing.
 	c.Arrive(0, wt(3, 0))
 	c.Cancel(0, 3)
-	wantEffects(t, c.FetchDone(0, 3, 0, true))
+	wantEffects(t, c.FetchDone(0, 3, 0, true, AcrossTenants))
 }
 
 func TestFetchFailureKeepsKnownEmpty(t *testing.T) {
 	c := New(Config{MaxInFlight: 2, PollInterval: time.Hour})
 	c.Arrive(0, wt(1, 0))
 	c.Arrive(0, wt(2, 0))
-	c.FetchDone(0, 1, 0, false) // the queue is known empty; waiter 1 waits
+	c.FetchDone(0, 1, 0, false, AcrossTenants) // the queue is known empty; waiter 1 waits
 	c.Arrive(0, wt(3, 0))
 	wantCounts(t, c, testQueue, 2, 1)
 
 	// Waiter 2's fetch fails. That says nothing new about the queue, so the
 	// waiters keep waiting.
-	effs := c.FetchDone(0, 2, 0, true)
+	effs := c.FetchDone(0, 2, 0, true, AcrossTenants)
 	wantEffects(t, effs, Respond{Waiter: 2, Reason: ReasonUnavailable}, Arm{At: 20 * sec})
 }
 
@@ -781,7 +853,7 @@ func TestDrainAnswersEveryWaiter(t *testing.T) {
 	wantEffects(t, c.Arrive(sec, wt(3, sec)), Respond{Waiter: 3, Reason: ReasonRejected})
 
 	// The grants of the fetch in flight are valid, so they are delivered.
-	wantEffects(t, c.FetchDone(sec, 1, 2, false), Deliver{Waiter: 1})
+	wantEffects(t, c.FetchDone(sec, 1, 2, false, AcrossTenants), Deliver{Waiter: 1})
 	wantCounts(t, c, testQueue, 0, 0)
 	wantEffects(t, c.Notify(sec, testQueue))
 	wantEffects(t, c.Tick(30*sec))
@@ -791,7 +863,7 @@ func TestDrainThenEmptyFetchRespondsDraining(t *testing.T) {
 	c := New(Config{})
 	c.Arrive(0, wt(1, 0))
 	c.Drain(0)
-	wantEffects(t, c.FetchDone(0, 1, 0, false), Respond{Waiter: 1, Reason: ReasonDraining})
+	wantEffects(t, c.FetchDone(0, 1, 0, false, AcrossTenants), Respond{Waiter: 1, Reason: ReasonDraining})
 	wantCounts(t, c, testQueue, 0, 0)
 }
 
@@ -799,7 +871,7 @@ func TestDrainThenFailedFetchRespondsUnavailable(t *testing.T) {
 	c := New(Config{})
 	c.Arrive(0, wt(1, 0))
 	c.Drain(0)
-	wantEffects(t, c.FetchDone(0, 1, 0, true), Respond{Waiter: 1, Reason: ReasonUnavailable})
+	wantEffects(t, c.FetchDone(0, 1, 0, true, AcrossTenants), Respond{Waiter: 1, Reason: ReasonUnavailable})
 }
 
 func TestDrainReleasesCancelledFetches(t *testing.T) {
@@ -807,7 +879,7 @@ func TestDrainReleasesCancelledFetches(t *testing.T) {
 	c.Arrive(0, wt(1, 0))
 	c.Cancel(0, 1)
 	c.Drain(0)
-	wantEffects(t, c.FetchDone(0, 1, 2, false), Release{Waiter: 1})
+	wantEffects(t, c.FetchDone(0, 1, 2, false, AcrossTenants), Release{Waiter: 1})
 }
 
 func TestDrainIsIdempotent(t *testing.T) {
@@ -821,7 +893,7 @@ func TestDrainIsIdempotent(t *testing.T) {
 func TestFetchWaitedIsSinceArrival(t *testing.T) {
 	c := New(Config{})
 	c.Arrive(sec, wt(1, sec))
-	c.FetchDone(sec, 1, 0, false)
+	c.FetchDone(sec, 1, 0, false, AcrossTenants)
 	effs := c.Notify(4*sec, testQueue)
 	wantEffects(t, effs, Fetch{Waiter: 1, Queue: testQueue, Max: 8, Waited: 3 * sec})
 }
@@ -833,12 +905,12 @@ func TestArmIsEarliestPendingInstant(t *testing.T) {
 	w1 := on("a", wt(1, 0))
 	w1.Deadline = 30 * sec
 	c.Arrive(0, w1)
-	wantArm(t, c.FetchDone(0, 1, 0, false), 10*sec) // the poll of "a"
+	wantArm(t, c.FetchDone(0, 1, 0, false, AcrossTenants), 10*sec) // the poll of "a"
 
 	w2 := on("b", wt(2, 2*sec))
 	w2.Deadline = 6 * sec
 	c.Arrive(2*sec, w2)
-	wantArm(t, c.FetchDone(2*sec, 2, 0, false), 6*sec) // the deadline of waiter 2
+	wantArm(t, c.FetchDone(2*sec, 2, 0, false, AcrossTenants), 6*sec) // the deadline of waiter 2
 
 	wantArm(t, c.DueAt(2*sec, "a", 3*sec), 3*sec) // a due time of "a"
 
@@ -864,7 +936,7 @@ func TestArmDoesNotSpinWhileFetchesSaturate(t *testing.T) {
 	wantEffects(t, c.Tick(5*sec))
 
 	// The wake was not lost: the fetch that comes back chains the next waiter.
-	effs := c.FetchDone(5*sec, 1, 0, false)
+	effs := c.FetchDone(5*sec, 1, 0, false, AcrossTenants)
 	wantEffects(t, effs, Fetch{Waiter: 1, Queue: testQueue, Max: 8, Waited: 5 * sec})
 
 	// With no Tick in between, the empty answer closes the queue, and once
@@ -872,7 +944,7 @@ func TestArmDoesNotSpinWhileFetchesSaturate(t *testing.T) {
 	c = New(Config{MaxInFlight: 1})
 	c.Arrive(0, wt(1, 0))
 	c.Arrive(0, wt(2, 0))
-	wantEffects(t, c.FetchDone(5*sec, 1, 0, false), Arm{At: sec})
+	wantEffects(t, c.FetchDone(5*sec, 1, 0, false, AcrossTenants), Arm{At: sec})
 	wantEffects(t, c.Tick(5*sec), Fetch{Waiter: 1, Queue: testQueue, Max: 8, Waited: 5 * sec})
 }
 
@@ -889,7 +961,7 @@ func parkedOnQueues(t *testing.T, deadline Mono) *Core {
 		w := on(p.queue, wt(p.id, 0))
 		w.Deadline = deadline
 		if len(fetches(c.Arrive(0, w))) > 0 {
-			c.FetchDone(0, p.id, 0, false)
+			c.FetchDone(0, p.id, 0, false, AcrossTenants)
 		}
 	}
 	return c
@@ -923,7 +995,7 @@ func TestDrainEffectsFollowQueueNameOrder(t *testing.T) {
 func TestIdleQueueStateIsPruned(t *testing.T) {
 	c := New(Config{})
 	c.Arrive(0, wt(1, 0))
-	c.FetchDone(0, 1, 0, false)
+	c.FetchDone(0, 1, 0, false, AcrossTenants)
 	c.Cancel(0, 1)
 	if len(c.queues) != 1 {
 		t.Fatalf("queues = %d before the prune, want 1", len(c.queues))
@@ -943,14 +1015,14 @@ func TestPruneKeepsQueuesWithPendingWork(t *testing.T) {
 	c.DueAt(0, "scheduled", 10*sec)
 	c.Arrive(0, wt(1, 0)) // fetching
 	c.Arrive(0, on("other", wt(2, 0)))
-	c.FetchDone(0, 2, 0, false) // waiting
-	c.Tick(5 * sec)             // "other" polls; waiter 1 still fetches
+	c.FetchDone(0, 2, 0, false, AcrossTenants) // waiting
+	c.Tick(5 * sec)                            // "other" polls; waiter 1 still fetches
 	if len(c.queues) != 3 {
 		t.Fatalf("queues = %d, want 3 (due time, fetch in flight, waiter)", len(c.queues))
 	}
 	c.Cancel(5*sec, 2)
-	c.FetchDone(5*sec, 2, 0, false)
-	c.FetchDone(5*sec, 1, 0, false)
+	c.FetchDone(5*sec, 2, 0, false, AcrossTenants)
+	c.FetchDone(5*sec, 1, 0, false, AcrossTenants)
 	c.Cancel(5*sec, 1)
 	c.Tick(9 * sec)
 	if len(c.queues) != 1 {
@@ -986,7 +1058,7 @@ func TestArriveTreatsDeadlineBeforeArrivalAsFetchOnce(t *testing.T) {
 	w := wt(1, 5*sec)
 	w.Deadline = sec
 	c.Arrive(5*sec, w)
-	wantEffects(t, c.FetchDone(5*sec, 1, 0, false), Respond{Waiter: 1, Reason: ReasonTimeout})
+	wantEffects(t, c.FetchDone(5*sec, 1, 0, false, AcrossTenants), Respond{Waiter: 1, Reason: ReasonTimeout})
 }
 
 func TestArriveRejectsDuplicateID(t *testing.T) {
@@ -994,14 +1066,14 @@ func TestArriveRejectsDuplicateID(t *testing.T) {
 	c.Arrive(0, wt(1, 0))
 	mustPanic(t, "dispatch: Arrive: duplicate waiter id 1", func() { c.Arrive(0, wt(1, 0)) })
 	// An id that was answered is free again.
-	c.FetchDone(0, 1, 8, false)
+	c.FetchDone(0, 1, 8, false, AcrossTenants)
 	wantEffects(t, c.Arrive(0, wt(1, 0)), Fetch{Waiter: 1, Queue: testQueue, Max: 8})
 }
 
 func TestFetchDoneForUnknownOrIdleWaiterIsIgnored(t *testing.T) {
 	c := parked(t, Config{}, 1)
-	wantEffects(t, c.FetchDone(0, 99, 3, false), Arm{At: sec}) // unknown id
-	wantEffects(t, c.FetchDone(0, 1, 3, false), Arm{At: sec})  // waiter 1 has no fetch out
+	wantEffects(t, c.FetchDone(0, 99, 3, false, AcrossTenants), Arm{At: sec}) // unknown id
+	wantEffects(t, c.FetchDone(0, 1, 3, false, AcrossTenants), Arm{At: sec})  // waiter 1 has no fetch out
 	wantCounts(t, c, testQueue, 1, 0)
 }
 
@@ -1016,7 +1088,7 @@ func TestQueuesAreIndependent(t *testing.T) {
 	wantEffects(t, c.Arrive(0, on("b", wt(2, 0))), Fetch{Waiter: 2, Queue: "b", Max: 8})
 	wantCounts(t, c, "a", 0, 1)
 	wantCounts(t, c, "b", 0, 1)
-	c.FetchDone(0, 1, 0, false) // waiter 1 waits on a
+	c.FetchDone(0, 1, 0, false, AcrossTenants) // waiter 1 waits on a
 	if effs := c.Notify(0, "b"); len(fetches(effs)) != 0 {
 		t.Fatalf("a notification for b started a fetch on a: %s", describeAll(effs))
 	}
