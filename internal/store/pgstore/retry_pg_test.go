@@ -151,12 +151,24 @@ func TestPGClassifiesALostConnection(t *testing.T) {
 // a hash join over a scan of the table, whose order is that of the pages. That
 // is the plan that autovacuum's statistics can bring about on a table that has
 // grown.
+//
+// The second shape also turns JIT compilation off, and the tests are unusable
+// without that. Every statement of the store joins the one-row clock CTE, which
+// can only be a nested loop, so with nested loops ruled out PostgreSQL 17 and
+// earlier add its disable_cost of 1e10 to the plan (version 18 counts disabled
+// nodes instead). That puts every statement far above jit_above_cost, and a
+// server built with LLVM then compiles each one, with inlining and optimization,
+// in 50 to 190 ms. On PostgreSQL 15 that made an Enqueue of 24 jobs, which is 24
+// statements, take 1.1 s, and the three-minute tests that ran into the package's
+// ten-minute timeout. JIT does not change which plan is chosen, only what a
+// statement costs to start, so turning it off keeps the shape.
 var planShapes = map[string]func(*pgxpool.Config){
 	"with the plan the planner chooses": func(*pgxpool.Config) {},
 	"with a hash join over a scan": func(cfg *pgxpool.Config) {
 		for _, param := range []string{"enable_nestloop", "enable_indexscan", "enable_bitmapscan", "enable_indexonlyscan", "enable_mergejoin"} {
 			cfg.ConnConfig.RuntimeParams[param] = "off"
 		}
+		cfg.ConnConfig.RuntimeParams["jit"] = "off"
 	},
 }
 
