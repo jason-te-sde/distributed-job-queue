@@ -24,6 +24,12 @@ import (
 // bound of the index range, whereas a join would read every scheduled job of
 // the queue, in run_at order, and filter them one by one.
 //
+// The UPDATE reaches the picked rows through an array of their ids, not through
+// a join with the pick. For a join the planner estimates the pick, which it
+// cannot do well when the pick is a lateral subquery, and with a large estimate
+// it hashes the pick and scans the whole table; the array is evaluated first
+// and is always a primary-key lookup, in ascending id.
+//
 // Two planted flaws live here, each as the removal of one clause: F9PG drops
 // the run_at bound of the pick, so that jobs that are not yet due are leased;
 // F2PG drops the epoch increment, so that a lease keeps the previous holder's
@@ -36,8 +42,8 @@ picked AS MATERIALIZED (%s)
 UPDATE jobqueue.jobs AS j
 SET state = 'leased', lease_epoch = j.lease_epoch + 1, attempts = j.attempts + 1,
     lease_expires_at = clock.now + $%d::int8 * interval '1 microsecond', leased_by = $%d::text
-FROM picked, clock
-WHERE j.id = picked.id
+FROM clock
+WHERE j.id = ANY(ARRAY(SELECT id FROM picked))
 RETURNING %s, j.lease_expires_at - clock.now`, pick, ttl, worker, jobCols), "lease_epoch = j.lease_epoch + 1, ")
 }
 

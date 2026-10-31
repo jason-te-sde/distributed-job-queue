@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"testing"
 
@@ -38,6 +39,11 @@ func TestClassifyConnectionFailures(t *testing.T) {
 		"cannot connect now":         &pgconn.PgError{Code: "57P03"},
 		"too many connections":       &pgconn.PgError{Code: "53300"},
 		"a wrapped connection error": fmt.Errorf("while sending: %w", &pgconn.PgError{Code: "08P01"}),
+		"a deadlock":                 &pgconn.PgError{Code: "40P01"},
+		"a serialization failure":    &pgconn.PgError{Code: "40001"},
+		"a stream that ended":        io.EOF,
+		"a stream that ended early":  io.ErrUnexpectedEOF,
+		"an early end, wrapped":      fmt.Errorf("receive message: %w", io.ErrUnexpectedEOF),
 	} {
 		got := classify("lease", err)
 		if !errors.Is(got, store.ErrUnavailable) {
@@ -51,11 +57,11 @@ func TestClassifyConnectionFailures(t *testing.T) {
 
 func TestClassifyLeavesOtherErrorsAlone(t *testing.T) {
 	for name, err := range map[string]error{
-		"a unique violation":    &pgconn.PgError{Code: "23505"},
-		"a check violation":     &pgconn.PgError{Code: "23514"},
-		"a syntax error":        &pgconn.PgError{Code: "42601"},
-		"a serialization error": &pgconn.PgError{Code: "40001"},
-		"a plain error":         errors.New("boom"),
+		"a unique violation":  &pgconn.PgError{Code: "23505"},
+		"a check violation":   &pgconn.PgError{Code: "23514"},
+		"a syntax error":      &pgconn.PgError{Code: "42601"},
+		"a statement timeout": &pgconn.PgError{Code: "57014"},
+		"a plain error":       errors.New("boom"),
 	} {
 		got := classify("complete", err)
 		if errors.Is(got, store.ErrUnavailable) {

@@ -131,18 +131,46 @@ func settle(ctx context.Context, q querier, idx []int, applied []bool, ref func(
 	return nil
 }
 
+// ackGuard says which row an acknowledgement item may change: the item's job,
+// in the item's queue, leased under the item's token. It is the WHERE of every
+// acknowledgement statement and of the lock that precedes it.
+const ackGuard = `j.id = r.id AND j.queue = r.queue AND j.state = 'leased' AND j.lease_epoch = r.token`
+
+// lockAcked is the CTE that an acknowledgement statement starts its work with.
+// It locks the rows that the statement is about to change, in ascending job id,
+// before the statement looks at any of them. Two calls that name the same jobs
+// in opposite orders then lock them in the same order and cannot deadlock. The
+// order of a statement's own join is the planner's, and it changes with the
+// statistics (an index lookup per item, or a hash join over a scan of the
+// table), so it cannot be relied on. Only rows that the guard admits are
+// locked: an item with a stale token neither waits for nor blocks anyone. The
+// statement then changes only the rows named here, which it has already locked
+// and which it reaches through the primary key. extra is more conditions on the
+// rows, if the statement has any.
+func lockAcked(extra string) string {
+	return `locked AS MATERIALIZED (
+    SELECT j.id FROM jobqueue.jobs j, r, clock WHERE ` + ackGuard + extra + `
+    ORDER BY j.id
+    FOR UPDATE OF j
+)`
+}
+
+// lockedOnly restricts an acknowledgement statement to the rows of lockAcked.
+const lockedOnly = ` AND j.id = ANY(ARRAY(SELECT id FROM locked))`
+
 // failSQL fails the leased jobs whose lease epoch is the caller's token: a job
 // with attempts left that is not failed for good becomes ready again after its
 // delay, any other becomes dead. The messages arrive already truncated, and an
 // empty one is stored as NULL.
 //
 //	$1 ids, $2 queues, $3 tokens, $4 permanent, $5 delays in microseconds, $6 messages
-const failSQL = `
+var failSQL = `
 WITH clock AS MATERIALIZED (SELECT jobqueue.now() AS now),
 r AS (
     SELECT * FROM unnest($1::int8[], $2::text[], $3::int8[], $4::bool[], $5::int8[], $6::text[])
     WITH ORDINALITY AS r(id, queue, token, permanent, delay_us, err, ord)
-)
+),
+` + lockAcked("") + `
 UPDATE jobqueue.jobs AS j
 SET state = CASE WHEN NOT r.permanent AND j.attempts < j.max_attempts THEN 'ready' ELSE 'dead' END,
     run_at = CASE WHEN NOT r.permanent AND j.attempts < j.max_attempts
@@ -151,7 +179,7 @@ SET state = CASE WHEN NOT r.permanent AND j.attempts < j.max_attempts THEN 'read
     last_error = nullif(r.err, ''),
     lease_expires_at = NULL, leased_by = NULL
 FROM r, clock
-WHERE j.id = r.id AND j.queue = r.queue AND j.state = 'leased' AND j.lease_epoch = r.token
+WHERE ` + ackGuard + lockedOnly + `
 RETURNING r.ord`
 
 // Fail implements store.Store.
@@ -215,12 +243,13 @@ var heartbeatSQL = without(flaw.F4PG, `
 WITH clock AS MATERIALIZED (SELECT jobqueue.now() AS now),
 r AS (
     SELECT * FROM unnest($1::int8[], $2::text[], $3::int8[]) WITH ORDINALITY AS r(id, queue, token, ord)
-)
+),
+`+lockAcked(" AND j.lease_expires_at > clock.now")+`
 UPDATE jobqueue.jobs AS j
 SET lease_expires_at = clock.now + $4::int8 * interval '1 microsecond'
 FROM r, clock
-WHERE j.id = r.id AND j.queue = r.queue AND j.state = 'leased' AND j.lease_epoch = r.token
-  AND j.lease_expires_at > clock.now
+WHERE `+ackGuard+`
+  AND j.lease_expires_at > clock.now`+lockedOnly+`
 RETURNING r.ord, j.lease_expires_at - clock.now`, " AND j.lease_epoch = r.token")
 
 // validateRefs checks the refs of a Heartbeat or Release call.
@@ -296,11 +325,12 @@ var completeSQL = without(flaw.F1PG, `
 WITH clock AS MATERIALIZED (SELECT jobqueue.now() AS now),
 r AS (
     SELECT * FROM unnest($1::int8[], $2::text[], $3::int8[], $4::bytea[]) WITH ORDINALITY AS r(id, queue, token, result, ord)
-)
+),
+`+lockAcked("")+`
 UPDATE jobqueue.jobs AS j
 SET state = 'succeeded', result = r.result, finished_at = clock.now, lease_expires_at = NULL, leased_by = NULL
 FROM r, clock
-WHERE j.id = r.id AND j.queue = r.queue AND j.state = 'leased' AND j.lease_epoch = r.token
+WHERE `+ackGuard+lockedOnly+`
 RETURNING r.ord`, " AND j.lease_epoch = r.token")
 
 // Complete implements store.Store.
@@ -361,16 +391,17 @@ func (s *Store) Complete(ctx context.Context, reqs []store.CompleteRequest) ([]j
 // transaction.
 //
 //	$1 ids, $2 queues, $3 tokens
-const releaseSQL = `
+var releaseSQL = `
 WITH clock AS MATERIALIZED (SELECT jobqueue.now() AS now),
 r AS (
     SELECT * FROM unnest($1::int8[], $2::text[], $3::int8[]) WITH ORDINALITY AS r(id, queue, token, ord)
 ),
+` + lockAcked("") + `,
 released AS (
     UPDATE jobqueue.jobs AS j
     SET state = 'ready', run_at = clock.now, attempts = j.attempts - 1, lease_expires_at = NULL, leased_by = NULL
     FROM r, clock
-    WHERE j.id = r.id AND j.queue = r.queue AND j.state = 'leased' AND j.lease_epoch = r.token
+    WHERE ` + ackGuard + lockedOnly + `
     RETURNING r.ord, j.queue, j.tenant
 ),
 wake AS (

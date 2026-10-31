@@ -444,8 +444,8 @@ func TestPGEmptyValuesAreStoredAsNull(t *testing.T) {
 	s := pgstore.New(pool)
 	refs := leaseAll(t, 2, s)
 
-	// Job 1 is completed with an empty result, job 2 fails with an empty
-	// message and is then leased again and released.
+	// Job 1 is completed with an empty result. Job 2 is failed with an empty
+	// message, which sends it back to ready with no lease.
 	if out, err := s.Complete(t.Context(), []store.CompleteRequest{{Ref: refs[0], Result: []byte{}}}); err != nil || out[0] != job.Applied {
 		t.Fatalf("Complete = %v, %v", out, err)
 	}
@@ -543,9 +543,9 @@ func deadDSN(t *testing.T) string {
 	return fmt.Sprintf("postgres://127.0.0.1:%d/postgres?sslmode=disable&connect_timeout=2", port)
 }
 
-// everyCall runs each method of the store once with valid arguments and
-// returns the error of each, by method name.
-func everyCall(ctx context.Context, s *pgstore.Store) map[string]error {
+// storeCalls returns a call of each method of the store with valid arguments,
+// by method name, that returns the call's error.
+func storeCalls(ctx context.Context, s *pgstore.Store) map[string]func() error {
 	ref := store.Ref{ID: 1, Queue: "q", Token: 1}
 	calls := map[string]func() error{
 		"Enqueue": func() error { _, err := s.Enqueue(ctx, []job.Spec{spec("q", "t")}); return err },
@@ -571,8 +571,14 @@ func everyCall(ctx context.Context, s *pgstore.Store) map[string]error {
 		"Activity": func() error { _, err := s.Activity(ctx, "q"); return err },
 		"Snapshot": func() error { _, err := s.Snapshot(ctx); return err },
 	}
-	out := make(map[string]error, len(calls))
-	for name, call := range calls {
+	return calls
+}
+
+// everyCall runs each method of the store once with valid arguments and
+// returns the error of each, by method name.
+func everyCall(ctx context.Context, s *pgstore.Store) map[string]error {
+	out := map[string]error{}
+	for name, call := range storeCalls(ctx, s) {
 		out[name] = call()
 	}
 	return out
@@ -709,13 +715,16 @@ func (n planNode) rowsRead() float64 {
 
 // The statements that run every second or on every poll must read the rows
 // they use and no others, however many rows the table holds. Each of them has a
-// formulation that reads the whole table when no job qualifies, which no
-// functional test sees, because the tables they use are small: a lease that
-// compares run_at with a joined clock, a reap that asks the primary key for the
-// lowest expired ids, a prune that does the same. This test fills the table
-// with rows that none of them may touch and bounds the rows each one reads;
-// Activity gets a queue with a backlog of due jobs as well, since it looks past
-// them for the next scheduled one.
+// formulation that reads the whole table, which no functional test sees,
+// because the tables they use are small: a lease that compares run_at with a
+// joined clock, a reap that asks the primary key for the lowest expired ids, a
+// prune that does the same, a lease whose UPDATE joins the rows it picked and so
+// hashes them against a scan of the table. This test fills the table with rows
+// that none of them may touch and bounds the rows each one reads. The leases run
+// twice, on a queue with nothing due and on one with due jobs to take: a hash
+// join whose build side is empty reads nothing, so only the second run shows the
+// scan. Activity gets a queue with a backlog of due jobs as well, since it looks
+// past them for the next scheduled one.
 func TestPGHotStatementsDoNotScanTheTable(t *testing.T) {
 	pool := pgtest.NewDB(t)
 	// The test clock stands still at the epoch, so now is the epoch throughout.
@@ -740,7 +749,16 @@ func TestPGHotStatementsDoNotScanTheTable(t *testing.T) {
 		}
 	}
 
-	// A backlog of due jobs in a second queue, and one job scheduled after it:
+	// A queue of due jobs for the leases to take, 20000 for each of the three
+	// tenants they take from. The planner estimates what a lease picks from the
+	// number of due rows, and only a large estimate makes it choose the scan.
+	if _, err := pool.Exec(t.Context(), `INSERT INTO jobqueue.jobs (queue, tenant, state, payload, run_at, attempts, max_attempts, created_at)
+		 SELECT 's', 't' || (1 + g % 3), 'ready', ''::bytea, jobqueue.now() - interval '1 hour' + g * interval '1 millisecond', 0, 25, jobqueue.now()
+		 FROM generate_series(1, 60000) g`); err != nil {
+		t.Fatal(err)
+	}
+
+	// A backlog of due jobs in a third queue, and one job scheduled after it:
 	// Activity must find the one scheduled job without reading the backlog.
 	for _, stmt := range []string{
 		`INSERT INTO jobqueue.jobs (queue, tenant, state, payload, run_at, attempts, max_attempts, created_at)
@@ -760,12 +778,14 @@ func TestPGHotStatementsDoNotScanTheTable(t *testing.T) {
 		sql  string
 		args []any
 	}{
-		"Lease of one tenant after another": {pgstore.TenantLeaseSQL, []any{"q", []string{"t1", "t2", "t3"}, []int32{5, 5, 5}, ttl, "w"}},
-		"Lease in FIFO order":               {pgstore.FIFOLeaseSQL, []any{"q", int32(10), ttl, "w"}},
-		"Reap":                              {pgstore.ReapSelectSQL, []any{int64(100)}},
-		"Prune":                             {pgstore.PruneSQL, []any{(24 * time.Hour).Microseconds(), (336 * time.Hour).Microseconds(), int64(100)}},
-		"Activity of a queue with scheduled jobs": {pgstore.ActivitySQL, []any{"q"}},
-		"Activity of a queue with a backlog":      {pgstore.ActivitySQL, []any{"r"}},
+		"Lease of one tenant after another, nothing due": {pgstore.TenantLeaseSQL, []any{"q", []string{"t1", "t2", "t3"}, []int32{5, 5, 5}, ttl, "w"}},
+		"Lease in FIFO order, nothing due":               {pgstore.FIFOLeaseSQL, []any{"q", int32(10), ttl, "w"}},
+		"Lease of one tenant after another, jobs due":    {pgstore.TenantLeaseSQL, []any{"s", []string{"t1", "t2", "t3"}, []int32{5, 5, 5}, ttl, "w"}},
+		"Lease in FIFO order, jobs due":                  {pgstore.FIFOLeaseSQL, []any{"s", int32(10), ttl, "w"}},
+		"Reap":                                           {pgstore.ReapSelectSQL, []any{int64(100)}},
+		"Prune":                                          {pgstore.PruneSQL, []any{(24 * time.Hour).Microseconds(), (336 * time.Hour).Microseconds(), int64(100)}},
+		"Activity of a queue with scheduled jobs":        {pgstore.ActivitySQL, []any{"q"}},
+		"Activity of a queue with a backlog":             {pgstore.ActivitySQL, []any{"r"}},
 	} {
 		// EXPLAIN ANALYZE runs the statement, so it runs in a transaction that
 		// is rolled back.
@@ -786,7 +806,7 @@ func TestPGHotStatementsDoNotScanTheTable(t *testing.T) {
 		// A few rows may be read: the tenants of Activity, the probes of a lateral
 		// join. Anything near the size of the table is a scan.
 		if n := plans[0].Plan.rowsRead(); n > 100 {
-			t.Errorf("%s read %.0f rows of a table of 40000, only a few of which it needs; plan: %s", name, n, raw)
+			t.Errorf("%s read %.0f rows of a table of 100000, only a few of which it needs; plan: %s", name, n, raw)
 		}
 	}
 }

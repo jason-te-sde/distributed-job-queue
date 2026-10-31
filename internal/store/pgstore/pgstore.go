@@ -143,19 +143,13 @@ func validateTenantScope(tenant string) error {
 	return job.ValidateName("tenant", tenant)
 }
 
-// errUnresolved is returned when a job that an idempotency key named has gone.
-func errUnresolved(item int) error {
-	return fmt.Errorf("%w: item %d was neither inserted nor found under its idempotency key, "+
-		"because the job that held the key was deleted in between; retry",
-		store.ErrUnavailable, item)
-}
-
-// without returns sql, or sql with the first occurrence of clause removed when
-// the planted flaw id is on. That is how the flaw sites in the statements
-// work: each names the one clause whose absence is the defect. Without the
+// without returns sql, or sql with every occurrence of clause removed when the
+// planted flaw id is on. That is how the flaw sites in the statements work:
+// each names the one clause whose absence is the defect, which a statement may
+// state more than once (a lock and the update that follows it). Without the
 // jobqueue_flaws build tag no flaw is ever on and sql comes back unchanged. A
-// clause that sql does not contain panics, so that a site that has drifted
-// from its statement cannot quietly stop testing anything.
+// clause that sql does not contain panics, so that a site that has drifted from
+// its statement cannot quietly stop testing anything.
 func without(id flaw.ID, sql, clause string) string {
 	if !flaw.On(id) {
 		return sql
@@ -163,5 +157,5 @@ func without(id flaw.ID, sql, clause string) string {
 	if !strings.Contains(sql, clause) {
 		panic("pgstore: flaw " + string(id) + ": the statement has no clause " + strconv.Quote(clause))
 	}
-	return strings.Replace(sql, clause, "", 1)
+	return strings.ReplaceAll(sql, clause, "")
 }
