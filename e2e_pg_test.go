@@ -347,7 +347,6 @@ func TestPGEndToEnd(t *testing.T) {
 	// one more attempt; a job tried more often than that was run again for no
 	// reason. (That attempts do not exceed max_attempts, 25 here, is a CHECK of
 	// the schema and cannot fail, so it is not asserted.)
-	var rerun []string
 	rows, err := env.pool.Query(t.Context(), "SELECT id, state, attempts FROM jobqueue.jobs WHERE queue = $1", queue)
 	if err != nil {
 		t.Fatal(err)
@@ -368,12 +367,9 @@ func TestPGEndToEnd(t *testing.T) {
 		case classPermanent:
 			wantState = "dead"
 		}
-		switch {
-		case state != wantState || attempts < minAttempts:
-			t.Errorf("job %d (%s) is %s after %d attempts, want %s after at least %d",
-				id, class, state, attempts, wantState, minAttempts)
-		case attempts > maxAttempts:
-			rerun = append(rerun, fmt.Sprintf("job %d (%s) took %d attempts, want at most %d", id, class, attempts, maxAttempts))
+		if state != wantState || attempts < minAttempts || attempts > maxAttempts {
+			t.Errorf("job %d (%s) is %s after %d attempts, want %s after %d to %d",
+				id, class, state, attempts, wantState, minAttempts, maxAttempts)
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -408,42 +404,9 @@ func TestPGEndToEnd(t *testing.T) {
 			broken = append(broken, fmt.Sprintf("broker %d: %s", i, line))
 		}
 	}
-	ackDeadlockSymptom(t, "lines at Error level in the brokers' logs", broken)
-	ackDeadlockSymptom(t, "jobs run more often than the plan needs", rerun)
-}
-
-// baseHasAckDeadlockFix says whether this branch is based on a tree that has
-// PR #30 of main. That PR fixes a deadlock between the acknowledgement batches
-// of one worker: a Heartbeat and a Complete or Fail batch take the same row
-// locks in different orders and Postgres aborts one of them (SQLSTATE 40P01).
-// Without the fix the broker logs the abort at Error level, the worker repeats
-// the call and every job still ends right, but the abort holds locks for the
-// deadlock timeout of a second, during which heartbeats wait, so leases run out
-// and jobs are run again. Measured over 40 runs of TestPGEndToEnd on a base
-// without the fix: 18 runs logged a deadlock and 4 had jobs with a third
-// attempt. On a base with it: 0 and 0 in 40.
-//
-// Set this to true after the branch is rebased onto main. TestPGEndToEnd then
-// fails on a line at Error level in a broker's log, which no retry of the SDK
-// can hide, and on a job that was run more often than the plan needs. Until
-// then it only logs them. The state each job ends in, and the lower bound on
-// its attempts, are checked either way.
-const baseHasAckDeadlockFix = false
-
-// ackDeadlockSymptom reports what the deadlock of the acknowledgement batches
-// leaves behind: a failure if baseHasAckDeadlockFix, a log line if not. At
-// most five of the lines are shown.
-func ackDeadlockSymptom(t *testing.T, what string, lines []string) {
-	t.Helper()
-	if len(lines) == 0 {
-		return
+	if len(broken) > 0 {
+		t.Errorf("the brokers logged %d lines at Error level:\n%s", len(broken), strings.Join(broken[:min(len(broken), 5)], "\n"))
 	}
-	shown := strings.Join(lines[:min(len(lines), 5)], "\n")
-	if baseHasAckDeadlockFix {
-		t.Errorf("%d %s:\n%s", len(lines), what, shown)
-		return
-	}
-	t.Logf("%d %s; this does not fail the test while baseHasAckDeadlockFix is false:\n%s", len(lines), what, shown)
 }
 
 // TestPGZombieWorkerIsFenced shows what the fencing token is for. Worker A
