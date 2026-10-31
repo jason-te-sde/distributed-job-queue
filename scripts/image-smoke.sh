@@ -4,7 +4,7 @@
 # usage: image-smoke.sh <image>
 #
 # Checks what the image declares (the user, the entrypoint and the exposed
-# ports), then starts PostgreSQL and the image's broker on a private Docker
+# ports) and that its example worker starts, then starts PostgreSQL and the image's broker on a private Docker
 # network and drives them with the image's own jobqueuectl: apply the schema,
 # enqueue a job through the broker and read it back. Nothing on the host is
 # used but Docker; no port is published, so concurrent runs cannot collide.
@@ -99,6 +99,12 @@ entrypoint="$(docker image inspect --format '{{json .Config.Entrypoint}}' "$imag
 # Go templates visit the keys of a map in sorted order.
 ports="$(docker image inspect --format '{{range $port, $_ := .Config.ExposedPorts}}{{$port}} {{end}}' "$image")"
 [ "${ports% }" = "$want_ports" ] || fail "the image exposes '${ports% }', want '$want_ports'"
+
+# The example worker, which the Helm chart runs as /thumbnail, is in the image
+# and starts in the distroless base: a static binary that needs nothing from
+# the system. Its help needs no broker and no database.
+out="$(docker run --rm --entrypoint /thumbnail "$image" -h 2>&1)" || fail "/thumbnail -h exited with an error: $out"
+expect "/thumbnail -h" '^usage: thumbnail <command>' "$out"
 
 # Pull quietly and only when needed: the progress output of a pull would bury
 # the result.

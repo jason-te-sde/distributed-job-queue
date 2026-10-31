@@ -67,6 +67,18 @@ example:
   enabled: false
   queue: thumbnails
   concurrency: 4
+  # The worker reaches the broker the way the broker is served. With
+  # tls.secretName set it connects over TLS and trusts the "ca.crt" key of that
+  # Secret, which must hold one (cert-manager adds it), and the certificate
+  # must name the gRPC Service host that the worker dials. Otherwise, with
+  # insecure=true, it connects in plaintext.
+  #
+  # tokenSecret and tokenKey name the Secret key that holds the worker's bearer
+  # token, a "worker" token for the queue above (see the tokens Secret). The
+  # token is passed as JOBQUEUE_TOKEN. It is required unless insecure=true,
+  # because the broker then requires tokens.
+  tokenSecret: ""
+  tokenKey: ""
   # Scale the example worker on the queue backlog through KEDA. Requires KEDA
   # to be installed in the cluster, example.enabled and scaler.enabled.
   keda:

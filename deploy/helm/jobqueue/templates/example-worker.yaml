@@ -1,4 +1,16 @@
 {{- if .Values.example.enabled }}
+{{- if and (not .Values.insecure) (not .Values.example.tokenSecret) }}
+{{- fail "example.enabled requires example.tokenSecret unless insecure is true: the broker requires tokens, so the example worker needs one" }}
+{{- end }}
+{{- if and .Values.example.tokenSecret (not .Values.example.tokenKey) }}
+{{- fail "example.tokenSecret requires example.tokenKey: name the key of the Secret that holds the token" }}
+{{- end }}
+{{- /*
+The broker serves TLS whenever it has a certificate, and insecure only lifts its
+refusal to serve without one. So the worker uses TLS whenever the TLS Secret is
+set, and plaintext only without it.
+*/}}
+{{- $trustCA := .Values.tls.secretName }}
 # A demonstration worker for the thumbnails queue. Under KEDA it starts at zero
 # replicas and the ScaledObject raises it when the queue has a backlog.
 apiVersion: apps/v1
@@ -29,10 +41,40 @@ spec:
             - {{ printf "dns:///%s-grpc:%s" (include "jobqueue.fullname" .) (include "jobqueue.grpcPort" .) | quote }}
             - "--concurrency"
             - {{ .Values.example.concurrency | quote }}
+            {{- if $trustCA }}
+            - "--tls-ca"
+            - "/etc/jobqueue/tls/ca.crt"
+            {{- else if .Values.insecure }}
+            - "--insecure"
+            {{- end }}
           env:
             {{- include "jobqueue.databaseEnv" . | nindent 12 }}
+            {{- if .Values.example.tokenSecret }}
+            - name: JOBQUEUE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.example.tokenSecret }}
+                  key: {{ .Values.example.tokenKey }}
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:
             {{- include "jobqueue.containerSecurityContext" . | nindent 12 }}
+          {{- if $trustCA }}
+          volumeMounts:
+            - name: tls-ca
+              mountPath: /etc/jobqueue/tls
+              readOnly: true
+          {{- end }}
+      {{- if $trustCA }}
+      # Only the CA certificate is projected: the worker has no use for the
+      # broker's private key.
+      volumes:
+        - name: tls-ca
+          secret:
+            secretName: {{ .Values.tls.secretName }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+      {{- end }}
 {{- end }}

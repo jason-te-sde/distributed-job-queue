@@ -165,3 +165,36 @@ broken_case prestop-guard-off-by-one-fails "preStopSleepSeconds" \
 # (t) Resource names that outgrow the 63 characters of a DNS label fail.
 broken_case long-names-not-truncated-fails "at most 63 characters" \
   sub templates/_helpers.tpl 's/trunc 48/trunc 63/'
+
+# (u) The example worker reaches the broker the way the broker is served and
+# sends its token. Each case breaks one part of the worker's template.
+broken_case example-insecure-flag-never-rendered-fails "the example worker to connect without TLS" \
+  sub templates/example-worker.yaml 's/"--insecure"/"--plaintext"/'
+broken_case example-tls-ca-path-fails "the example worker to trust the CA of the TLS Secret" \
+  sub templates/example-worker.yaml 's#/etc/jobqueue/tls/ca.crt#/etc/jobqueue/tls/tls.crt#'
+# The broker serves TLS whenever it has a certificate, so insecure must not
+# turn a worker that has the CA into a plaintext one.
+broken_case example-insecure-beats-tls-fails "the example worker to use TLS when the broker does, even if insecure is set" \
+  sub templates/example-worker.yaml 's/{{- \$trustCA := .Values.tls.secretName }}/{{- $trustCA := and .Values.tls.secretName (not .Values.insecure) }}/'
+broken_case example-ca-mount-writable-fails "the CA to be mounted read-only where --tls-ca looks" \
+  sub templates/example-worker.yaml 's/readOnly: true/readOnly: false/'
+broken_case example-projects-the-private-key-fails "only ca.crt of the TLS Secret to be projected, not its key" \
+  sub templates/example-worker.yaml 's/- key: ca.crt/- key: tls.key/'
+broken_case example-token-never-passed-fails "the example worker to take its token from the example token Secret" \
+  sub templates/example-worker.yaml 's/name: JOBQUEUE_TOKEN/name: JOBQUEUE_TOKEN_UNUSED/'
+broken_case example-token-wrong-key-fails "the example worker to take its token from the example token Secret" \
+  sub templates/example-worker.yaml 's/key: {{ .Values.example.tokenKey }}/key: token/'
+broken_case example-token-wrong-secret-fails "the example worker to take its token from the example token Secret" \
+  sub templates/example-worker.yaml 's/name: {{ .Values.example.tokenSecret }}/name: {{ .Values.database.secretName }}/'
+broken_case example-database-url-dropped-fails "the example worker to have the database URL only" \
+  sub templates/example-worker.yaml 's/{{- include "jobqueue.databaseEnv" . | nindent 12 }}//'
+
+# (v) The guards that refuse a worker that could not connect. The first must
+# let insecure=true through without a token, and the second must hold only
+# when a token Secret is named.
+broken_case example-without-token-guard-fails "example.enabled requires example.tokenSecret unless insecure is true" \
+  sub templates/example-worker.yaml 's/{{- if and (not .Values.insecure) (not .Values.example.tokenSecret) }}/{{- if false }}/'
+broken_case example-guard-ignores-insecure-fails "[example worker, insecure] helm template failed" \
+  sub templates/example-worker.yaml 's/{{- if and (not .Values.insecure) (not .Values.example.tokenSecret) }}/{{- if not .Values.example.tokenSecret }}/'
+broken_case example-token-key-guard-fails "example.tokenSecret requires example.tokenKey" \
+  sub templates/example-worker.yaml 's/{{- if and .Values.example.tokenSecret (not .Values.example.tokenKey) }}/{{- if false }}/'
