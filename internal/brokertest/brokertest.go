@@ -16,6 +16,7 @@ import (
 	"context"
 	"log/slog"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -49,6 +50,11 @@ type running struct {
 // its running state. It is shared by every test of the binary, which is safe
 // because a broker is a distinct pointer.
 var started sync.Map // *broker.Broker -> *running
+
+// errorLogs maps each broker that Start returned to the lines it logged at
+// Error level. Unlike started it keeps a broker after Stop, so a test can ask
+// about a broker that it replaced.
+var errorLogs sync.Map // *broker.Broker -> *errorLog
 
 // StartBrokers starts n brokers over the database of pool, which must already
 // be migrated, and returns them once they listen. Each runs until the test
@@ -89,7 +95,11 @@ func Start(t testing.TB, pool *pgxpool.Pool, mutate func(*broker.Config)) *broke
 	// Registered before Stop's cleanup, so it runs after it: the lines that a
 	// shutdown logs still reach the test log.
 	t.Cleanup(w.close)
-	log := slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	errs := &errorLog{}
+	log := slog.New(recordingHandler{
+		Handler: slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelWarn}),
+		errs:    errs,
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	b, err := broker.New(ctx, cfg, log)
 	if err != nil {
@@ -98,6 +108,7 @@ func Start(t testing.TB, pool *pgxpool.Pool, mutate func(*broker.Config)) *broke
 	}
 	r := &running{cancel: cancel, done: make(chan error, 1)}
 	started.Store(b, r)
+	errorLogs.Store(b, errs)
 	go func() { r.done <- b.Run(ctx) }()
 	t.Cleanup(func() { Stop(t, b) })
 	return b
@@ -123,6 +134,68 @@ func Stop(t testing.TB, b *broker.Broker) {
 	case <-time.After(stopTimeout):
 		t.Errorf("brokertest: Run did not return within %v of its context ending", stopTimeout)
 	}
+}
+
+// ErrorLines returns what b has logged at Error level since it started, one
+// string per record. A broker logs at that level only for something that went
+// wrong inside it, such as a store call that failed for a reason other than the
+// caller's, so a healthy run has none. A call that a client repeats and then
+// succeeds still leaves its line here, which is the point: the client's retry
+// hides the failure from every other check. It returns nil for a broker that
+// Start did not start.
+func ErrorLines(b *broker.Broker) []string {
+	v, ok := errorLogs.Load(b)
+	if !ok {
+		return nil
+	}
+	return v.(*errorLog).lines()
+}
+
+// errorLog collects the Error-level records of one broker.
+type errorLog struct {
+	mu   sync.Mutex
+	list []string
+}
+
+func (e *errorLog) add(line string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.list = append(e.list, line)
+}
+
+func (e *errorLog) lines() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.list...)
+}
+
+// recordingHandler passes every record to the handler it wraps and keeps those
+// at Error level and above. It wraps the handlers that With and WithGroup make
+// too, because the broker logs through a logger it has added attributes to.
+type recordingHandler struct {
+	slog.Handler
+	errs *errorLog
+}
+
+func (h recordingHandler) Handle(ctx context.Context, r slog.Record) error {
+	if r.Level >= slog.LevelError {
+		var line strings.Builder
+		line.WriteString(r.Message)
+		r.Attrs(func(a slog.Attr) bool {
+			line.WriteString(" " + a.String())
+			return true
+		})
+		h.errs.add(line.String())
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+func (h recordingHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return recordingHandler{Handler: h.Handler.WithAttrs(attrs), errs: h.errs}
+}
+
+func (h recordingHandler) WithGroup(name string) slog.Handler {
+	return recordingHandler{Handler: h.Handler.WithGroup(name), errs: h.errs}
 }
 
 // databaseURL is the URL of the database of pool on the server that
