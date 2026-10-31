@@ -147,6 +147,16 @@ const ackGuard = `j.id = r.id AND j.queue = r.queue AND j.state = 'leased' AND j
 // statement then changes only the rows named here, which it has already locked
 // and which it reaches through the primary key. extra is more conditions on the
 // rows, if the statement has any.
+//
+// The order holds within one statement, not across the passes of a call that
+// names a job id more than once (see rounds). Those run one statement per pass
+// in one transaction, and a pass locks whatever its guard admits, which can be
+// a row that an earlier pass did not lock: the first item for an id carried a
+// stale token and a later one the current token. Such a call takes its locks in
+// no global order and can still deadlock against a call of a single pass that
+// names the same jobs. PostgreSQL then aborts one of them with a deadlock
+// error, which classify reports as store.ErrUnavailable, so the caller sees a
+// retryable failure and never a hang.
 func lockAcked(extra string) string {
 	return `locked AS MATERIALIZED (
     SELECT j.id FROM jobqueue.jobs j, r, clock WHERE ` + ackGuard + extra + `

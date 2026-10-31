@@ -13,9 +13,12 @@ var ErrNotFound = errors.New("job not found")
 
 // ErrUnavailable is wrapped around failures of the connection to the store, and
 // around a call that the database rolled back for a transient reason such as a
-// deadlock with a concurrent call. Nothing of such a call was applied, and a
-// caller may retry it. The caller's own mistakes are job.ErrInvalid and are
-// never retried.
+// deadlock with a concurrent call. A rollback applied nothing, but a connection
+// that was lost while the call ran may have committed it first, and the error
+// cannot say which. A retry is therefore safe only for a call that tolerates
+// repetition: an acknowledgement is fenced by its token and an Enqueue with an
+// idempotency key is deduplicated, but an Enqueue without a key may create the
+// job twice. The caller's own mistakes are job.ErrInvalid and are never retried.
 var ErrUnavailable = errors.New("store unavailable")
 
 // InternalError reports that the store found a job in a state that its own
