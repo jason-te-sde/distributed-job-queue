@@ -44,6 +44,10 @@ type SoakOptions struct {
 	// Concurrency are as in E1.
 	PayloadBytes         int
 	Workers, Concurrency int
+
+	// statsFn replaces the read of the jobs table at each sample, for a test that
+	// needs a sample to fail.
+	statsFn func(ctx context.Context, r *rig) (tableStats, error)
 }
 
 func (o SoakOptions) withDefaults() SoakOptions {
@@ -171,13 +175,18 @@ func (r *rig) soak(ctx context.Context, o SoakOptions, emit Emit) error {
 	defer func() { _ = conn.Close() }()
 	producer := jobqueue.NewProducer(conn, jobqueue.ProducerOptions{PerCallTimeout: 30 * time.Second})
 
+	// The probe runs on a context of its own, so that a failed sample can stop it:
+	// otherwise the run would wait out the whole soak, half an hour by default, to
+	// report an error that is known at once.
+	probeCtx, stopProbe := context.WithCancel(ctx)
+	defer stopProbe()
 	type probeEnd struct {
 		out *Outcome
 		err error
 	}
 	ended := make(chan probeEnd, 1)
 	go func() {
-		out, err := Probe(ctx, ProbeConfig{Rate: o.Rate, Duration: o.Duration, DrainWait: MeasureDrainWait, StartDelay: startDelay}, m, benchTenant,
+		out, err := Probe(probeCtx, ProbeConfig{Rate: o.Rate, Duration: o.Duration, DrainWait: MeasureDrainWait, StartDelay: startDelay}, m, benchTenant,
 			func(ctx context.Context, _ int, intended time.Time) error {
 				_, err := producer.Enqueue(ctx, jobqueue.EnqueueParams{Queue: queue, Tenant: benchTenant, Payload: m.Payload(intended, o.PayloadBytes)})
 				return err
@@ -214,8 +223,9 @@ sampling:
 
 		interval := m.Hist(benchTenant).Take()
 		total.Merge(interval)
-		stats, err := r.tableStats(ctx)
+		stats, err := sampleStats(ctx, r, o)
 		if err != nil {
+			stopProbe()
 			end = <-ended
 			_ = stop()
 			return fmt.Errorf("sample the jobs table: %w", err)
@@ -273,6 +283,14 @@ sampling:
 		Quantiles: total.Quantiles(), Env: r.env, Started: began, Duration: time.Since(began),
 	})
 	return nil
+}
+
+// sampleStats reads the jobs table, or calls the replacement a test installed.
+func sampleStats(ctx context.Context, r *rig, o SoakOptions) (tableStats, error) {
+	if o.statsFn != nil {
+		return o.statsFn(ctx, r)
+	}
+	return r.tableStats(ctx)
 }
 
 func mean(xs []float64) float64 {

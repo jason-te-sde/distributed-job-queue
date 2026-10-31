@@ -235,7 +235,7 @@ func cmdAblate(inv *invocation) error {
 		return err
 	}
 	if what == "notify" && l.rate == 0 && !l.findMax {
-		l.rate = 20 // an idle queue: far below what one worker can take
+		l.rate = 20 // an idle queue: far below what the workers can take
 	}
 	return c.execute(inv, func(log func(string, ...any), emit exp.Emit) error {
 		return exp.Ablate(inv.ctx, exp.AblateOptions{What: what, ThroughputOptions: exp.ThroughputOptions{

@@ -68,6 +68,13 @@ type SendFunc func(ctx context.Context, k int, intended time.Time) error
 // latencies measured from the intended times report, instead of growing without
 // bound.
 func Run(ctx context.Context, s Schedule, n int, send SendFunc) (sent, late int, err error) {
+	return run(ctx, s, n, send, maxInFlight)
+}
+
+// run is Run with the number of sends that may run at once as a parameter, so
+// that a test can reach the cap without thousands of goroutines. It is at least
+// 1.
+func run(ctx context.Context, s Schedule, n int, send SendFunc, inFlight int) (sent, late int, err error) {
 	if !validRate(s.Rate) {
 		return 0, 0, fmt.Errorf("load: the rate must be above zero and finite, got %v", s.Rate)
 	}
@@ -82,7 +89,7 @@ func Run(ctx context.Context, s Schedule, n int, send SendFunc) (sent, late int,
 		wg      sync.WaitGroup
 		sentN   atomic.Int64
 		lateN   int
-		slots   = make(chan struct{}, maxInFlight)
+		slots   = make(chan struct{}, max(inFlight, 1))
 		timer   = time.NewTimer(time.Hour)
 		failure sync.Once
 		sendErr error

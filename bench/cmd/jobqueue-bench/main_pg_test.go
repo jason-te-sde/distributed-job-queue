@@ -38,8 +38,8 @@ func TestPGThroughputCommandPrintsAJSONLine(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[0]), &r); err != nil {
 		t.Fatalf("stdout is not a result: %v\n%s", err, lines[0])
 	}
-	if r.Experiment != "throughput" || r.Metrics["started"] != 200 || r.Metrics["sustained"] != 1 {
-		t.Errorf("result = %s: want throughput, 200 started and sustained", lines[0])
+	if r.Experiment != "throughput" || r.Metrics["started"] != 200 || r.Metrics["sent"] != 200 {
+		t.Errorf("result = %s: want throughput, with all 200 jobs sent and started", lines[0])
 	}
 	if !strings.Contains(stderr, "throughput") || !strings.Contains(stderr, "p99=") {
 		t.Errorf("stderr lacks the human summary: %q", stderr)

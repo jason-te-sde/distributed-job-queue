@@ -47,9 +47,10 @@ func New() *Hist {
 	return &Hist{h: hdrhistogram.New(minMicros, maxMicros, digits)}
 }
 
-// Record adds one sample. A sample below 1us counts as 1us and one above 1h
-// as 1h, so that an out-of-range value, a negative one after a clock step
-// included, is counted in the tail instead of being lost or failing the run.
+// Record adds one sample. A sample below 1us is recorded as 1us, and one above
+// 1h as 1h. That includes a negative one, which a clock that stepped backwards
+// gives: it is counted, so the count stays the number of jobs, but at the low end
+// and without its value. Nothing is dropped and nothing fails the run.
 func (h *Hist) Record(d time.Duration) {
 	us := min(max(d.Microseconds(), minMicros), maxMicros)
 	h.mu.Lock()

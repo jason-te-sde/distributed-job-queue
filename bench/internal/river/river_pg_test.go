@@ -3,6 +3,8 @@
 package river
 
 import (
+	"context"
+	"errors"
 	"net/url"
 	"testing"
 	"time"
@@ -46,5 +48,55 @@ func TestPGRiverRunsAtAFixedRateAndRemovesItsSchema(t *testing.T) {
 	}
 	if left {
 		t.Errorf("the schema %s is still there after the run", schema)
+	}
+}
+
+func TestPGRiverCancelledMidProbeStillRemovesItsSchema(t *testing.T) {
+	pool := pgtest.NewEmptyDB(t)
+	u, err := url.Parse(pgtest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.Path = "/" + pool.Config().ConnConfig.Database
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	// A probe of half a minute, interrupted as soon as it is inserting jobs.
+	go func() {
+		done <- Run(ctx, Options{DatabaseURL: u.String(), Rate: 200, Duration: 30 * time.Second}, func(exp.Result) {})
+	}()
+
+	deadline := time.Now().Add(30 * time.Second)
+	inserting := func() bool {
+		var exists bool
+		if err := pool.QueryRow(t.Context(), "SELECT to_regclass($1) IS NOT NULL", schema+".river_job").Scan(&exists); err != nil || !exists {
+			return false
+		}
+		var n int
+		return pool.QueryRow(t.Context(), "SELECT count(*) FROM "+schema+".river_job").Scan(&n) == nil && n > 0
+	}
+	for !inserting() {
+		if time.Now().After(deadline) {
+			t.Fatal("the probe had inserted no job after 30s")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Run error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Minute):
+		t.Fatal("Run did not return after its context was cancelled")
+	}
+	var left bool
+	if err := pool.QueryRow(t.Context(), "SELECT to_regnamespace($1) IS NOT NULL", schema).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left {
+		t.Errorf("the schema %s is still there after a cancelled run: the clean-up must not depend on the run's context", schema)
 	}
 }

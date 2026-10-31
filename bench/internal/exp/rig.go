@@ -38,9 +38,13 @@ const (
 	startDelay = 500 * time.Millisecond
 	// cleanupTimeout bounds deleting the rows of a probe.
 	cleanupTimeout = 10 * time.Minute
-	// maxBrokers bounds --brokers: every broker holds a pool of connections, and
-	// PostgreSQL's default allows 100.
-	maxBrokers = 8
+	// maxBrokers bounds --brokers by the connections of a default PostgreSQL,
+	// whose max_connections is 100. Each broker holds a pool of 20 and one
+	// connection for its NOTIFY listener, and the harness holds benchPoolConns:
+	// 4 brokers need 4*(20+1)+4 = 88, 5 would need 109. A server with a higher
+	// limit can run more brokers by lowering --db-conns, but the default must not
+	// start a cluster that the default server cannot hold.
+	maxBrokers = 4
 	// maxPayload is the payload limit of the queue.
 	maxPayload = job.MaxPayloadBytes
 	// maxConcurrency is the SDK's limit of handlers per worker.
