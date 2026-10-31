@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -251,17 +252,18 @@ func cmdStats(e *env, args []string) error {
 		v.Tenants[i] = tenantStatsView{
 			Tenant: t.GetTenant(), Ready: t.GetReady(), Scheduled: t.GetScheduled(),
 			Leased: t.GetLeased(), Dead: t.GetDead(),
-			OldestReadyAgeMS: t.GetOldestReadyAge().AsDuration().Milliseconds(),
+		}
+		if t.GetReady() > 0 {
+			ms := t.GetOldestReadyAge().AsDuration().Milliseconds()
+			v.Tenants[i].OldestReadyAgeMS = &ms
 		}
 	}
 	return e.print(v, func(w *bytes.Buffer) {
 		rows := make([][]string, len(v.Tenants))
 		for i, t := range v.Tenants {
-			// A queue with nothing ready has no oldest job; zero would claim
-			// a job that was just added.
 			oldest := "-"
-			if t.Ready > 0 {
-				oldest = formatAge(time.Duration(t.OldestReadyAgeMS) * time.Millisecond)
+			if t.OldestReadyAgeMS != nil {
+				oldest = formatAge(time.Duration(*t.OldestReadyAgeMS) * time.Millisecond)
 			}
 			rows[i] = []string{
 				clean(t.Tenant), strconv.FormatInt(t.Ready, 10), strconv.FormatInt(t.Scheduled, 10),
@@ -440,6 +442,19 @@ func cmdMigrate(e *env, args []string) error {
 			return fmt.Errorf("%w (%d applied before the failure)", err, applied)
 		}
 		return err
+	}
+	// Up applies what is missing but does not look at what else is there, so a
+	// database that a newer binary migrated past this one would pass for
+	// migrated. Check reads the version back from the database: it is nil only
+	// when the highest version recorded there is migrate.Version, which is then
+	// the version of the database as well as of this binary.
+	if err := migrate.Check(ctx, pool); err != nil {
+		var mismatch *migrate.SchemaMismatchError
+		if errors.As(err, &mismatch) && mismatch.Have > mismatch.Want {
+			return fmt.Errorf("migrate: the database is at schema version %d, ahead of the %d that this binary knows: use a newer jobqueuectl",
+				mismatch.Have, mismatch.Want)
+		}
+		return fmt.Errorf("migrate: check the schema version after migrating: %w", err)
 	}
 	return e.print(migrateView{Applied: applied, Version: migrate.Version}, func(w *bytes.Buffer) {
 		fmt.Fprintf(w, "applied=%d version=%d\n", applied, migrate.Version)

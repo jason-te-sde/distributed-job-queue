@@ -79,12 +79,14 @@ type statsView struct {
 }
 
 type tenantStatsView struct {
-	Tenant           string `json:"tenant"`
-	Ready            int64  `json:"ready"`
-	Scheduled        int64  `json:"scheduled"`
-	Leased           int64  `json:"leased"`
-	Dead             int64  `json:"dead"`
-	OldestReadyAgeMS int64  `json:"oldest_ready_age_ms"`
+	Tenant    string `json:"tenant"`
+	Ready     int64  `json:"ready"`
+	Scheduled int64  `json:"scheduled"`
+	Leased    int64  `json:"leased"`
+	Dead      int64  `json:"dead"`
+	// OldestReadyAgeMS is null for a tenant with nothing ready: zero would
+	// claim a job that was just added.
+	OldestReadyAgeMS *int64 `json:"oldest_ready_age_ms"`
 }
 
 type deadPageView struct {

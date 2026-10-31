@@ -66,9 +66,10 @@ type testBroker struct {
 	clock *fakeClock
 }
 
-// startBroker serves the queue API over a memstore on 127.0.0.1. A nil auth
-// makes every caller an admin, like jobqueue-server --insecure.
-func startBroker(t *testing.T, auth *broker.Authenticator) *testBroker {
+// startBroker serves the queue API over a memstore on 127.0.0.1, without TLS
+// unless opts bring credentials. A nil auth makes every caller an admin, like
+// jobqueue-server --insecure.
+func startBroker(t *testing.T, auth *broker.Authenticator, opts ...grpc.ServerOption) *testBroker {
 	t.Helper()
 	clock := &fakeClock{now: epoch}
 	mem := memstore.New(memstore.Options{Clock: clock.Now})
@@ -76,8 +77,10 @@ func startBroker(t *testing.T, auth *broker.Authenticator) *testBroker {
 	srv := broker.NewServer(mem, noLease{}, broker.NewMetrics(prometheus.NewRegistry()), log, 1)
 
 	const maxMsg = 20 << 20
-	gs := grpc.NewServer(grpc.ChainUnaryInterceptor(broker.UnaryAuth(auth)),
-		grpc.MaxRecvMsgSize(maxMsg), grpc.MaxSendMsgSize(maxMsg))
+	gs := grpc.NewServer(append([]grpc.ServerOption{
+		grpc.ChainUnaryInterceptor(broker.UnaryAuth(auth)),
+		grpc.MaxRecvMsgSize(maxMsg), grpc.MaxSendMsgSize(maxMsg),
+	}, opts...)...)
 	jobqueuev1.RegisterJobQueueServiceServer(gs, srv)
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -343,6 +346,59 @@ func TestCtlGlobalFlagsBeforeAndAfterSubcommand(t *testing.T) {
 	})
 }
 
+func TestCtlTerminatorEndsTheFlags(t *testing.T) {
+	b := startBroker(t, nil)
+	b.enqueue(t, "--queue", "q", "--payload-string", "x")
+
+	// After "--" the rest are arguments, flag-like or not.
+	r := b.ctl("get", "--", "1")
+	if r.code != 0 || r.stderr != "" || !strings.Contains(r.stdout, "id:") {
+		t.Fatalf("get -- 1 = exit %d, stdout %q, stderr %q; want the job", r.code, r.stdout, r.stderr)
+	}
+	r = b.ctl("get", "1", "--", "--json")
+	if r.code != 2 || r.stdout != "" || !strings.Contains(r.stderr, "got 2 arguments") {
+		t.Fatalf("get 1 -- --json = exit %d, stdout %q, stderr %q; want exit 2: --json is an argument after --", r.code, r.stdout, r.stderr)
+	}
+}
+
+func TestCtlParseReadsATerminatorOnlyWhereItIsOne(t *testing.T) {
+	type outcome struct {
+		positional []string
+		value      string
+		json       bool
+	}
+	for name, tc := range map[string]struct {
+		args []string
+		want outcome
+	}{
+		"a leading terminator":              {[]string{"--", "a", "--json"}, outcome{[]string{"a", "--json"}, "", false}},
+		"a terminator after an argument":    {[]string{"a", "--", "b", "--json"}, outcome{[]string{"a", "b", "--json"}, "", false}},
+		"a flag before the terminator":      {[]string{"--json", "--", "-v"}, outcome{[]string{"-v"}, "", true}},
+		"a terminator as a flag's value":    {[]string{"--value", "--", "a", "--json"}, outcome{[]string{"a"}, "--", true}},
+		"a value with an equals sign":       {[]string{"--value=--", "a", "--json"}, outcome{[]string{"a"}, "--", true}},
+		"an equals sign, then a terminator": {[]string{"--value=--", "--", "a", "--json"}, outcome{[]string{"a", "--json"}, "--", false}},
+		"a value flag that is a value":      {[]string{"--value", "--value", "--", "a", "--json"}, outcome{[]string{"a", "--json"}, "--value", false}},
+		"a bool flag does not take a --":    {[]string{"--json", "--", "a", "--json"}, outcome{[]string{"a", "--json"}, "", true}},
+		"a terminator at the very end":      {[]string{"a", "--"}, outcome{[]string{"a"}, "", false}},
+		"a value that is the last element":  {[]string{"a", "--value", "--"}, outcome{[]string{"a"}, "--", false}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := &env{g: newGlobals(func(string) string { return "" })}
+			fs := newFlagSet("t")
+			var got outcome
+			fs.StringVar(&got.value, "value", "", "")
+			fs.BoolVar(&got.json, "json", false, "")
+			var err error
+			if got.positional, err = e.parse(fs, tc.args); err != nil {
+				t.Fatalf("parse(%v): %v", tc.args, err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("parse(%v) = %+v, want %+v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCtlStatsTable(t *testing.T) {
 	b := startBroker(t, nil)
 	b.enqueue(t, "--queue", "q", "--tenant", "a", "--payload-string", "x")
@@ -408,7 +464,7 @@ func TestCtlStatsJSON(t *testing.T) {
 			Scheduled        int64  `json:"scheduled"`
 			Leased           int64  `json:"leased"`
 			Dead             int64  `json:"dead"`
-			OldestReadyAgeMS int64  `json:"oldest_ready_age_ms"`
+			OldestReadyAgeMS *int64 `json:"oldest_ready_age_ms"`
 		} `json:"tenants"`
 	}
 	dec := json.NewDecoder(strings.NewReader(out))
@@ -420,11 +476,15 @@ func TestCtlStatsJSON(t *testing.T) {
 		t.Fatalf("stats = %+v, want queue q with two tenants", got)
 	}
 	a, bb := got.Tenants[0], got.Tenants[1]
-	if a.Tenant != "a" || a.Ready != 2 || a.Scheduled != 0 || a.Dead != 0 || a.OldestReadyAgeMS != 90_000 {
+	if a.Tenant != "a" || a.Ready != 2 || a.Scheduled != 0 || a.Dead != 0 || a.OldestReadyAgeMS == nil || *a.OldestReadyAgeMS != 90_000 {
 		t.Errorf("tenant a = %+v, want 2 ready, the oldest 90s old", a)
 	}
-	if bb.Tenant != "b" || bb.Ready != 0 || bb.Scheduled != 1 || bb.Dead != 1 || bb.OldestReadyAgeMS != 0 {
-		t.Errorf("tenant b = %+v, want 1 scheduled and 1 dead", bb)
+	if bb.Tenant != "b" || bb.Ready != 0 || bb.Scheduled != 1 || bb.Dead != 1 || bb.OldestReadyAgeMS != nil {
+		t.Errorf("tenant b = %+v, want 1 scheduled, 1 dead and no oldest age", bb)
+	}
+	// A tenant with nothing ready has no oldest job: null, like the times of get.
+	if !strings.Contains(out, `"oldest_ready_age_ms":null`) {
+		t.Errorf("--json printed %q; want oldest_ready_age_ms null for tenant b", out)
 	}
 }
 
@@ -862,5 +922,52 @@ func TestCtlMigrateErrorsDoNotLeakThePassword(t *testing.T) {
 				t.Fatalf("the error shows the password: %q", r.stderr)
 			}
 		})
+	}
+}
+
+// TestCtlMigrateStopsAtTheTimeout runs migrate against a server that accepts
+// connections and never answers, as a database behind a dead network does.
+func TestCtlMigrateStopsAtTheTimeout(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var held []net.Conn
+	go func() {
+		for {
+			c, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, c) // never read from or written to
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = lis.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range held {
+			_ = c.Close()
+		}
+	})
+
+	url := "postgres://u:p@" + lis.Addr().String() + "/db?sslmode=disable"
+	done := make(chan result, 1)
+	start := time.Now()
+	go func() { done <- runCtl(nil, "migrate", "--database-url", url, "--timeout", "300ms") }()
+	select {
+	case r := <-done:
+		elapsed := time.Since(start)
+		if r.code != 1 || r.stdout != "" || r.stderr == "" {
+			t.Fatalf("migrate = exit %d, stdout %q, stderr %q; want exit 1 and a message", r.code, r.stdout, r.stderr)
+		}
+		if elapsed < 250*time.Millisecond || elapsed > 5*time.Second {
+			t.Fatalf("migrate took %v with --timeout 300ms; want it to stop at the timeout", elapsed)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("migrate was still running 10s after --timeout 300ms")
 	}
 }

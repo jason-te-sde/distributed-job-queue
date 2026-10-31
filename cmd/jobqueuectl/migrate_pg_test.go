@@ -5,6 +5,7 @@ package main
 import (
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -57,5 +58,27 @@ func TestPGCtlMigrate(t *testing.T) {
 	r = runCtl(env, "migrate", "--json")
 	if want := `{"applied":0,"version":` + version + "}\n"; r.code != 0 || r.stdout != want {
 		t.Fatalf("migrate --json = exit %d, stdout %q; want %q", r.code, r.stdout, want)
+	}
+}
+
+// TestPGCtlMigrateRefusesADatabaseAheadOfTheBinary: a database that a newer
+// binary migrated has nothing for Up to apply, and still must not be reported
+// as migrated for this one.
+func TestPGCtlMigrateRefusesADatabaseAheadOfTheBinary(t *testing.T) {
+	pool := pgtest.NewEmptyDB(t)
+	dsn := databaseURL(t, pool)
+	if r := runCtl(nil, "migrate", "--database-url", dsn); r.code != 0 {
+		t.Fatalf("first migrate = exit %d, stderr %q", r.code, r.stderr)
+	}
+	ahead := migrate.Version + 1
+	if _, err := pool.Exec(t.Context(), "INSERT INTO jobqueue.schema_migrations (version) VALUES ($1)", ahead); err != nil {
+		t.Fatal(err)
+	}
+
+	r := runCtl(nil, "migrate", "--database-url", dsn)
+	want := "schema version " + strconv.Itoa(ahead)
+	if r.code != 1 || r.stdout != "" || !strings.Contains(r.stderr, want) || !strings.Contains(r.stderr, "ahead") {
+		t.Fatalf("migrate of a database at version %d = exit %d, stdout %q, stderr %q; want exit 1 naming %q and that it is ahead",
+			ahead, r.code, r.stdout, r.stderr, want)
 	}
 }

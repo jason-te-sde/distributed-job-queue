@@ -263,7 +263,7 @@ func (e *env) flagSet() *flag.FlagSet {
 
 // parse reads args into fs and returns the arguments that are not flags. Flags
 // and arguments may come in any order, so that "get 5 --json" works as well as
-// "get --json 5"; a "--" ends the flags.
+// "get --json 5"; a "--" that is not the value of a flag ends the flags.
 func (e *env) parse(fs *flag.FlagSet, args []string) ([]string, error) {
 	var positional []string
 	for {
@@ -277,7 +277,7 @@ func (e *env) parse(fs *flag.FlagSet, args []string) ([]string, error) {
 		if len(rest) == 0 {
 			break
 		}
-		if consumed := len(args) - len(rest); consumed > 0 && args[consumed-1] == "--" {
+		if endsAtTerminator(fs, args[:len(args)-len(rest)]) {
 			positional = append(positional, rest...)
 			break
 		}
@@ -288,6 +288,33 @@ func (e *env) parse(fs *flag.FlagSet, args []string) ([]string, error) {
 		return nil, err
 	}
 	return positional, nil
+}
+
+// endsAtTerminator reports whether read, the arguments that fs has just taken
+// as flags, ends with a "--" that ended them. A "--" that is the value of a
+// flag, as in "--key --", ends nothing, and which of the two it is depends on
+// how many arguments each flag before it takes, so this reads the arguments the
+// way the flag package does: a flag written with "=" or a boolean flag stands
+// alone, any other takes the next argument as its value.
+func endsAtTerminator(fs *flag.FlagSet, read []string) bool {
+	for i := 0; i < len(read); i++ {
+		if read[i] == "--" {
+			return i == len(read)-1
+		}
+		name, _, hasValue := strings.Cut(strings.TrimLeft(read[i], "-"), "=")
+		if hasValue {
+			continue
+		}
+		f := fs.Lookup(name)
+		if f == nil {
+			continue // fs.Parse has accepted these arguments, so this cannot happen
+		}
+		if b, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
+			continue
+		}
+		i++ // the next argument is this flag's value, whatever it looks like
+	}
+	return false
 }
 
 // commandUsage is the help text of the running command: its synopsis and all
