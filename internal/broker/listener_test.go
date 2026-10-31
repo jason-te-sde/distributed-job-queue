@@ -107,7 +107,9 @@ func TestListenerGivesUpOnALISTENThatIsNeverAnswered(t *testing.T) {
 	if n := l.listens.Load(); n != 0 {
 		t.Errorf("the listener reports %d LISTENs on a server that never answered one", n)
 	}
-	if s := logs.String(); !strings.Contains(s, "listen:") {
-		t.Errorf("the log does not say that LISTEN failed: %s", s)
-	}
+	// The counter goes up before the warning is written, so wait for the
+	// warning too rather than read the log the moment the counter moves.
+	waitFor(t, "the warning that LISTEN failed", quickly, func() bool {
+		return strings.Contains(logs.String(), "listen:")
+	})
 }
