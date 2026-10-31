@@ -257,6 +257,47 @@ func TestPGBrokerHandsTheNotifyBoundToTheStore(t *testing.T) {
 	}
 }
 
+// listenerSessions counts the sessions that the notify listener holds open on
+// the database of pool.
+func listenerSessions(t *testing.T, pool *pgxpool.Pool) int {
+	t.Helper()
+	var n int
+	err := pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND application_name = $1`,
+		listenerAppName).Scan(&n)
+	if err != nil {
+		t.Fatalf("count the listener sessions: %v", err)
+	}
+	return n
+}
+
+func TestPGDisableListenSkipsTheListener(t *testing.T) {
+	// The control: by default the broker listens, so the query below does see
+	// a listener session when there is one.
+	pool := pgtest.NewDB(t)
+	on := startBroker(t, pool, nil)
+	if on.b.listener == nil {
+		t.Fatal("the default broker has no listener")
+	}
+	waitFor(t, "the default broker to LISTEN", 10*time.Second, func() bool { return listenerSessions(t, pool) == 1 })
+
+	// With --disable-listen the broker serves and finds work by polling only.
+	pool = pgtest.NewDB(t)
+	off := startBroker(t, pool, func(c *Config) { c.DisableListen = true })
+	off.waitReady()
+	if off.b.listener != nil {
+		t.Error("a broker with DisableListen built a listener")
+	}
+	if _, err := off.client.Lease(t.Context(), &jobqueuev1.LeaseRequest{
+		Queue: "q", MaxJobs: 1, Ttl: durationpb.New(30 * time.Second), Wait: durationpb.New(0), WorkerId: "w",
+	}); err != nil {
+		t.Fatalf("a Lease on a broker without a listener: %v", err)
+	}
+	if n := listenerSessions(t, pool); n != 0 {
+		t.Errorf("a broker with DisableListen holds %d listener sessions, want 0", n)
+	}
+}
+
 func TestPGBrokerServesAndReportsItself(t *testing.T) {
 	rb := startBroker(t, pgtest.NewDB(t), nil)
 	rb.b.SetVersion("v9.9.9")

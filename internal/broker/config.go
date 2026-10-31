@@ -61,6 +61,10 @@ type Config struct {
 	// Insecure allows serving a non-loopback address without TLS and
 	// tokens.
 	Insecure bool
+	// DisableListen stops the broker from listening for notifications of new
+	// jobs, so that it finds work only by its fallback poll. It exists to
+	// measure what the notifications buy; production leaves it off.
+	DisableListen bool
 	// Scheduler is how leases are shared between tenants: "drr" for
 	// weighted deficit round robin, "fifo" for arrival order.
 	Scheduler string
@@ -122,6 +126,7 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 	fs.StringVar(&c.TLSCert, "tls-cert", "", "TLS certificate file of the gRPC listener")
 	fs.StringVar(&c.TLSKey, "tls-key", "", "TLS key file of the gRPC listener")
 	fs.BoolVar(&c.Insecure, "insecure", false, "serve a non-loopback address without TLS and tokens")
+	fs.BoolVar(&c.DisableListen, "disable-listen", false, "do not listen for notifications of new jobs; find work by polling only (for measurements)")
 	fs.StringVar(&c.Scheduler, "scheduler", "drr", "how leases are shared between tenants: drr or fifo")
 	fs.Var(&weightsValue{dst: &c.TenantWeights}, "tenant-weights", "weights of tenants under drr, as tenant=weight,tenant=weight; others weigh 1")
 	fs.DurationVar(&c.ReapInterval, "reap-interval", time.Second, "how often expired leases are taken back")
