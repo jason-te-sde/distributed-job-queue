@@ -28,6 +28,10 @@ const (
 	// defaultBacklogTTL is how long a backlog that was read from the store is
 	// reused, by every stream and call that asks about the queue meanwhile.
 	defaultBacklogTTL = 500 * time.Millisecond
+	// defaultReadTimeout bounds a read of the store that the cache makes. The
+	// read belongs to every caller that waits for it and not to the one that
+	// started it, so it has a limit of its own and not that caller's deadline.
+	defaultReadTimeout = 5 * time.Second
 	// maxCachedQueues is the most queues the backlog cache holds. The port is
 	// open to whoever the network policy admits, and a queue name is theirs to
 	// choose, so the cache cannot be allowed to grow with them.
@@ -64,7 +68,10 @@ const (
 //
 // A backlog that was read from the store is reused for half a second by every
 // stream and call that asks about the queue meanwhile, so that the number of
-// streams does not set the number of store queries.
+// streams does not set the number of store queries. Callers that find it stale
+// share one read of the store, which runs under a limit of its own. Each of
+// them stops waiting when its own context ends or when Drain is called, and
+// none is held by another's.
 //
 // The Scaler is served on a gRPC server of its own, without UnaryAuth: KEDA
 // cannot send bearer tokens. What protects the port is the network policy of
@@ -81,16 +88,22 @@ type Scaler struct {
 	// broker sets its own before it serves.
 	log *slog.Logger
 
-	// cacheTTL is how long a backlog is reused, and maxCached the most queues
-	// the cache holds. They are fields so that a test can change them before
-	// the Scaler serves.
-	cacheTTL  time.Duration
-	maxCached int
-	cacheMu   sync.Mutex
-	cache     map[string]*backlogEntry
+	// cacheTTL is how long a backlog is reused, maxCached the most queues the
+	// cache holds, and readTimeout the limit of one read of the store. They
+	// are fields so that a test can change them before the Scaler serves.
+	cacheTTL    time.Duration
+	maxCached   int
+	readTimeout time.Duration
+	// cacheMu guards the map and every field of the entries in it.
+	cacheMu sync.Mutex
+	cache   map[string]*backlogEntry
 
 	drainOnce sync.Once
 	drained   chan struct{}
+	// readCtx is the parent of every read of the store that the cache makes;
+	// Drain cancels it.
+	readCtx     context.Context
+	cancelReads context.CancelFunc
 }
 
 // backlogCount is what the Scaler reads from the store about one queue.
@@ -101,14 +114,22 @@ type backlogCount struct {
 // total is the backlog: the ready and the leased jobs.
 func (c backlogCount) total() int64 { return c.ready + c.leased }
 
-// backlogEntry is the cached backlog of one queue.
+// backlogEntry is the cached backlog of one queue. The Scaler's cacheMu
+// guards all of it.
 type backlogEntry struct {
-	// mu is held while the entry is read or refreshed, so that callers that
-	// find it stale queue up behind the one that refreshes it and then use what
-	// it read.
-	mu  sync.Mutex
-	at  time.Time // when val was read; zero until it has been
 	val backlogCount
+	// at is when the read that gave val completed; zero until one has.
+	at time.Time
+	// flight is the read under way, or nil.
+	flight *backlogFlight
+}
+
+// backlogFlight is one read of the store that any number of callers wait for.
+// Its fields are written once, before done is closed, and read after.
+type backlogFlight struct {
+	done chan struct{}
+	val  backlogCount
+	err  error
 }
 
 // NewScaler returns a Scaler over st. StreamIsActive looks at the backlog
@@ -117,9 +138,12 @@ func NewScaler(st store.Store, push time.Duration) *Scaler {
 	if push <= 0 {
 		push = defaultScalerPush
 	}
+	readCtx, cancelReads := context.WithCancel(context.Background())
 	return &Scaler{
+		readCtx: readCtx, cancelReads: cancelReads,
 		st: st, push: push, log: slog.New(slog.DiscardHandler),
-		cacheTTL: defaultBacklogTTL, maxCached: maxCachedQueues, cache: make(map[string]*backlogEntry),
+		cacheTTL: defaultBacklogTTL, maxCached: maxCachedQueues, readTimeout: defaultReadTimeout,
+		cache:   make(map[string]*backlogEntry),
 		drained: make(chan struct{}),
 	}
 }
@@ -127,9 +151,20 @@ func NewScaler(st store.Store, push time.Duration) *Scaler {
 // Drain ends every StreamIsActive call, those open and those still to come,
 // with no further message. A graceful stop of the gRPC server that serves the
 // Scaler waits for running calls, and a stream never ends on its own, so the
-// stop would otherwise run out its whole grace period. KEDA reconnects. Unary
-// calls are not affected. Drain may be called more than once.
-func (s *Scaler) Drain() { s.drainOnce.Do(func() { close(s.drained) }) }
+// stop would otherwise run out its whole grace period. KEDA reconnects.
+//
+// It also releases the calls that wait for a read of the store, with
+// Unavailable, and cancels the reads under way: nobody waits for them any more,
+// and a read stuck in the database would keep the connection that the shutdown
+// has to close. After Drain a call is answered from the backlog the Scaler
+// already has, or refused with Unavailable; it does not start a read. Drain
+// may be called more than once.
+func (s *Scaler) Drain() {
+	s.drainOnce.Do(func() {
+		close(s.drained)
+		s.cancelReads()
+	})
+}
 
 // scalerSpec is what a ScaledObject asks of the Scaler.
 type scalerSpec struct {
@@ -198,46 +233,115 @@ func (s *Scaler) read(ctx context.Context, queue string) (backlogCount, error) {
 // counts returns the backlog of the queue: what the store says, unless it said
 // so less than cacheTTL ago to someone else. Only an answer is kept; an error
 // is not, so a store that is down is asked again by the next caller.
+//
+// A caller that finds the backlog stale waits for a read of the store, which
+// it starts if none is under way. The wait ends with the caller's own context
+// and with Drain, whatever becomes of the read.
 func (s *Scaler) counts(ctx context.Context, queue string) (backlogCount, error) {
 	if s.cacheTTL <= 0 {
 		return s.read(ctx, queue)
 	}
-	e := s.entry(queue)
-	if e == nil { // the cache is full of fresh entries
+	flight, val, fresh := s.join(queue)
+	if fresh {
+		return val, nil
+	}
+	if flight == nil { // the cache is full of fresh entries
 		return s.read(ctx, queue)
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if !e.at.IsZero() && time.Since(e.at) < s.cacheTTL {
-		return e.val, nil
+	select {
+	case <-flight.done:
+		return flight.val, flight.err
+	case <-ctx.Done():
+		return backlogCount{}, status.FromContextError(ctx.Err()).Err()
+	case <-s.drained:
+		select {
+		case <-flight.done: // the read has finished too; an answer beats a refusal
+			if flight.err == nil {
+				return flight.val, nil
+			}
+		default:
+		}
+		return backlogCount{}, errScalerDraining
 	}
-	start := time.Now()
-	c, err := s.read(ctx, queue)
-	if err != nil {
-		return backlogCount{}, err
-	}
-	e.val, e.at = c, start
-	return c, nil
 }
 
-// entry returns the cache entry of the queue, making it if there is none. It
-// returns nil if there is none and no room for one: a full cache first drops
-// the entries that have gone stale, and if every one is fresh the new queue is
-// read through without being kept.
-func (s *Scaler) entry(queue string) *backlogEntry {
+// errScalerDraining is what a call that waited for a read gets when Drain
+// ended its wait. KEDA asks again, and another broker answers.
+var errScalerDraining = status.Error(codes.Unavailable, "the scaler is shutting down")
+
+// refused is the read that a call gets when the Scaler is draining and the
+// backlog it has is not fresh: one that has already failed.
+var refused = func() *backlogFlight {
+	f := &backlogFlight{done: make(chan struct{}), err: errScalerDraining}
+	close(f.done)
+	return f
+}()
+
+// join returns what a caller asking about the queue should do. If the cached
+// backlog is fresh it returns it, with fresh set. Otherwise it returns the
+// read to wait for, starting one if none is under way, or nil if the cache has
+// no room for the queue and the caller must read for itself.
+func (s *Scaler) join(queue string) (flight *backlogFlight, val backlogCount, fresh bool) {
 	s.cacheMu.Lock()
 	defer s.cacheMu.Unlock()
+	e := s.entryLocked(queue)
+	if e == nil {
+		return nil, backlogCount{}, false
+	}
+	if !e.at.IsZero() && time.Since(e.at) < s.cacheTTL {
+		return nil, e.val, true
+	}
+	if e.flight == nil {
+		select {
+		case <-s.drained:
+			return refused, backlogCount{}, false
+		default:
+		}
+		e.flight = &backlogFlight{done: make(chan struct{})}
+		go s.fill(queue, e, e.flight)
+	}
+	return e.flight, backlogCount{}, false
+}
+
+// fill carries out the read of a flight and publishes it. It runs under a
+// limit of its own and is cancelled by Drain, but not by the context of the
+// caller that started it: the other callers wait for it too, and one of them
+// leaving must not fail the rest.
+// The entry is stamped when the read completes, so that a slow read is still
+// shared by the callers that come right after it.
+func (s *Scaler) fill(queue string, e *backlogEntry, f *backlogFlight) {
+	ctx, cancel := context.WithTimeout(s.readCtx, s.readTimeout)
+	defer cancel()
+	f.val, f.err = s.read(ctx, queue)
+	if f.err != nil {
+		select {
+		case <-s.drained:
+			f.err = errScalerDraining // a read that Drain cancelled is a refusal, not a failure of the store
+		default:
+		}
+	}
+
+	s.cacheMu.Lock()
+	if f.err == nil {
+		e.val, e.at = f.val, time.Now()
+	}
+	e.flight = nil
+	s.cacheMu.Unlock()
+	close(f.done)
+}
+
+// entryLocked returns the cache entry of the queue, making it if there is
+// none. It returns nil if there is none and no room for one: a full cache
+// first drops the entries that have gone stale and are not being read, and if
+// none can go the new queue is read through without being kept. The caller
+// holds cacheMu.
+func (s *Scaler) entryLocked(queue string) *backlogEntry {
 	if e, ok := s.cache[queue]; ok {
 		return e
 	}
 	if len(s.cache) >= s.maxCached {
 		for q, e := range s.cache {
-			if !e.mu.TryLock() {
-				continue // being refreshed, so in use
-			}
-			stale := e.at.IsZero() || time.Since(e.at) >= s.cacheTTL
-			e.mu.Unlock()
-			if stale {
+			if e.flight == nil && (e.at.IsZero() || time.Since(e.at) >= s.cacheTTL) {
 				delete(s.cache, q)
 			}
 		}
@@ -311,6 +415,11 @@ func (s *Scaler) StreamIsActive(ref *externalscaler.ScaledObjectRef, stream exte
 		}
 		active, err := s.active(ctx, p)
 		if err != nil {
+			select {
+			case <-s.drained:
+				return nil // Drain ended the wait for the store; it is a clean end
+			default:
+			}
 			return err
 		}
 		if !sent || active != last {

@@ -51,6 +51,9 @@ type scalerOpts struct {
 	cacheTTL time.Duration
 	// maxCached is the most queues the cache holds; zero keeps the default.
 	maxCached int
+	// readTimeout bounds a read of the store that the cache makes; zero keeps
+	// the default.
+	readTimeout time.Duration
 	// wrap, if set, wraps the store the Scaler uses; the test's own handle
 	// stays the bare memstore.
 	wrap func(store.Store) store.Store
@@ -85,6 +88,9 @@ func startScalerEnv(t *testing.T, o scalerOpts) *scalerEnv {
 	env.scaler.cacheTTL = o.cacheTTL
 	if o.maxCached > 0 {
 		env.scaler.maxCached = o.maxCached
+	}
+	if o.readTimeout > 0 {
+		env.scaler.readTimeout = o.readTimeout
 	}
 	env.scaler.log = slog.New(slog.NewTextHandler(env.logs, nil))
 
@@ -754,8 +760,9 @@ func TestScalerSharesTheBacklogBetweenStreamsAndCalls(t *testing.T) {
 // gatedStats holds every Stats until its gate is closed.
 type gatedStats struct {
 	store.Store
-	gate    chan struct{}
-	entered chan struct{}
+	gate     chan struct{}
+	entered  chan struct{}
+	canceled chan struct{} // a value for each Stats that gave up because its context ended; may be nil
 }
 
 func (g gatedStats) Stats(ctx context.Context, queue string) ([]store.TenantStats, error) {
@@ -766,6 +773,10 @@ func (g gatedStats) Stats(ctx context.Context, queue string) ([]store.TenantStat
 	select {
 	case <-g.gate:
 	case <-ctx.Done():
+		select {
+		case g.canceled <- struct{}{}:
+		default:
+		}
 		return nil, ctx.Err()
 	}
 	return g.Store.Stats(ctx, queue)
@@ -873,5 +884,281 @@ func TestScalerDoesNotCacheStoreErrors(t *testing.T) {
 	fail.Store(false)
 	if !env.isActive(ref) {
 		t.Error("IsActive after the store came back = false, want true")
+	}
+}
+
+// statsGate holds the Stats of a scalerEnv's store until it is opened.
+type statsGate struct {
+	gate     chan struct{}
+	entered  chan struct{} // a value for each Stats that got as far as the gate
+	canceled chan struct{} // a value for each Stats that gave up because its context ended
+	once     sync.Once
+}
+
+func (g *statsGate) open() { g.once.Do(func() { close(g.gate) }) }
+
+// newGatedScalerEnv is a scalerEnv whose store holds every Stats until the
+// returned gate is opened, which the test's end does at the latest.
+func newGatedScalerEnv(t *testing.T, o scalerOpts) (*scalerEnv, *statsGate) {
+	t.Helper()
+	g := &statsGate{gate: make(chan struct{}), entered: make(chan struct{}, 16), canceled: make(chan struct{}, 16)}
+	o.wrap = func(s store.Store) store.Store {
+		return gatedStats{Store: s, gate: g.gate, entered: g.entered, canceled: g.canceled}
+	}
+	env := startScalerEnv(t, o)
+	t.Cleanup(g.open)
+	return env, g
+}
+
+// isActiveAsync calls IsActive on the Scaler itself, without gRPC, so that
+// what is measured is the handler and not the client's own deadline. The
+// result is the error, or one that says the answer was not true.
+func (e *scalerEnv) isActiveAsync(ctx context.Context, ref *externalscaler.ScaledObjectRef) <-chan error {
+	out := make(chan error, 1)
+	go func() {
+		resp, err := e.scaler.IsActive(ctx, ref)
+		if err == nil && !resp.GetResult() {
+			err = errors.New("IsActive = false, want true")
+		}
+		out <- err
+	}()
+	return out
+}
+
+// stillHeld fails if the call has returned.
+func stillHeld(t *testing.T, call <-chan error, what string) {
+	t.Helper()
+	select {
+	case err := <-call:
+		t.Fatalf("%s returned %v while the store was still held", what, err)
+	default:
+	}
+}
+
+func TestScalerWaiterLeavesWhenItsOwnDeadlineEnds(t *testing.T) {
+	// The holder has no deadline and is blocked in the store. A caller that
+	// waits for its read is not pinned by it: its own deadline ends the wait.
+	env, g := newGatedScalerEnv(t, scalerOpts{cacheTTL: time.Hour})
+	env.add("q", "t", 1)
+	ref := scaledRef("queue", "q")
+	holder := env.isActiveAsync(t.Context(), ref)
+	<-g.entered
+
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	waiter := env.isActiveAsync(ctx, ref)
+	select {
+	case err := <-waiter:
+		if status.Code(err) != codes.DeadlineExceeded {
+			t.Errorf("the waiter ended with %v, want DeadlineExceeded", err)
+		}
+	case <-time.After(700 * time.Millisecond):
+		t.Fatal("the waiter was still blocked 700ms after its 200ms deadline: it waits for the holder's read without watching its own context")
+	}
+	stillHeld(t, holder, "the holder")
+
+	g.open()
+	if err := <-holder; err != nil {
+		t.Errorf("the holder ended with %v, want a true answer once the store answered", err)
+	}
+}
+
+func TestScalerDrainReleasesAWaiter(t *testing.T) {
+	// Every caller that waits for the read is released by Drain, the one that
+	// started it included. Nobody waits for the read after that, so it is
+	// cancelled, and a call that would need a new one is refused.
+	// The read has no limit worth the name, so that only Drain can end it.
+	env, g := newGatedScalerEnv(t, scalerOpts{cacheTTL: time.Hour, readTimeout: time.Hour})
+	env.add("q", "t", 1)
+	ref := scaledRef("queue", "q")
+	first := env.isActiveAsync(t.Context(), ref) // no deadline of its own
+	<-g.entered
+	second := env.isActiveAsync(t.Context(), ref)
+
+	// Give the second caller time to reach the wait. It is released whichever
+	// side of Drain it arrives on.
+	time.Sleep(100 * time.Millisecond)
+	env.scaler.Drain()
+	for name, call := range map[string]<-chan error{"the first caller": first, "the second caller": second} {
+		select {
+		case err := <-call:
+			if status.Code(err) != codes.Unavailable {
+				t.Errorf("%s ended with %v, want Unavailable", name, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s was still blocked 5s after Drain", name)
+		}
+	}
+	select {
+	case <-g.canceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the read was still under way 5s after Drain: it would hold the database connection that a shutdown has to close")
+	}
+
+	// A call after Drain that finds no fresh backlog is refused without a read.
+	_, err := env.scaler.IsActive(t.Context(), ref)
+	if status.Code(err) != codes.Unavailable {
+		t.Errorf("IsActive after Drain = %v, want Unavailable", err)
+	}
+	time.Sleep(100 * time.Millisecond) // a read that was going to start has started by now
+	if n := env.calls.Load(); n != 1 {
+		t.Errorf("the callers made %d store calls, want 1: no read starts after Drain", n)
+	}
+}
+
+func TestScalerCancelledReadIsARefusalNotAStoreFailure(t *testing.T) {
+	// A caller that was already on its way to the answer when Drain cancelled
+	// the read must get the same Unavailable as the callers that Drain woke,
+	// not a Canceled that the store never gave. The read is run directly here,
+	// since no outside caller can place itself between the two events.
+	env, _ := newGatedScalerEnv(t, scalerOpts{cacheTTL: time.Hour})
+	env.scaler.Drain()
+	flight := &backlogFlight{done: make(chan struct{})}
+	env.scaler.fill("q", &backlogEntry{flight: flight}, flight)
+	<-flight.done
+	if !errors.Is(flight.err, errScalerDraining) {
+		t.Errorf("a read that Drain cancelled ended with %v, want %v", flight.err, errScalerDraining)
+	}
+}
+
+func TestScalerDrainStillAnswersFromTheCache(t *testing.T) {
+	// What the Scaler already knows needs no read, so a call after Drain gets it.
+	env := startScalerEnv(t, scalerOpts{cacheTTL: time.Hour})
+	env.add("q", "t", 1)
+	ref := scaledRef("queue", "q")
+	if !env.isActive(ref) {
+		t.Fatal("IsActive = false, want true")
+	}
+	env.scaler.Drain()
+	if !env.isActive(ref) {
+		t.Error("IsActive after Drain = false, want the cached true")
+	}
+}
+
+func TestScalerDrainEndsAStreamThatWaitsOnTheStore(t *testing.T) {
+	// A stream that is in the store when Drain is called ends cleanly, like
+	// one that is between two looks.
+	env, g := newGatedScalerEnv(t, scalerOpts{cacheTTL: time.Hour})
+	s := env.openStream(scaledRef("queue", "q"))
+	<-g.entered
+
+	env.scaler.Drain()
+	select {
+	case err := <-s.done:
+		if !errors.Is(err, io.EOF) {
+			t.Errorf("the stream ended with %v, want a clean end (io.EOF)", err)
+		}
+	case v := <-s.msgs:
+		t.Errorf("the stream sent %v, want nothing", v)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stream was still open 5s after Drain")
+	}
+}
+
+func TestScalerReadSurvivesTheCallerThatStartedIt(t *testing.T) {
+	// The caller that starts a read may go away. The read is not its own: the
+	// caller that still waits gets the answer, and the store was asked once.
+	env, g := newGatedScalerEnv(t, scalerOpts{cacheTTL: time.Hour})
+	env.add("q", "t", 1)
+	ref := scaledRef("queue", "q")
+
+	holderCtx, cancelHolder := context.WithCancel(t.Context())
+	holder := env.isActiveAsync(holderCtx, ref)
+	<-g.entered
+	waiter := env.isActiveAsync(t.Context(), ref)
+	time.Sleep(100 * time.Millisecond) // the waiter joins the read; it would also if it came later
+
+	cancelHolder()
+	select {
+	case err := <-holder:
+		if status.Code(err) != codes.Canceled {
+			t.Errorf("the holder ended with %v, want Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the holder was still blocked 5s after its context was cancelled")
+	}
+	stillHeld(t, waiter, "the waiter")
+
+	g.open()
+	if err := <-waiter; err != nil {
+		t.Errorf("the waiter ended with %v, want a true answer from the read that the holder started", err)
+	}
+	if n := env.calls.Load(); n != 1 {
+		t.Errorf("the holder and the waiter made %d store calls, want 1", n)
+	}
+}
+
+func TestScalerBoundsTheStoreRead(t *testing.T) {
+	// A read has a limit of its own, so that a store that never answers does
+	// not hold a queue's callers for ever. The limit is not kept as an answer.
+	env, g := newGatedScalerEnv(t, scalerOpts{cacheTTL: time.Hour, readTimeout: 100 * time.Millisecond})
+	env.add("q", "t", 1)
+	ref := scaledRef("queue", "q")
+
+	call := env.isActiveAsync(t.Context(), ref) // no deadline of its own
+	select {
+	case err := <-call:
+		if status.Code(err) != codes.DeadlineExceeded {
+			t.Errorf("the call ended with %v, want DeadlineExceeded", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the call was still blocked 5s after the 100ms limit of the read")
+	}
+
+	g.open()
+	if !env.isActive(ref) {
+		t.Error("IsActive once the store answered = false, want true: the failed read must not be remembered")
+	}
+}
+
+func TestScalerStampsTheBacklogWhenTheReadCompletes(t *testing.T) {
+	// A read that takes longer than the TTL still serves the callers that come
+	// right after it: the clock of the cache starts when the answer arrives.
+	const ttl = 600 * time.Millisecond
+	env, g := newGatedScalerEnv(t, scalerOpts{cacheTTL: ttl})
+	env.add("q", "t", 1)
+	ref := scaledRef("queue", "q")
+
+	first := env.isActiveAsync(t.Context(), ref)
+	<-g.entered
+	time.Sleep(ttl + 100*time.Millisecond) // the read has now taken longer than the TTL
+	g.open()
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	if !env.isActive(ref) {
+		t.Error("IsActive straight after the slow read = false, want true")
+	}
+	if n := env.calls.Load(); n != 1 {
+		t.Errorf("a slow read and the call after it made %d store calls, want 1", n)
+	}
+}
+
+func TestScalerKeepsTheEntriesThatAreBeingRead(t *testing.T) {
+	// A full cache does not drop an entry whose read is under way: a caller
+	// that comes for that queue later must still join the read, not start a
+	// second one.
+	env, g := newGatedScalerEnv(t, scalerOpts{cacheTTL: time.Hour, maxCached: 2})
+	for _, q := range []string{"q1", "q2", "q3"} {
+		env.add(q, "t", 1)
+	}
+	call := func(q string) <-chan error { return env.isActiveAsync(t.Context(), scaledRef("queue", q)) }
+
+	results := []<-chan error{call("q1"), call("q2")}
+	<-g.entered
+	<-g.entered                           // both reads are under way, and the cache is full
+	results = append(results, call("q3")) // no room: it reads for itself
+	<-g.entered
+	results = append(results, call("q1")) // it must join the read of q1
+	time.Sleep(100 * time.Millisecond)    // and has had time to start one of its own if it were going to
+
+	g.open()
+	for i, r := range results {
+		if err := <-r; err != nil {
+			t.Errorf("call %d ended with %v, want a true answer", i, err)
+		}
+	}
+	if n := env.calls.Load(); n != 3 {
+		t.Errorf("four calls on three queues made %d store calls, want 3", n)
 	}
 }

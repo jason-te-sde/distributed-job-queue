@@ -50,6 +50,13 @@ func startBroker(t *testing.T, pool *pgxpool.Pool, tune func(*Config)) *runningB
 // startBrokerLog is startBroker with a logger of the test's choosing.
 func startBrokerLog(t *testing.T, pool *pgxpool.Pool, tune func(*Config), log *slog.Logger) *runningBroker {
 	t.Helper()
+	return startBrokerWith(t, pool, tune, log, nil)
+}
+
+// startBrokerWith is startBrokerLog that also calls before on the broker New
+// built, ahead of Run, so that a test can change what no flag reaches.
+func startBrokerWith(t *testing.T, pool *pgxpool.Pool, tune func(*Config), log *slog.Logger, before func(*Broker)) *runningBroker {
+	t.Helper()
 	cfg, err := ParseFlags([]string{
 		"--grpc-addr=127.0.0.1:0", "--http-addr=127.0.0.1:0", "--database-url=" + dbURL(t, pool),
 		"--log-level=debug",
@@ -65,6 +72,9 @@ func startBrokerLog(t *testing.T, pool *pgxpool.Pool, tune func(*Config), log *s
 	if err != nil {
 		cancel()
 		t.Fatalf("New: %v", err)
+	}
+	if before != nil {
+		before(b)
 	}
 	rb := &runningBroker{t: t, b: b, stop: cancel, done: make(chan error, 1)}
 	go func() { rb.done <- b.Run(ctx) }()
@@ -503,15 +513,18 @@ func TestPGNewFailsWhenTheScalerAddressIsTaken(t *testing.T) {
 
 func TestPGBrokerCutsOffScalerCallsAfterTheGracePeriod(t *testing.T) {
 	// The scaler server shares the grace period of the API server: a call
-	// that outlasts it is cut off, and Run returns.
+	// that outlasts it is cut off, and Run returns. A call that waits for the
+	// cache's read is released by Drain at once, so this one reads for itself,
+	// as a call does when the cache is full; a cache that holds no queue is
+	// full.
 	pool := pgtest.NewDB(t)
 	const grace = 1500 * time.Millisecond
-	rb := startBroker(t, pool, func(c *Config) {
+	rb := startBrokerWith(t, pool, func(c *Config) {
 		c.ScalerAddr = "127.0.0.1:0"
 		c.ShutdownGrace = grace
 		c.PollInterval, c.ActivityInterval = time.Hour, time.Hour
 		c.ReapInterval, c.PruneInterval = time.Hour, time.Hour
-	})
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), func(b *Broker) { b.scaler.maxCached = 0 })
 	rb.waitReady()
 	rb.settleListener()
 	scaler := rb.scalerClient()
@@ -578,5 +591,67 @@ func TestPGBrokerLogsInternalScalerErrors(t *testing.T) {
 	}
 	if logged := logs.String(); !strings.Contains(logged, "op=scaler_backlog") {
 		t.Errorf("the broker's log has no entry for the scaler's internal error:\n%s", logged)
+	}
+}
+
+func TestPGBrokerShutdownDoesNotWaitForAScalerReadStuckInTheStore(t *testing.T) {
+	// A scaler call that waits for the cache's read is released when the
+	// shutdown begins, and the read is cancelled: it would otherwise keep the
+	// database connection that closing the pool waits for. The grace period is
+	// long, so that a prompt return cannot be put down to it.
+	pool := pgtest.NewDB(t)
+	const grace = 20 * time.Second
+	rb := startBroker(t, pool, func(c *Config) {
+		c.ScalerAddr = "127.0.0.1:0"
+		c.ShutdownGrace = grace
+		c.PollInterval, c.ActivityInterval = time.Hour, time.Hour
+		c.ReapInterval, c.PruneInterval = time.Hour, time.Hour
+	})
+	rb.waitReady()
+	rb.settleListener()
+	scaler := rb.scalerClient()
+
+	// A lock on the table makes the read of the backlog block in the database.
+	lock, err := pool.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lock.Rollback(context.Background()) })
+	if _, err := lock.Exec(t.Context(), "LOCK TABLE jobqueue.jobs IN ACCESS EXCLUSIVE MODE"); err != nil {
+		t.Fatal(err)
+	}
+	blocked := make(chan error, 1)
+	go func() {
+		_, err := scaler.IsActive(context.Background(), &externalscaler.ScaledObjectRef{ScalerMetadata: map[string]string{"queue": "q"}})
+		blocked <- err
+	}()
+	waitFor(t, "the read of the backlog to block on the lock", 10*time.Second, func() bool {
+		var n int
+		err := pool.QueryRow(t.Context(),
+			`SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&n)
+		return err == nil && n >= 1
+	})
+
+	start := time.Now()
+	rb.stop()
+	select {
+	case err := <-blocked:
+		if status.Code(err) != codes.Unavailable {
+			t.Errorf("the call ended with %v, want Unavailable", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the scaler call was still blocked 3s after the shutdown began")
+	}
+	select {
+	case err := <-rb.done:
+		if err != nil {
+			t.Errorf("Run returned %v, want nil", err)
+		}
+		rb.done <- nil // for the cleanup
+		if elapsed := time.Since(start); elapsed > 3*time.Second {
+			t.Errorf("Run returned %v after the shutdown began, want well within the %v grace period", elapsed, grace)
+		}
+	case <-time.After(grace):
+		t.Fatal("Run did not return: a read stuck in the database held the pool open")
 	}
 }
