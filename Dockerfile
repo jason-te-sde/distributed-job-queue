@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# The image of the broker and its admin CLI.
+# The image of the broker, its admin CLI and the example worker.
 #
 #   docker build -t jq:dev .
 #   docker buildx build --platform linux/amd64,linux/arm64 .
@@ -8,7 +8,8 @@
 # The entrypoint is the broker, so a container takes the broker's flags as its
 # arguments. The CLI is there for the Helm chart: the migration Job runs
 # /jobqueuectl migrate, and the preStop hook runs /jobqueuectl sleep, because
-# the final image has no shell.
+# the final image has no shell. The example worker is /thumbnail, which the chart
+# runs when example.enabled is set.
 
 # The build stage runs on the machine that runs the build and cross-compiles for
 # each target platform, so a multi-arch build does not run a compiler under
@@ -44,7 +45,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
     go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o /out/ \
         ./cmd/jobqueue-server \
-        ./cmd/jobqueuectl
+        ./cmd/jobqueuectl \
+        ./examples/thumbnail
 
 # Distroless static on Debian 13 (trixie), checked on 2026-10-30: it is the
 # newest Debian release that distroless publishes (static-debian14 does not
@@ -55,6 +57,7 @@ FROM gcr.io/distroless/static-debian13:nonroot
 
 COPY --from=build /out/jobqueue-server /jobqueue-server
 COPY --from=build /out/jobqueuectl /jobqueuectl
+COPY --from=build /out/thumbnail /thumbnail
 
 # gRPC, health and metrics, and the autoscaler.
 EXPOSE 7070 7071 7072

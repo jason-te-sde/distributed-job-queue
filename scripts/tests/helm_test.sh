@@ -57,6 +57,14 @@ sub() {
   mv "$1.new" "$1"
 }
 
+# insert_after <file> <text> <line>: add the line after every line of the file
+# that contains the text. A mutation that adds a line cannot use sed, whose
+# append command and newline escapes differ between GNU and BSD.
+insert_after() {
+  awk -v pat="$2" -v add="$3" '{ print } index($0, pat) { print add }' "$1" >"$1.new"
+  mv "$1.new" "$1"
+}
+
 # broken_case <case> <expected output> <mutation>...: apply the mutation
 # (a shell command run inside the chart copy) and expect the check to fail
 # with the expected text in its output. A mutation that changes nothing leaves
@@ -165,3 +173,58 @@ broken_case prestop-guard-off-by-one-fails "preStopSleepSeconds" \
 # (t) Resource names that outgrow the 63 characters of a DNS label fail.
 broken_case long-names-not-truncated-fails "at most 63 characters" \
   sub templates/_helpers.tpl 's/trunc 48/trunc 63/'
+
+# (u) The example worker reaches the broker the way the broker is served and
+# sends its token. Each case breaks one part of the worker's template.
+broken_case example-insecure-flag-never-rendered-fails "the example worker to connect without TLS" \
+  sub templates/example-worker.yaml 's/"--insecure"/"--plaintext"/'
+broken_case example-tls-ca-path-fails "the example worker to trust the CA of the TLS Secret" \
+  sub templates/example-worker.yaml 's#/etc/jobqueue/tls/ca.crt#/etc/jobqueue/tls/tls.crt#'
+# The broker serves TLS whenever it has a certificate, so insecure must not
+# turn a worker that has the CA into a plaintext one.
+broken_case example-insecure-beats-tls-fails "the example worker to use TLS when the broker does, even if insecure is set" \
+  sub templates/example-worker.yaml 's/{{- \$trustCA := .Values.tls.secretName }}/{{- $trustCA := and .Values.tls.secretName (not .Values.insecure) }}/'
+broken_case example-ca-mount-writable-fails "the CA to be mounted read-only where --tls-ca looks" \
+  sub templates/example-worker.yaml 's/readOnly: true/readOnly: false/'
+broken_case example-projects-the-private-key-fails "only ca.crt of the TLS Secret to be projected, not its key" \
+  sub templates/example-worker.yaml 's/- key: ca.crt/- key: tls.key/'
+broken_case example-token-never-passed-fails "the example worker to take its token from the example token Secret" \
+  sub templates/example-worker.yaml 's/name: JOBQUEUE_TOKEN/name: JOBQUEUE_TOKEN_UNUSED/'
+broken_case example-token-wrong-key-fails "the example worker to take its token from the example token Secret" \
+  sub templates/example-worker.yaml 's/key: {{ .Values.example.tokenKey }}/key: token/'
+broken_case example-token-wrong-secret-fails "the example worker to take its token from the example token Secret" \
+  sub templates/example-worker.yaml 's/name: {{ .Values.example.tokenSecret }}/name: {{ .Values.database.secretName }}/'
+broken_case example-database-url-dropped-fails "the example worker to have the database URL only" \
+  sub templates/example-worker.yaml 's/{{- include "jobqueue.databaseEnv" . | nindent 12 }}//'
+
+# (v) The guards that refuse a worker that could not authenticate. The token
+# is required when the broker has a tokens file, insecure or not, and when
+# insecure is off; it is not required with insecure and no tokens file. Each
+# half of the rule is broken on its own, in both directions.
+token_guard='{{- if and (not .Values.example.tokenSecret) (or .Values.tokens.secretName (not .Values.insecure)) }}'
+broken_case example-without-token-guard-fails "example.enabled requires example.tokenSecret when tokens.secretName is set or insecure is false" \
+  sub templates/example-worker.yaml "s/$token_guard/{{- if false }}/"
+broken_case example-guard-ignores-tokens-file-fails "example.enabled requires example.tokenSecret when tokens.secretName is set or insecure is false" \
+  sub templates/example-worker.yaml 's/(or .Values.tokens.secretName (not .Values.insecure))/(not .Values.insecure)/'
+broken_case example-guard-ignores-insecure-off-fails "example.enabled requires example.tokenSecret when tokens.secretName is set or insecure is false" \
+  sub templates/example-worker.yaml 's/(or .Values.tokens.secretName (not .Values.insecure))/.Values.tokens.secretName/'
+broken_case example-guard-always-wants-a-token-fails "[example worker, insecure, no tokens file, no worker token] helm template failed" \
+  sub templates/example-worker.yaml "s/$token_guard/{{- if not .Values.example.tokenSecret }}/"
+broken_case example-token-key-guard-fails "example.tokenSecret requires example.tokenKey" \
+  sub templates/example-worker.yaml 's/{{- if and .Values.example.tokenSecret (not .Values.example.tokenKey) }}/{{- if false }}/'
+
+# (w) Mutations that add something. A check that only looked for the expected
+# lines among the rendered ones would pass these, so they pin that the blocks
+# are compared whole: a worker that gets both transport flags, and one that
+# gets an environment variable nobody asked for.
+broken_case example-both-transport-flags-fails "the example worker to use TLS when the broker does, even if insecure is set" \
+  sub templates/example-worker.yaml 's/{{- else if .Values.insecure }}/{{- end }}{{- if .Values.insecure }}/'
+broken_case example-extra-env-entry-fails "the example worker to have the database URL only" \
+  insert_after templates/example-worker.yaml '{{- include "jobqueue.databaseEnv" . | nindent 12 }}' '            - {name: EXTRA, value: "1"}'
+
+# (x) The ScaledObject scales on the queue that the worker drains, which is a
+# constant of the worker and not a value of the chart.
+broken_case scaledobject-queue-wrong-fails "the KEDA trigger to name the queue the example worker drains" \
+  sub templates/scaledobject.yaml 's/queue: "thumbnails"/queue: "other"/'
+broken_case scaledobject-queue-from-values-fails "the KEDA trigger to name the queue the example worker drains" \
+  sub templates/scaledobject.yaml 's/queue: "thumbnails"/queue: {{ .Values.example.queue | quote }}/'

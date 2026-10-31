@@ -45,6 +45,10 @@ worker_selector="app.kubernetes.io/name: jobqueue
 app.kubernetes.io/instance: $release
 app.kubernetes.io/component: example-worker"
 
+# The example worker needs a token unless the chart is insecure, so every
+# rendering that enables the worker passes one.
+example_token="example.tokenSecret=example-token,example.tokenKey=worker-token"
+
 failures=0
 fail() {
   printf 'FAIL %s\n' "$1" >&2
@@ -171,7 +175,7 @@ expect_render_error() {
 }
 
 lint "default values"
-lint "example worker and KEDA enabled" --set example.enabled=true,example.keda.enabled=true
+lint "example worker and KEDA enabled" --set "example.enabled=true,example.keda.enabled=true,$example_token"
 
 if render "defaults"; then
   expect_text "a PodDisruptionBudget" "kind: PodDisruptionBudget"
@@ -201,7 +205,7 @@ if render "insecure=true" --set insecure=true; then
   expect_text "the insecure flag" "--insecure"
 fi
 
-if render "example worker and KEDA" --set example.enabled=true,example.keda.enabled=true; then
+if render "example worker and KEDA" --set "example.enabled=true,example.keda.enabled=true,$example_token"; then
   expect_text "a ScaledObject" "kind: ScaledObject"
   expect_text "the scalerAddress trigger metadata" "scalerAddress"
   expect_text "the scaler Service address in the namespace" "$fullname-scaler.$namespace.svc.cluster.local:7072"
@@ -210,10 +214,88 @@ if render "example worker and KEDA" --set example.enabled=true,example.keda.enab
   expect_pattern "the example worker to start at zero replicas" '^ *replicas: 0$'
 fi
 
-if render "example worker without KEDA" --set example.enabled=true; then
+if render "example worker without KEDA" --set "example.enabled=true,$example_token"; then
   expect_pattern "one example worker replica" '^ *replicas: 1$'
   expect_no_text "no ScaledObject without KEDA" "kind: ScaledObject"
 fi
+
+# The example worker reaches the broker the way the broker is served, and sends
+# the token the chart was given. Each rendering is limited to the worker's own
+# template: the broker's Deployment has flags that look the same. The blocks are
+# compared whole, so a flag that is missing, doubled or in the wrong place fails.
+worker_template=templates/example-worker.yaml
+worker_args_common='- "work"
+- "--addr"
+- "dns:///'"$fullname"'-grpc:7070"
+- "--concurrency"
+- "4"'
+database_env='- name: JOBQUEUE_DATABASE_URL
+valueFrom:
+secretKeyRef:
+name: jobqueue-database
+key: url'
+token_env='- name: JOBQUEUE_TOKEN
+valueFrom:
+secretKeyRef:
+name: example-token
+key: worker-token'
+ca_mount='- name: tls-ca
+mountPath: /etc/jobqueue/tls
+readOnly: true'
+ca_volume='- name: tls-ca
+secret:
+secretName: tls-secret
+items:
+- key: ca.crt
+path: ca.crt'
+
+# With insecure and no tokens file the broker takes every caller, so the worker
+# needs no token and the chart renders it without one.
+if render "example worker, insecure, no tokens file, no worker token" --set example.enabled=true,insecure=true --show-only "$worker_template"; then
+  expect_block "the example worker to connect without TLS" "$worker_args_common
+- \"--insecure\"" args:
+  expect_block "the example worker to have the database URL only" "$database_env" env:
+  expect_no_text "no volumes without a TLS Secret" "volumes:"
+  expect_no_text "no volume mounts without a TLS Secret" "volumeMounts:"
+fi
+
+# A tokens file makes the broker require a token under insecure as well.
+if render "example worker, insecure with a tokens file and a token" --set "example.enabled=true,insecure=true,tokens.secretName=tokens-secret,$example_token" --show-only "$worker_template"; then
+  expect_block "the example worker to connect without TLS" "$worker_args_common
+- \"--insecure\"" args:
+  expect_block "the example worker to take its token from the example token Secret" "$database_env
+$token_env" env:
+fi
+
+if render "example worker, TLS" --set "example.enabled=true,tls.secretName=tls-secret,tokens.secretName=tokens-secret,$example_token" --show-only "$worker_template"; then
+  expect_block "the example worker to trust the CA of the TLS Secret" "$worker_args_common
+- \"--tls-ca\"
+- \"/etc/jobqueue/tls/ca.crt\"" args:
+  expect_block "the example worker to take its token from the example token Secret" "$database_env
+$token_env" env:
+  expect_block "the CA to be mounted read-only where --tls-ca looks" "$ca_mount" volumeMounts:
+  expect_block "only ca.crt of the TLS Secret to be projected, not its key" "$ca_volume" volumes:
+fi
+
+# The broker serves TLS whenever it has a certificate, and --insecure only lifts
+# its refusal to serve without one. A worker that sent plaintext to it would
+# never connect, so the TLS Secret wins over insecure.
+if render "example worker, insecure and TLS" --set example.enabled=true,insecure=true,tls.secretName=tls-secret --show-only "$worker_template"; then
+  expect_block "the example worker to use TLS when the broker does, even if insecure is set" "$worker_args_common
+- \"--tls-ca\"
+- \"/etc/jobqueue/tls/ca.crt\"" args:
+fi
+
+# The broker requires a token from every caller whenever it has a tokens file,
+# insecure or not, and without insecure it must have one. Either way a worker
+# without a token would only get Unauthenticated.
+token_guard="example.enabled requires example.tokenSecret when tokens.secretName is set or insecure is false"
+expect_render_error "the example worker without a token, not insecure" "$token_guard" \
+  --set example.enabled=true
+expect_render_error "the example worker without a token, insecure but with a tokens file" "$token_guard" \
+  --set example.enabled=true,insecure=true,tokens.secretName=tokens-secret
+expect_render_error "a token Secret without a key" \
+  "example.tokenSecret requires example.tokenKey" --set example.enabled=true,example.tokenSecret=example-token
 
 if render "scaler disabled" --set scaler.enabled=false; then
   expect_no_text "no scaler flag" "--scaler-addr"
@@ -236,7 +318,7 @@ fi
 expect_render_error "KEDA without the example worker" "example.keda.enabled requires example.enabled" \
   --set example.keda.enabled=true
 expect_render_error "KEDA without the scaler" "example.keda.enabled requires scaler.enabled" \
-  --set example.enabled=true,example.keda.enabled=true,scaler.enabled=false
+  --set "example.enabled=true,example.keda.enabled=true,scaler.enabled=false,$example_token"
 
 # Everything that selects the broker pods must select exactly them: no other
 # pods, and none of the broker pods missed.
@@ -287,15 +369,16 @@ fi
 
 # The ScaledObject must scale the Deployment the chart renders for the example
 # worker, and that Deployment must select its own pods only.
-if render "example worker Deployment" --set example.enabled=true,example.keda.enabled=true --show-only templates/example-worker.yaml; then
+if render "example worker Deployment" --set "example.enabled=true,example.keda.enabled=true,$example_token" --show-only templates/example-worker.yaml; then
   worker_name="$(under metadata: | sed -n 's/^ *name: //p')"
   expect_block "the example worker Deployment to select exactly the example worker pods" "matchLabels:
 $worker_selector" selector:
   if [ "$worker_name" != "$fullname-example-worker" ]; then
     fail "[$context] expected the example worker Deployment to be named $fullname-example-worker, got '$worker_name'"
   fi
-  if render "ScaledObject target" --set example.enabled=true,example.keda.enabled=true --show-only templates/scaledobject.yaml; then
+  if render "ScaledObject target" --set "example.enabled=true,example.keda.enabled=true,$example_token" --show-only templates/scaledobject.yaml; then
     expect_block "the ScaledObject to target the example worker Deployment" "name: $worker_name" scaleTargetRef:
+    expect_block_has "the KEDA trigger to name the queue the example worker drains" 'queue: "thumbnails"' triggers: metadata:
   fi
 fi
 
@@ -303,7 +386,7 @@ fi
 # templates add suffixes to the release name. Helm allows 53 characters in a
 # release name, so check the longest one.
 release="$(printf '%053d' 0 | tr 0 r)"
-if render "a 53-character release name" --set example.enabled=true,example.keda.enabled=true; then
+if render "a 53-character release name" --set "example.enabled=true,example.keda.enabled=true,$example_token"; then
   object_count=0
   while IFS= read -r name; do
     object_count=$((object_count + 1))
