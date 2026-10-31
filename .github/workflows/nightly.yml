@@ -1,0 +1,213 @@
+name: nightly
+
+# The checks that are too slow for a pull request: the simulator over 20000
+# seeds, the differential test of the Postgres store against the model at a
+# depth far beyond the default run of ci.yml, a short soak, and every fuzz
+# target. A pull request never waits for any of them. A failure here is a bug
+# that a faster run missed; the failure artifacts say how to replay it.
+
+on:
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Never download a toolchain: each job runs the Go version it asked for.
+  GOTOOLCHAIN: local
+
+jobs:
+  sim-20k:
+    name: sim (20000 seeds)
+    runs-on: ubuntu-24.04
+    # go test is cut off at 60 minutes; the job gets time to upload what it
+    # left behind.
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.x
+      # No -race: the race detector makes the sweep several times slower, and
+      # ci.yml already runs the simulator under it. A failing seed writes
+      # internal/sim/testdata/failures/seed-<n>.txt with the command that
+      # replays it.
+      - name: Simulate 20000 seeds
+        env:
+          JOBQUEUE_SIM_SEEDS: "20000"
+        run: go test -count=1 -timeout 60m -run TestSimSeeds ./internal/sim/
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sim-failures
+          path: internal/sim/testdata/failures/**
+          if-no-files-found: ignore
+
+  differential-deep:
+    name: differential (postgres 18, 2000 checks)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 2s
+          --health-retries 30
+        ports:
+          - 5432:5432
+    env:
+      JOBQUEUE_TEST_DSN: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.x
+      # 2000 sequences of 200 steps. The 10-minute default of go test is too
+      # short for them: 100 sequences took 28 seconds on a developer machine
+      # against a local database. A failing sequence is shrunk and written to
+      # testdata/rapid/, next to the test.
+      - name: Differential test
+        run: >-
+          go test -tags pg -count=1 -timeout 45m
+          -run TestPGDifferential ./internal/store/pgstore/
+          -rapid.checks=2000 -rapid.steps=200
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: differential-failures
+          path: internal/store/pgstore/testdata/rapid/**
+          if-no-files-found: ignore
+
+  soak-short:
+    name: soak (5 minutes, postgres 18)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 2s
+          --health-retries 30
+        ports:
+          - 5432:5432
+    env:
+      JOBQUEUE_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.x
+          # The benchmark module has its own go.sum.
+          cache-dependency-path: |
+            go.sum
+            bench/go.sum
+      # The benchmark module is separate from the root module, so it is built
+      # and run from its own directory. The numbers are a regression check
+      # and are never quoted: the figures that reach the README come from the
+      # full runs recorded in docs/benchmarks.md. --out keeps the results,
+      # one line of JSON each, for the upload below.
+      - name: Soak at 300 jobs per second for 5 minutes
+        working-directory: bench
+        run: go run ./cmd/jobqueue-bench soak --duration 5m --rate 300 --out soak-short.jsonl
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: soak-failures
+          path: bench/soak-short.jsonl
+          if-no-files-found: ignore
+
+  # go test -fuzz takes one package and one target, so the targets are listed
+  # here and each one runs in a job of its own, in parallel. Nothing names them
+  # in this file: a fuzz target added to any package of the module is picked up
+  # by the next run.
+  fuzz-targets:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      targets: ${{ steps.list.outputs.targets }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.x
+      - name: List the fuzz targets
+        id: list
+        run: |
+          set -euo pipefail
+          # The listing is written to a file first, so that a package that
+          # does not build fails this step instead of shortening the list.
+          go test -list '^Fuzz' ./... >"$RUNNER_TEMP/fuzz-list.txt"
+          # go test prints the names of a package's tests, then its "ok" line.
+          awk '
+            /^Fuzz/        { names[n++] = $1; next }
+            /^ok[ \t]/     { for (i = 0; i < n; i++) print $2, names[i]; n = 0; next }
+                           { n = 0 }
+          ' "$RUNNER_TEMP/fuzz-list.txt" >"$RUNNER_TEMP/fuzz-targets.txt"
+          if [ ! -s "$RUNNER_TEMP/fuzz-targets.txt" ]; then
+            echo "no fuzz targets found; go test -list printed:" >&2
+            cat "$RUNNER_TEMP/fuzz-list.txt" >&2
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/fuzz-targets.txt"
+          targets="$(jq -R -s -c 'split("\n") | map(select(length > 0) | split(" ") | {package: .[0], target: .[1]})' "$RUNNER_TEMP/fuzz-targets.txt")"
+          echo "targets=$targets" >>"$GITHUB_OUTPUT"
+
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    needs: fuzz-targets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      # A crash in one target must not stop the others.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.fuzz-targets.outputs.targets) }}
+    env:
+      FUZZ_PACKAGE: ${{ matrix.package }}
+      FUZZ_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.x
+      # -run '^$' skips the package's other tests, which ci.yml runs. The
+      # target is anchored so that it cannot match a longer name. The seed
+      # corpus under testdata/fuzz/ runs first, so a committed crasher that
+      # has come back fails here too.
+      - name: Fuzz for 5 minutes
+        run: go test -run '^$' -fuzz "^${FUZZ_TARGET}\$" -fuzztime 5m "$FUZZ_PACKAGE"
+      # A crasher that fuzzing found is a new file in the package's
+      # testdata/fuzz/<target>/, which the checkout did not have. The files
+      # are collected under the same paths they have in the repository, so
+      # that the artifact unpacks into a checkout. After triage, a crasher
+      # that reproduces is committed there.
+      - name: Collect the new crashers
+        if: failure()
+        run: |
+          set -euo pipefail
+          dir="$(go list -f '{{.Dir}}' "$FUZZ_PACKAGE")/testdata/fuzz/$FUZZ_TARGET"
+          out="$RUNNER_TEMP/crashers"
+          mkdir -p "$out"
+          git ls-files --others --exclude-standard -z -- "$dir" | while IFS= read -r -d '' file; do
+            mkdir -p "$out/$(dirname "$file")"
+            cp "$file" "$out/$file"
+            echo "new crasher of $FUZZ_TARGET: $file"
+          done
+      - name: Upload the crashers of ${{ matrix.target }}
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-crashers-${{ matrix.target }}
+          path: ${{ runner.temp }}/crashers
+          if-no-files-found: warn

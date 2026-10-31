@@ -3,7 +3,8 @@
 
 GO ?= go
 
-# Pinned tool versions. Keep them in step with .github/workflows/ci.yml.
+# Pinned tool versions. Keep them in step with .github/workflows/ci.yml and
+# .github/workflows/release.yml.
 GOLANGCI_LINT_VERSION := v2.15.0
 GOLANGCI_LINT_SERIES := 2.15
 GOVULNCHECK_VERSION := v1.9.0
@@ -129,6 +130,7 @@ test-scripts:
 	bash scripts/tests/hygiene_test.sh
 	bash scripts/tests/pg_count_test.sh
 	bash scripts/tests/flaws_test.sh
+	bash scripts/tests/release_test.sh
 	$(call with_helm,bash scripts/tests/helm_test.sh,helm test)
 
 preflight:

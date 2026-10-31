@@ -8,7 +8,10 @@
 // broker refused, could not be reached, or the database failed) and 2 for a
 // usage error, which is found before anything is sent.
 //
-// Run jobqueuectl help for the commands and the flags they share.
+// Run jobqueuectl help for the commands and the flags they share. A build sets
+// the version that the version command prints with
+//
+//	go build -ldflags "-X main.version=1.2.3" ./cmd/jobqueuectl
 package main
 
 import (
@@ -32,6 +35,10 @@ import (
 
 	jobqueuev1 "github.com/jason-te-sde/distributed-job-queue/internal/gen/jobqueue/v1"
 )
+
+// version is what the version command prints. It is "dev" unless the linker
+// sets it.
+var version = "dev"
 
 // The exit statuses of the command.
 const (
@@ -197,6 +204,7 @@ var commands = []command{
 	{name: "token new", run: cmdTokenNew,
 		synopsis: "token new --role producer --tenant T | --role worker --queues a,b | --role admin",
 		summary:  "mint a token and the tokens-file line that lists it; the token is shown only once"},
+	{name: "version", run: cmdVersion, synopsis: "version", summary: "print the version of this build"},
 	// sleep exists for the preStop hook of the Helm chart, which runs in an
 	// image that has no shell and so no sleep of its own.
 	{name: "sleep", run: cmdSleep, synopsis: "sleep <duration>", hidden: true},

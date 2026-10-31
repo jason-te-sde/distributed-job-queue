@@ -1,0 +1,169 @@
+name: release
+
+# A release is made here, from a tag, and nowhere else: nothing is built or
+# published from a developer machine. Pushing a tag such as v0.1.0 to a commit
+# of main checks the tag, runs the preflight, builds the binaries, pushes the
+# image and creates the GitHub release with the binaries, the checksums and the
+# chart attached.
+#
+# Everything that only builds comes before the first thing that publishes, so
+# that a failure while building leaves nothing behind. The image is published
+# before the release page is, because the release page is what announces it.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  # Create the release and attach files to it.
+  contents: write
+  # Push the image to ghcr.io.
+  packages: write
+
+env:
+  # Never download a toolchain: the job runs the Go version it asked for.
+  GOTOOLCHAIN: local
+  IMAGE: ghcr.io/jason-te-sde/distributed-job-queue
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The release check asks whether the commit is on main, and make
+          # lint compares the proto files with origin/main. Both need the
+          # branches, and the hygiene check reads every commit message.
+          fetch-depth: 0
+      # Before anything is built: the tag, CHANGELOG.md, the chart and main
+      # have to agree. This is also what makes the tag safe to use below: a
+      # name that is not vMAJOR.MINOR.PATCH stops the run here.
+      - name: Check the tag
+        run: scripts/check-release.sh "$GITHUB_REF_NAME"
+      - name: Read the version from the tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >>"$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.x
+      - uses: ./.github/actions/setup-helm
+      # The versions are the ones of the Makefile and of ci.yml. The Makefile
+      # prints the same go install commands when a tool is missing.
+      - name: Install golangci-lint and buf
+        run: |
+          set -euo pipefail
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
+          go install github.com/bufbuild/buf/cmd/buf@v1.75.0
+          echo "$(go env GOPATH)/bin" >>"$GITHUB_PATH"
+      # Everything CI runs that needs no database. JOBQUEUE_TEST_DSN is unset,
+      # so the Postgres tests are skipped here: they ran on the commit when it
+      # was merged to main.
+      - name: Preflight
+        run: make preflight
+      # Static binaries, as in the Dockerfile. -X main.version sets what
+      # jobqueue-server --version and jobqueuectl version print. One archive per
+      # platform holds both binaries and the license.
+      - name: Build the binaries
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist "$RUNNER_TEMP/stage"
+          for platform in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os="${platform%/*}"
+            arch="${platform#*/}"
+            name="jobqueue_${VERSION}_${os}_${arch}"
+            stage="$RUNNER_TEMP/stage/$name"
+            mkdir -p "$stage"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+              go build -trimpath -ldflags "-s -w -X main.version=$GITHUB_REF_NAME" -o "$stage/" \
+                ./cmd/jobqueue-server ./cmd/jobqueuectl
+            cp LICENSE "$stage/"
+            tar -C "$RUNNER_TEMP/stage" -czf "dist/$name.tar.gz" "$name"
+          done
+      # -X on a variable that does not exist is silently ignored, so run the
+      # binaries of the runner's own platform and read back what they say.
+      - name: Check that the binaries report the tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          dir="$(mktemp -d)"
+          tar -xzf "dist/jobqueue_${VERSION}_linux_amd64.tar.gz" -C "$dir"
+          bin="$dir/jobqueue_${VERSION}_linux_amd64"
+          for got in "$("$bin/jobqueue-server" --version)" "$("$bin/jobqueuectl" version)"; do
+            if [ "$got" != "$GITHUB_REF_NAME" ]; then
+              echo "a binary reports \"$got\", want \"$GITHUB_REF_NAME\"" >&2
+              exit 1
+            fi
+          done
+      # check-release.sh has made sure that the chart's version and appVersion
+      # are the tag's, so the package needs no override.
+      - name: Package the chart
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          helm package deploy/helm/jobqueue --destination dist
+          test -f "dist/jobqueue-${VERSION}.tgz"
+      # One checksum file for everything that is attached. It is verified
+      # right away, from the directory it will be used in.
+      - name: Write SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -- *.tar.gz *.tgz >SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+      # The section of the version that is being released, without its
+      # heading. check-release.sh has made sure that it is the first one.
+      - name: Extract the release notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          awk -v want="## [${VERSION}]" '
+            /^## \[/ { if (found) exit; if (index($0, want) == 1) { found = 1; next } }
+            found { print }
+          ' CHANGELOG.md >"$RUNNER_TEMP/notes.md"
+          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
+            echo "CHANGELOG.md has no text under the heading of $VERSION" >&2
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/notes.md"
+      # The build stage of the Dockerfile cross-compiles on the runner's own
+      # architecture and the final stage only copies files, so the arm64 image
+      # needs no emulation: ci.yml builds the same two platforms the same way.
+      # The version is the tag with its v, which is what the binaries report;
+      # the image tag has no v, because the chart takes it from appVersion.
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push the image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.version.outputs.version }}
+            ${{ env.IMAGE }}:latest
+          # The source label is what links the package to this repository.
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.licenses=Apache-2.0
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.tgz dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"

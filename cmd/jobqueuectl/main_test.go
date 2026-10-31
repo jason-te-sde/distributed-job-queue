@@ -904,6 +904,27 @@ func TestCtlSleep(t *testing.T) {
 	}
 }
 
+func TestCtlVersionPrintsTheVersionOfTheBuild(t *testing.T) {
+	// The release build sets version with -ldflags -X main.version=..., so a
+	// binary says which release it is. No broker is involved: the command works
+	// with nothing running.
+	if r := runCtl(nil, "version"); r.code != 0 || r.stdout != version+"\n" || r.stderr != "" {
+		t.Errorf("version = exit %d, stdout %q, stderr %q; want exit 0, %q and no stderr", r.code, r.stdout, r.stderr, version+"\n")
+	}
+	if r, want := runCtl(nil, "version", "--json"), `{"version":"`+version+"\"}\n"; r.code != 0 || r.stdout != want {
+		t.Errorf("version --json = exit %d, stdout %q; want exit 0 and %q", r.code, r.stdout, want)
+	}
+	if version != "dev" {
+		t.Errorf("version defaults to %q, want \"dev\": a build sets it with -ldflags -X main.version=...", version)
+	}
+	if r := runCtl(nil, "version", "extra"); r.code != 2 || r.stdout != "" || !strings.Contains(r.stderr, `"extra"`) {
+		t.Errorf("version extra = exit %d, stdout %q, stderr %q; want exit 2 naming the argument", r.code, r.stdout, r.stderr)
+	}
+	if r := runCtl(nil, "help"); !strings.Contains(r.stdout, "\n  version\n") {
+		t.Errorf("help does not list the version command:\n%s", r.stdout)
+	}
+}
+
 func TestCtlMigrateErrorsDoNotLeakThePassword(t *testing.T) {
 	const password = "hunter2-s3cret"
 	for name, tc := range map[string]struct {
