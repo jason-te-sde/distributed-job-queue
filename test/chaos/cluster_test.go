@@ -297,21 +297,24 @@ func (c *Cluster) FaultCounts() map[string]int {
 }
 
 // Unexpected lists the processes that exited without the cluster having
-// ended them: a crash. A broker that failed at boot with an ordinary error
-// exit is not one, see Excused. Anything else is: a signal, a panic, an exit
-// of a worker, and any exit of a broker that had been serving.
+// ended them: a crash. A broker that could not reach its database at boot is
+// not one, see Excused. Anything else is: a signal, a panic, any other error at
+// start (a schema that does not match, a flag, a wrong password), an exit of a
+// worker, and any exit of a broker that had been serving. Each entry carries
+// the last line of the process's log.
 func (c *Cluster) Unexpected() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return slices.Clone(c.unexpected)
 }
 
-// Excused lists the exits of brokers that failed before they were ever ready,
-// with the exit status and the last line of the broker's log. A broker started
-// while PostgreSQL is out fails, with the status 1 that the server uses for an
-// error at start, and is started again after a pause, as an orchestrator
-// restarts a pod that crashes at boot. Each such exit is also written to
-// extra/excused-exits.txt, which a failed run keeps.
+// Excused lists the exits of brokers that failed before they were ever ready
+// because they could not reach their database, with the exit status and the
+// last line of the broker's log, which is what says so (see databaseUnreachable;
+// the status 1 alone would excuse any error at start). A broker started while
+// PostgreSQL is out fails that way, and is started again after a pause, as an
+// orchestrator restarts a pod that crashes at boot. Each such exit is also
+// written to extra/excused-exits.txt, which a failed run keeps.
 func (c *Cluster) Excused() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -688,13 +691,13 @@ func (c *Cluster) startLocked(n *node) {
 }
 
 // exited records the end of inst. A process that ended on its own is a crash,
-// except for a broker that failed before it had ever been ready with the
-// ordinary error exit, status 1, which the server uses for an error at start
-// (the database is out, for one). That broker is excused and recorded in
-// Excused and in extra/excused-exits.txt; a signal, a panic (status 2) or any
-// other status is a crash. A broker or a worker that ended on its own is
-// started again after a pause so that the run goes on, but a crash is
-// reported.
+// except for a broker that failed before it had ever been ready, with status
+// 1, and with a last line in its log that says the database could not be
+// reached (excusedExit). That broker is recorded in Excused and in
+// extra/excused-exits.txt; a signal, a panic (status 2), another status, and
+// any other error at start are a crash, recorded in Unexpected. A broker or a
+// worker that ended on its own is started again after a pause so that the run
+// goes on, but a crash is reported.
 func (c *Cluster) exited(n *node, inst *instance, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -704,9 +707,10 @@ func (c *Cluster) exited(n *node, inst *instance, err error) {
 	if inst.expected.Load() || c.closed {
 		return
 	}
-	what := fmt.Sprintf("%s (start %d) exited by itself: %s", n.name(), n.starts, describeExit(err))
-	if excusedExit(n.kind == kindBroker, inst.ready.Load(), err) {
-		line := fmt.Sprintf("%s %s; last line of its log: %s", time.Now().UTC().Format(time.RFC3339Nano), what, lastLine(n.logPath))
+	last := lastLine(n.logPath)
+	what := fmt.Sprintf("%s (start %d) exited by itself: %s; last line of its log: %s", n.name(), n.starts, describeExit(err), clip(last, 400))
+	if excusedExit(n.kind == kindBroker, inst.ready.Load(), err, last) {
+		line := time.Now().UTC().Format(time.RFC3339Nano) + " " + what
 		c.excused = append(c.excused, line)
 		extra, ferr := os.OpenFile(filepath.Join(c.dir, "extra", "excused-exits.txt"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if ferr == nil {
