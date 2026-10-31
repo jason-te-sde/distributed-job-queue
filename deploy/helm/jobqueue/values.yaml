@@ -25,7 +25,8 @@ tokens:
   secretName: ""
 
 # Secret of type kubernetes.io/tls (keys tls.crt and tls.key). Empty means the
-# broker serves plaintext.
+# broker serves plaintext. When example.enabled is true the Secret also needs a
+# "ca.crt" key, the CA the example worker trusts; cert-manager adds one.
 tls:
   secretName: ""
 
@@ -65,7 +66,6 @@ resources:
 # A demonstration worker that renders thumbnails (examples/thumbnail).
 example:
   enabled: false
-  queue: thumbnails
   concurrency: 4
   # The worker reaches the broker the way the broker is served. With
   # tls.secretName set it connects over TLS and trusts the "ca.crt" key of that
@@ -74,9 +74,10 @@ example:
   # insecure=true, it connects in plaintext.
   #
   # tokenSecret and tokenKey name the Secret key that holds the worker's bearer
-  # token, a "worker" token for the queue above (see the tokens Secret). The
-  # token is passed as JOBQUEUE_TOKEN. It is required unless insecure=true,
-  # because the broker then requires tokens.
+  # token, a "worker" token for the queue thumbnails (see the tokens Secret).
+  # The token is passed as JOBQUEUE_TOKEN. It is required when tokens.secretName
+  # is set and when insecure is false: a broker with a tokens file requires a
+  # token from every caller, and without insecure it must have one.
   tokenSecret: ""
   tokenKey: ""
   # Scale the example worker on the queue backlog through KEDA. Requires KEDA

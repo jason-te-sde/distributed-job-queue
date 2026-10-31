@@ -4,10 +4,11 @@
 # usage: image-smoke.sh <image>
 #
 # Checks what the image declares (the user, the entrypoint and the exposed
-# ports) and that its example worker starts, then starts PostgreSQL and the image's broker on a private Docker
-# network and drives them with the image's own jobqueuectl: apply the schema,
-# enqueue a job through the broker and read it back. Nothing on the host is
-# used but Docker; no port is published, so concurrent runs cannot collide.
+# ports) and that its example worker starts, then starts PostgreSQL and the
+# image's broker on a private Docker network and drives them with the image's
+# own jobqueuectl: apply the schema, enqueue a job through the broker and read
+# it back. Nothing on the host is used but Docker; no port is published, so
+# concurrent runs cannot collide.
 #
 # Every container and the network carry a name that is unique to the run, and
 # they are removed when the script ends, however it ends. When a run fails, the

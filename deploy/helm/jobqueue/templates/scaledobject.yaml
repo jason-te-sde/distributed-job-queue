@@ -22,6 +22,7 @@ spec:
     - type: external
       metadata:
         scalerAddress: {{ printf "%s-scaler.%s.svc.cluster.local:%v" (include "jobqueue.fullname" .) .Release.Namespace .Values.scaler.port | quote }}
-        queue: {{ .Values.example.queue | quote }}
+        # Must match queueName in examples/thumbnail/main.go: the worker drains this queue only.
+        queue: "thumbnails"
         targetBacklog: {{ .Values.example.keda.targetBacklog | quote }}
 {{- end }}

@@ -249,7 +249,9 @@ items:
 - key: ca.crt
 path: ca.crt'
 
-if render "example worker, insecure" --set example.enabled=true,insecure=true --show-only "$worker_template"; then
+# With insecure and no tokens file the broker takes every caller, so the worker
+# needs no token and the chart renders it without one.
+if render "example worker, insecure, no tokens file, no worker token" --set example.enabled=true,insecure=true --show-only "$worker_template"; then
   expect_block "the example worker to connect without TLS" "$worker_args_common
 - \"--insecure\"" args:
   expect_block "the example worker to have the database URL only" "$database_env" env:
@@ -257,7 +259,8 @@ if render "example worker, insecure" --set example.enabled=true,insecure=true --
   expect_no_text "no volume mounts without a TLS Secret" "volumeMounts:"
 fi
 
-if render "example worker, insecure with a token" --set "example.enabled=true,insecure=true,$example_token" --show-only "$worker_template"; then
+# A tokens file makes the broker require a token under insecure as well.
+if render "example worker, insecure with a tokens file and a token" --set "example.enabled=true,insecure=true,tokens.secretName=tokens-secret,$example_token" --show-only "$worker_template"; then
   expect_block "the example worker to connect without TLS" "$worker_args_common
 - \"--insecure\"" args:
   expect_block "the example worker to take its token from the example token Secret" "$database_env
@@ -283,8 +286,14 @@ if render "example worker, insecure and TLS" --set example.enabled=true,insecure
 - \"/etc/jobqueue/tls/ca.crt\"" args:
 fi
 
-expect_render_error "the example worker without a token" \
-  "example.enabled requires example.tokenSecret unless insecure is true" --set example.enabled=true
+# The broker requires a token from every caller whenever it has a tokens file,
+# insecure or not, and without insecure it must have one. Either way a worker
+# without a token would only get Unauthenticated.
+token_guard="example.enabled requires example.tokenSecret when tokens.secretName is set or insecure is false"
+expect_render_error "the example worker without a token, not insecure" "$token_guard" \
+  --set example.enabled=true
+expect_render_error "the example worker without a token, insecure but with a tokens file" "$token_guard" \
+  --set example.enabled=true,insecure=true,tokens.secretName=tokens-secret
 expect_render_error "a token Secret without a key" \
   "example.tokenSecret requires example.tokenKey" --set example.enabled=true,example.tokenSecret=example-token
 
@@ -369,6 +378,7 @@ $worker_selector" selector:
   fi
   if render "ScaledObject target" --set "example.enabled=true,example.keda.enabled=true,$example_token" --show-only templates/scaledobject.yaml; then
     expect_block "the ScaledObject to target the example worker Deployment" "name: $worker_name" scaleTargetRef:
+    expect_block_has "the KEDA trigger to name the queue the example worker drains" 'queue: "thumbnails"' triggers: metadata:
   fi
 fi
 

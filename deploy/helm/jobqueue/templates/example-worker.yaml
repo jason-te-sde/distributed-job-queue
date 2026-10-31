@@ -1,6 +1,11 @@
 {{- if .Values.example.enabled }}
-{{- if and (not .Values.insecure) (not .Values.example.tokenSecret) }}
-{{- fail "example.enabled requires example.tokenSecret unless insecure is true: the broker requires tokens, so the example worker needs one" }}
+{{- /*
+A broker with a tokens file requires a token from every caller, insecure or not,
+and without insecure it must have one. So the worker needs a token unless the
+broker has no tokens file and insecure is true.
+*/}}
+{{- if and (not .Values.example.tokenSecret) (or .Values.tokens.secretName (not .Values.insecure)) }}
+{{- fail "example.enabled requires example.tokenSecret when tokens.secretName is set or insecure is false: a broker with a tokens file requires a token from every caller, and without insecure it must have one" }}
 {{- end }}
 {{- if and .Values.example.tokenSecret (not .Values.example.tokenKey) }}
 {{- fail "example.tokenSecret requires example.tokenKey: name the key of the Secret that holds the token" }}
