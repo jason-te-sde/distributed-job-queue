@@ -4,7 +4,9 @@
 # usage: check-hygiene.sh [root]
 #
 # Fails when a tracked file or a commit message on the current branch
-# contains CJK text, or matches an attribution pattern.
+# contains CJK text or an email address, or matches an attribution pattern.
+# The author and committer addresses of a commit are metadata, not message,
+# and are not scanned.
 #
 # The patterns live in attribution-patterns.txt next to this script: one
 # extended regular expression per line, matched case-insensitively. The
@@ -83,6 +85,9 @@ grep -E -f "$expanded" /dev/null 2>"$tmp/grep-error" || status=$?
 
 # CJK Unified Ideographs (U+4E00 to U+9FFF) as UTF-8 byte sequences.
 cjk_regex=$'\xe4[\xb8-\xbf][\x80-\xbf]|[\xe5-\xe8][\x80-\xbf][\x80-\xbf]|\xe9[\x80-\xbf][\x80-\xbf]'
+# An email address: a local part, an @, and a domain with at least one dot. A
+# GitHub handle (@name), a scoped package (@scope/name) and user@host are not.
+email_regex='[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}'
 
 root_abs="$(cd "$root" && pwd -P)"
 patterns_abs="$(cd "$(dirname "$patterns_file")" && pwd -P)/$(basename "$patterns_file")"
@@ -107,6 +112,8 @@ scan_file() {
   [ -f "$abs" ] || return 0
   run_grep -InE -e "$cjk_regex" -- "$abs"
   report_hits "$rel" cjk-text
+  run_grep -InE -e "$email_regex" -- "$abs"
+  report_hits "$rel" email-address
   [ "$abs" != "$patterns_abs" ] || return 0
   run_grep -InEi -f "$expanded" -- "$abs"
   report_hits "$rel" attribution
@@ -126,6 +133,8 @@ while IFS= read -r sha; do
   git -C "$root" show -s --format=%B "$sha" >"$tmp/message" || die "git show failed for $sha in $root"
   run_grep -nE -e "$cjk_regex" -- "$tmp/message"
   report_hits "commit $sha" cjk-text
+  run_grep -nE -e "$email_regex" -- "$tmp/message"
+  report_hits "commit $sha" email-address
   run_grep -nEi -f "$expanded" -- "$tmp/message"
   report_hits "commit $sha" attribution
 done <"$tmp/commits"
