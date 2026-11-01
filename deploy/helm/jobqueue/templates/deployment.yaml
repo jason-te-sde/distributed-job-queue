@@ -1,6 +1,13 @@
 {{- /*
+The broker refuses a --shutdown-grace of zero or less and exits on startup.
+*/ -}}
+{{- if lt (int .Values.shutdownGraceSeconds) 1 }}
+{{- fail (printf "shutdownGraceSeconds must be at least 1, got %v" .Values.shutdownGraceSeconds) }}
+{{- end }}
+{{- /*
 The pod is killed when terminationGracePeriodSeconds runs out, so the preStop
-sleep and the broker's drain must both fit inside it.
+sleep and the broker's drain must both fit inside it. The drain is the value
+that the broker is given as --shutdown-grace below.
 */ -}}
 {{- if ge (add (int .Values.preStopSleepSeconds) (int (include "jobqueue.shutdownGraceSeconds" .))) (int .Values.terminationGracePeriodSeconds) }}
 {{- fail (printf "preStopSleepSeconds (%v) plus the broker shutdown grace (%s) must be less than terminationGracePeriodSeconds (%v)" .Values.preStopSleepSeconds (include "jobqueue.shutdownGraceSeconds" .) .Values.terminationGracePeriodSeconds) }}
@@ -44,6 +51,7 @@ spec:
             {{- if .Values.insecure }}
             - "--insecure"
             {{- end }}
+            - {{ printf "--shutdown-grace=%ss" (include "jobqueue.shutdownGraceSeconds" .) | quote }}
             - {{ printf "--scheduler=%s" .Values.scheduler | quote }}
             {{- if .Values.tenantWeights }}
             - {{ printf "--tenant-weights=%s" .Values.tenantWeights | quote }}

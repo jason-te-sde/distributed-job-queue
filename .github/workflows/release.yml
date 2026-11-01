@@ -204,6 +204,10 @@ jobs:
     env:
       VERSION: ${{ needs.build.outputs.version }}
       LATEST: ${{ needs.build.outputs.latest }}
+    # Every action of this job is pinned to a full commit SHA, with its version in
+    # the comment, because the job runs them with the write tokens above: a tag
+    # that was moved or taken over would otherwise run its new code with them.
+    # Dependabot's github-actions entry proposes the next version and its SHA.
     steps:
       # Fail if a release or a draft already exists for the tag, before
       # anything is pushed. gh release create skips its own check when it makes
@@ -228,12 +232,12 @@ jobs:
             exit 1
           fi
       # Only for the Docker build context. No token is left in the repository.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       # Outside the workspace, so that the files are not part of the build
       # context of the image.
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release
           path: ${{ runner.temp }}/release
@@ -251,14 +255,14 @@ jobs:
       # The build argument is the tag with its v, which is what the binaries
       # report; the image tag has no v, because the chart takes it from
       # appVersion. :latest is added only for the highest release tag.
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push the image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64

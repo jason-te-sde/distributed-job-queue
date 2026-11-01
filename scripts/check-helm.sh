@@ -211,12 +211,15 @@ if render "example worker and KEDA" --set "example.enabled=true,example.keda.ena
   expect_text "the scaler Service address in the namespace" "$fullname-scaler.$namespace.svc.cluster.local:7072"
   expect_text "the example worker command" '"/thumbnail"'
   expect_text "the example worker to dial the headless Service" "dns:///$fullname-grpc:7070"
-  expect_pattern "the example worker to start at zero replicas" '^ *replicas: 0$'
 fi
 
 if render "example worker without KEDA" --set "example.enabled=true,$example_token"; then
-  expect_pattern "one example worker replica" '^ *replicas: 1$'
   expect_no_text "no ScaledObject without KEDA" "kind: ScaledObject"
+fi
+
+# Without KEDA nothing else scales the worker, so the chart sets its replicas.
+if render "example worker Deployment without KEDA" --set "example.enabled=true,$example_token" --show-only templates/example-worker.yaml; then
+  expect_block_has "one example worker replica" "replicas: 1" spec:
 fi
 
 # The example worker reaches the broker the way the broker is served, and sends
@@ -346,6 +349,7 @@ port: http" readinessProbe: httpGet:
   expect_block "the liveness probe to request /healthz on the http port" "path: /healthz
 port: http" livenessProbe: httpGet:
   expect_block "the preStop hook to run the jobqueuectl sleep subcommand" 'command: ["/jobqueuectl", "sleep", "5s"]' lifecycle: preStop: exec:
+  expect_block_has "the broker to be told to drain for 25 seconds" '- "--shutdown-grace=25s"' args:
 fi
 
 if render "preStopSleepSeconds=7" --set preStopSleepSeconds=7 --show-only templates/deployment.yaml; then
@@ -353,18 +357,40 @@ if render "preStopSleepSeconds=7" --set preStopSleepSeconds=7 --show-only templa
 fi
 
 # The pod is killed when terminationGracePeriodSeconds runs out, so the preStop
-# sleep plus the broker's 25 second drain must be strictly smaller. 14 + 25 is
-# 39, which fits in 40; 15 + 25 is 40, which does not.
+# sleep plus the broker's drain (25 seconds by default) must be strictly
+# smaller. 14 + 25 is 39, which fits in 40; 15 + 25 is 40, which does not.
 render "preStopSleepSeconds=14, the largest value that fits" --set preStopSleepSeconds=14 >/dev/null || true
 expect_render_error "preStopSleepSeconds=15, no room left to drain" \
   "must be less than terminationGracePeriodSeconds" --set preStopSleepSeconds=15
 expect_render_error "terminationGracePeriodSeconds=30" \
   "must be less than terminationGracePeriodSeconds" --set terminationGracePeriodSeconds=30
 
+# The drain is the broker's --shutdown-grace, and the chart passes the same
+# value that the guard above counts, so a change to one cannot leave the other
+# behind. With the preStop sleep at 5 and the termination grace at 40, a drain
+# of 34 seconds fits and is passed on as 34s, and 35 does not fit.
+if render "shutdownGraceSeconds=10" --set shutdownGraceSeconds=10 --show-only templates/deployment.yaml; then
+  expect_block_has "the broker to be told to drain for shutdownGraceSeconds" '- "--shutdown-grace=10s"' args:
+fi
+if render "shutdownGraceSeconds=34, the largest value that fits" --set shutdownGraceSeconds=34 --show-only templates/deployment.yaml; then
+  expect_block_has "the broker to be told to drain for shutdownGraceSeconds" '- "--shutdown-grace=34s"' args:
+fi
+expect_render_error "shutdownGraceSeconds=35, no room left to drain" \
+  "must be less than terminationGracePeriodSeconds" --set shutdownGraceSeconds=35
+expect_render_error "shutdownGraceSeconds=0, which the broker refuses" \
+  "shutdownGraceSeconds must be at least 1" --set shutdownGraceSeconds=0
+
 if render "migration Job" --show-only templates/migrate-job.yaml; then
   expect_text "the migration Job to run jobqueuectl" 'command: ["/jobqueuectl"]'
-  expect_text "the migration Job to run the migrate subcommand" 'args: ["migrate"]'
+  expect_text "the migration Job to run the migrate subcommand with a timeout of 4m" 'args: ["migrate", "--timeout=4m"]'
   expect_text "the migration Job to fail rather than restart in place" "restartPolicy: Never"
+fi
+
+# jobqueuectl gives up after 10 seconds unless it is told otherwise, which a
+# migration that builds an index on a large table does not meet. The hook passes
+# its own, longer timeout, and the timeout is a value of the chart.
+if render "migrations.timeout=45m" --set migrations.timeout=45m --show-only templates/migrate-job.yaml; then
+  expect_text "the migration Job to run the migrate subcommand with the timeout of migrations.timeout" 'args: ["migrate", "--timeout=45m"]'
 fi
 
 # The ScaledObject must scale the Deployment the chart renders for the example
@@ -373,6 +399,9 @@ if render "example worker Deployment" --set "example.enabled=true,example.keda.e
   worker_name="$(under metadata: | sed -n 's/^ *name: //p')"
   expect_block "the example worker Deployment to select exactly the example worker pods" "matchLabels:
 $worker_selector" selector:
+  # KEDA's autoscaler owns spec.replicas of this Deployment. A chart that also
+  # renders a value resets the scale on every helm upgrade, so it renders none.
+  expect_no_text "the example worker Deployment to leave spec.replicas to KEDA" "replicas:"
   if [ "$worker_name" != "$fullname-example-worker" ]; then
     fail "[$context] expected the example worker Deployment to be named $fullname-example-worker, got '$worker_name'"
   fi

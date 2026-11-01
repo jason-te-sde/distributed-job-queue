@@ -50,8 +50,12 @@ scaler:
 pdb:
   minAvailable: 1
 
-# The preStop sleep plus the broker shutdown grace (25s) must be less than the
-# termination grace period; the chart refuses to render otherwise.
+# How long the broker drains after SIGTERM, waiting for running calls before it
+# cuts them off. The chart passes it to the broker as --shutdown-grace.
+shutdownGraceSeconds: 25
+# The preStop sleep plus shutdownGraceSeconds must be less than the termination
+# grace period, or the kubelet kills the pod in the middle of the drain; the
+# chart refuses to render otherwise.
 terminationGracePeriodSeconds: 40
 preStopSleepSeconds: 5
 
@@ -93,3 +97,12 @@ example:
 # Run "jobqueuectl migrate" as a pre-install and pre-upgrade hook.
 migrations:
   enabled: true
+  # The limit for the whole migrate command, as a Go duration such as 90s or 10m;
+  # the chart passes it as --timeout. Without one jobqueuectl gives up after 10
+  # seconds, which a migration that builds an index on a large table does not
+  # meet. Helm waits for a hook for at most its own --timeout, 5m unless you set
+  # it, so the default stays below that: the migration then fails with its own
+  # error instead of Helm failing the release while the migration runs on. To
+  # raise it, raise "helm install --timeout" and "helm upgrade --timeout" above
+  # it as well, with room to pull the image.
+  timeout: 4m

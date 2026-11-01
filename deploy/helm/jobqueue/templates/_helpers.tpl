@@ -59,11 +59,11 @@ helm.sh/chart: {{ printf "%s-%s" .ctx.Chart.Name .ctx.Chart.Version | replace "+
 {{- define "jobqueue.httpPort" -}}7071{{- end -}}
 
 {{/*
-Seconds the broker spends draining after SIGTERM: the default of its
---shutdown-grace flag. The chart does not pass that flag, so this must follow the
-broker's default.
+Seconds the broker spends draining after SIGTERM. The chart passes this value as
+the broker's --shutdown-grace flag and counts the same value in the guard on
+terminationGracePeriodSeconds, so the two cannot drift apart.
 */}}
-{{- define "jobqueue.shutdownGraceSeconds" -}}25{{- end -}}
+{{- define "jobqueue.shutdownGraceSeconds" -}}{{ int .Values.shutdownGraceSeconds }}{{- end -}}
 
 {{/* The database URL, read from the Secret. */}}
 {{- define "jobqueue.databaseEnv" -}}

@@ -154,8 +154,8 @@ broken_case swapped-probe-paths-fails "the readiness probe to request /readyz on
 # the pod in place fails.
 broken_case wrong-migrate-command-fails 'command: ["/jobqueuectl"]' \
   sub templates/migrate-job.yaml 's#command: \["/jobqueuectl"\]#command: ["/jobqueue-server"]#'
-broken_case wrong-migrate-args-fails 'args: ["migrate"]' \
-  sub templates/migrate-job.yaml 's#args: \["migrate"\]#args: ["migrat"]#'
+broken_case wrong-migrate-args-fails 'args: ["migrate", "--timeout=4m"]' \
+  sub templates/migrate-job.yaml 's#args: \["migrate"#args: ["migrat"#'
 broken_case wrong-migrate-restart-policy-fails "restartPolicy: Never" \
   sub templates/migrate-job.yaml 's/restartPolicy: Never/restartPolicy: OnFailure/'
 
@@ -228,3 +228,39 @@ broken_case scaledobject-queue-wrong-fails "the KEDA trigger to name the queue t
   sub templates/scaledobject.yaml 's/queue: "thumbnails"/queue: "other"/'
 broken_case scaledobject-queue-from-values-fails "the KEDA trigger to name the queue the example worker drains" \
   sub templates/scaledobject.yaml 's/queue: "thumbnails"/queue: {{ .Values.example.queue | quote }}/'
+
+# (y) The example worker's replicas belong to KEDA when it is enabled, and to
+# the chart otherwise. A template that renders a count under KEDA resets the
+# scale on every helm upgrade, and one that renders none without KEDA leaves
+# the worker at the Kubernetes default of one by accident.
+broken_case example-renders-replicas-under-keda-fails "the example worker Deployment to leave spec.replicas to KEDA" \
+  sub templates/example-worker.yaml 's/{{- if not .Values.example.keda.enabled }}/{{- if true }}/'
+broken_case example-drops-replicas-without-keda-fails "one example worker replica" \
+  sub templates/example-worker.yaml 's/{{- if not .Values.example.keda.enabled }}/{{- if false }}/'
+
+# (z) The broker is told how long to drain, from the value that the guard on
+# terminationGracePeriodSeconds counts. Each case breaks one link: the flag
+# missing, the flag not following the value, the guard not following the value,
+# the default drifting from the one the guard and the docs state, and a value
+# that the broker would refuse at startup.
+broken_case shutdown-grace-flag-never-passed-fails "the broker to be told to drain for 25 seconds" \
+  sub templates/deployment.yaml 's/--shutdown-grace=/--shutdown-wait=/'
+broken_case shutdown-grace-flag-ignores-value-fails "the broker to be told to drain for shutdownGraceSeconds" \
+  sub templates/deployment.yaml 's/printf "--shutdown-grace=%ss" (include "jobqueue.shutdownGraceSeconds" .)/printf "--shutdown-grace=%ss" "25"/'
+broken_case shutdown-guard-ignores-value-fails "shutdownGraceSeconds=35, no room left to drain" \
+  sub templates/deployment.yaml 's/(int (include "jobqueue.shutdownGraceSeconds" .))/25/'
+broken_case shutdown-grace-default-drifts-fails "the broker to be told to drain for 25 seconds" \
+  sub values.yaml 's/^shutdownGraceSeconds: 25$/shutdownGraceSeconds: 20/'
+broken_case shutdown-grace-zero-allowed-fails "shutdownGraceSeconds must be at least 1" \
+  sub templates/deployment.yaml 's/{{- if lt (int .Values.shutdownGraceSeconds) 1 }}/{{- if false }}/'
+
+# (aa) The migration hook runs with a timeout of its own, taken from the values,
+# because jobqueuectl's default of 10 seconds cuts a long migration off. Each
+# case breaks one link: the flag missing, the flag not following the value, and
+# a default that drifts back to something short.
+broken_case migrate-timeout-flag-never-passed-fails 'args: ["migrate", "--timeout=4m"]' \
+  sub templates/migrate-job.yaml 's/--timeout=%s/--deadline=%s/'
+broken_case migrate-timeout-ignores-value-fails "the timeout of migrations.timeout" \
+  sub templates/migrate-job.yaml 's/printf "--timeout=%s" .Values.migrations.timeout/printf "--timeout=%s" "4m"/'
+broken_case migrate-timeout-default-drifts-fails "with a timeout of 4m" \
+  sub values.yaml 's/^  timeout: 4m$/  timeout: 10s/'

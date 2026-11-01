@@ -16,8 +16,10 @@ refusal to serve without one. So the worker uses TLS whenever the TLS Secret is
 set, and plaintext only without it.
 */}}
 {{- $trustCA := .Values.tls.secretName }}
-# A demonstration worker for the thumbnails queue. Under KEDA it starts at zero
-# replicas and the ScaledObject raises it when the queue has a backlog.
+# A demonstration worker for the thumbnails queue. Under KEDA the autoscaler owns
+# spec.replicas, so none is rendered: a value here would reset the scale on every
+# helm upgrade. The first install starts one replica (the Kubernetes default),
+# and KEDA takes the Deployment to zero when the queue is empty.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -25,7 +27,9 @@ metadata:
   labels:
     {{- include "jobqueue.labels" (dict "ctx" . "component" "example-worker") | nindent 4 }}
 spec:
-  replicas: {{ if .Values.example.keda.enabled }}0{{ else }}1{{ end }}
+  {{- if not .Values.example.keda.enabled }}
+  replicas: 1
+  {{- end }}
   selector:
     matchLabels:
       {{- include "jobqueue.selectorLabels" (dict "ctx" . "component" "example-worker") | nindent 6 }}

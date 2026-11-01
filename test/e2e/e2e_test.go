@@ -354,19 +354,9 @@ func requireNoDeadJobs(t *testing.T) {
 	}
 }
 
-// specReplicas is the number of replicas that a Deployment is asked to have.
-func specReplicas(t *testing.T, deploy string) int {
-	t.Helper()
-	desired, _, err := replicaCounts(deploy)
-	if err != nil {
-		t.Fatalf("%v", err)
-	}
-	return desired
-}
-
-// processesJobs enqueues 300 jobs while the example worker is at zero
-// replicas. That every job succeeds proves that KEDA raised the worker from
-// zero on the strength of the broker's backlog.
+// processesJobs waits for the idle example worker to be at zero replicas, then
+// enqueues 300 jobs. That every job succeeds proves that KEDA raised the worker
+// from zero on the strength of the broker's backlog.
 func (f *fixture) processesJobs(t *testing.T) {
 	const (
 		jobs = 300
@@ -377,9 +367,19 @@ func (f *fixture) processesJobs(t *testing.T) {
 		// bound of its own.
 		within = 180 * time.Second
 	)
-	if n := specReplicas(t, workerDeploy); n != 0 {
-		t.Fatalf("the example worker should start at 0 replicas under KEDA, but is asked for %d", n)
-	}
+	// The chart leaves spec.replicas of the worker to KEDA, so the Deployment
+	// is created with one replica, the Kubernetes default, and stays there until
+	// KEDA first looks at the idle queue. That look can be late (see within), and
+	// the scale-up below proves something only if the jobs arrive at zero, so
+	// wait for it. The bound is that of the scale-down in kedaScalesToZeroAndBack.
+	const toZeroWithin = 30*time.Second + 90*time.Second
+	eventually(t, toZeroWithin, 2*time.Second, "KEDA takes the idle example worker to zero", func() (bool, string) {
+		desired, ready, err := replicaCounts(workerDeploy)
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		return desired == 0 && ready == 0, fmt.Sprintf("%d replicas asked for, %d ready", desired, ready)
+	})
 	base := maxJobID(t)
 	p := f.connect(t)
 	enqueueAll(t, p, jobs, sizeDefault)
