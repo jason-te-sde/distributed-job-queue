@@ -41,8 +41,7 @@ import (
 const pgDBConns = 8
 
 // pgActivity is the interval at which the brokers of TestPGDelayedJobsRunOnTime
-// ask which tenants have work. It is also what a job that was delayed, and so
-// had no notification to announce it, can wait for after its run time.
+// ask which tenants have work.
 const pgActivity = 100 * time.Millisecond
 
 // newRealClockDB returns a migrated database whose jobqueue.now() is the
@@ -620,23 +619,60 @@ func TestPGRollingBrokerRestart(t *testing.T) {
 	t.Logf("%d jobs enqueued across three broker replacements", enqueued)
 }
 
-// TestPGDelayedJobsRunOnTime checks that a delayed job is not early and not
-// late. Nothing announces the moment its delay ends, so the broker finds it by
-// asking the store which tenants have work, every ActivityInterval.
+// TestPGDelayedJobsRunOnTime checks that a delayed job is never early, and
+// that the brokers find it by the means that exist for it. Nothing announces
+// the moment its delay ends, so a broker finds it through the activity read,
+// which asks the store which tenants have work and when the next scheduled job
+// falls due, and through the timer that the due time arms. The brokers' fallback
+// poll and the worker's long poll are set far longer than maxLate, so that
+// neither can be what finds the jobs: a job that waits for the poll starts after
+// the bound and fails.
 func TestPGDelayedJobsRunOnTime(t *testing.T) {
 	const (
 		queue = "delayed"
 		jobs  = 50
 		delay = 2 * time.Second
-		slack = 300 * time.Millisecond
+		// pollFallback is the brokers' fallback poll. It is well above maxLate,
+		// so that a job found only by the poll is late by about 3s, and well
+		// below the delay + 10s that the test waits for every job to run, so
+		// that such a job is reported as late and not as missing. The brokers of
+		// the other tests poll every 100ms, which finds a delayed job by itself.
+		pollFallback = 5 * time.Second
+		// longPoll is how long the worker's Lease request waits at a broker. It
+		// is above pollFallback because a request that ends and is sent again
+		// reaches a broker, and a broker fetches when a request arrives and it
+		// does not know its queue to be empty: with the 1s that fast gives the
+		// test workers, the worker would find delayed jobs by itself, at
+		// whichever broker it came to.
+		longPoll = 10 * time.Second
+		// maxLate is how long after its run time a delayed job may start. It is
+		// not a latency target: it is the bound below which the job was found by
+		// the activity read or the due timer, and above which it was found by the
+		// poll or not at all. It is as wide as it is because a delayed job waits
+		// for the store. Under CPU contention Postgres answers a fetch or an
+		// activity read in up to 0.85s, and a worker holds one Lease request, so
+		// one store call is in flight for it at a time and every job that falls
+		// due meanwhile waits for that call and then for the next. The latest
+		// start after the run time was 0.98s on this machine with 8 CPU burners
+		// at GOMAXPROCS=2, 0.81s on CI with Postgres 15, and about 1.3s at a
+		// load average of 31 to 35. 2s is above all three, and below the 3s or
+		// so by which a job found by the poll is late. Discovery to the
+		// millisecond is pinned without a database by
+		// TestDispatcherDelayedJobWakesAtDue and
+		// TestDispatcherDueTimeWakesWithoutLaterActivity in internal/broker, and
+		// by TestDueAtWakes in internal/core/dispatch.
+		maxLate = 2 * time.Second
 	)
-	env := newPGEnv(t, 2, func(c *broker.Config) { c.ActivityInterval = pgActivity })
+	env := newPGEnv(t, 2, func(c *broker.Config) {
+		c.ActivityInterval = pgActivity
+		c.PollInterval = pollFallback
+	})
 
 	var mu sync.Mutex
 	started := make([]time.Time, jobs)
 	var ran sync.WaitGroup
 	ran.Add(jobs)
-	env.startWorker(queue, jobqueue.WorkerOptions{Concurrency: jobs}, func(_ context.Context, j *jobqueue.Job) error {
+	env.startWorker(queue, jobqueue.WorkerOptions{Concurrency: jobs, LongPoll: longPoll}, func(_ context.Context, j *jobqueue.Job) error {
 		now := time.Now()
 		n, err := strconv.Atoi(string(j.Payload))
 		if err != nil {
@@ -686,8 +722,8 @@ func TestPGDelayedJobsRunOnTime(t *testing.T) {
 		}
 		after := started[n].Sub(info.CreatedAt)
 		latest = max(latest, after)
-		if after < delay || after > delay+pgActivity+slack {
-			t.Errorf("job %d started %v after its enqueue, want within [%v, %v]", n, after, delay, delay+pgActivity+slack)
+		if after < delay || after > delay+maxLate {
+			t.Errorf("job %d started %v after its enqueue, want within [%v, %v]", n, after, delay, delay+maxLate)
 		}
 	}
 	t.Logf("the latest of %d delayed jobs started %v after its enqueue; the delay was %v", jobs, latest, delay)
