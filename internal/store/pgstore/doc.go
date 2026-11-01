@@ -41,6 +41,15 @@
 //     NotifyChannel, in the transaction of the write, for each queue and
 //     tenant that gained a job that is ready to run. A listener learns that
 //     work exists; it reads the table to learn what.
+//   - Those same three calls hold at most a bounded share of the pool's
+//     connections at once (WithMaxNotifying): every committing NOTIFY takes a
+//     database-wide lock, so notifying transactions commit one at a time and
+//     queue on it, each holding a connection. The bound is taken before the
+//     connection, so that Lease, Activity and the acknowledgements, which do
+//     not notify, find one: with the default bound a pool keeps at least two
+//     connections for them from 3 connections up, one at 2 and none at 1. A
+//     call that waits under the bound holds no connection, and its context
+//     ends the wait.
 //
 // Errors are wrapped by classify. These wrap store.ErrUnavailable, which the
 // caller may retry: a connection that cannot be opened or was lost (a network
