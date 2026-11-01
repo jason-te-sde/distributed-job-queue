@@ -228,3 +228,12 @@ broken_case scaledobject-queue-wrong-fails "the KEDA trigger to name the queue t
   sub templates/scaledobject.yaml 's/queue: "thumbnails"/queue: "other"/'
 broken_case scaledobject-queue-from-values-fails "the KEDA trigger to name the queue the example worker drains" \
   sub templates/scaledobject.yaml 's/queue: "thumbnails"/queue: {{ .Values.example.queue | quote }}/'
+
+# (y) The example worker's replicas belong to KEDA when it is enabled, and to
+# the chart otherwise. A template that renders a count under KEDA resets the
+# scale on every helm upgrade, and one that renders none without KEDA leaves
+# the worker at the Kubernetes default of one by accident.
+broken_case example-renders-replicas-under-keda-fails "the example worker Deployment to leave spec.replicas to KEDA" \
+  sub templates/example-worker.yaml 's/{{- if not .Values.example.keda.enabled }}/{{- if true }}/'
+broken_case example-drops-replicas-without-keda-fails "one example worker replica" \
+  sub templates/example-worker.yaml 's/{{- if not .Values.example.keda.enabled }}/{{- if false }}/'

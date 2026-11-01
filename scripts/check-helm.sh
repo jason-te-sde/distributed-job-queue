@@ -211,12 +211,15 @@ if render "example worker and KEDA" --set "example.enabled=true,example.keda.ena
   expect_text "the scaler Service address in the namespace" "$fullname-scaler.$namespace.svc.cluster.local:7072"
   expect_text "the example worker command" '"/thumbnail"'
   expect_text "the example worker to dial the headless Service" "dns:///$fullname-grpc:7070"
-  expect_pattern "the example worker to start at zero replicas" '^ *replicas: 0$'
 fi
 
 if render "example worker without KEDA" --set "example.enabled=true,$example_token"; then
-  expect_pattern "one example worker replica" '^ *replicas: 1$'
   expect_no_text "no ScaledObject without KEDA" "kind: ScaledObject"
+fi
+
+# Without KEDA nothing else scales the worker, so the chart sets its replicas.
+if render "example worker Deployment without KEDA" --set "example.enabled=true,$example_token" --show-only templates/example-worker.yaml; then
+  expect_block_has "one example worker replica" "replicas: 1" spec:
 fi
 
 # The example worker reaches the broker the way the broker is served, and sends
@@ -373,6 +376,9 @@ if render "example worker Deployment" --set "example.enabled=true,example.keda.e
   worker_name="$(under metadata: | sed -n 's/^ *name: //p')"
   expect_block "the example worker Deployment to select exactly the example worker pods" "matchLabels:
 $worker_selector" selector:
+  # KEDA's autoscaler owns spec.replicas of this Deployment. A chart that also
+  # renders a value resets the scale on every helm upgrade, so it renders none.
+  expect_no_text "the example worker Deployment to leave spec.replicas to KEDA" "replicas:"
   if [ "$worker_name" != "$fullname-example-worker" ]; then
     fail "[$context] expected the example worker Deployment to be named $fullname-example-worker, got '$worker_name'"
   fi
