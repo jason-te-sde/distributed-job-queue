@@ -165,18 +165,18 @@ What is not guaranteed:
 
 ## Performance
 
-Throughput, enqueue-to-start latency, the noisy-neighbour wait with and without fair scheduling, recovery time after a worker or broker is killed, and the behaviour of the table over a long run are measured with `jobqueue-bench` on one laptop: an Apple M2 with 16 GB of memory, with PostgreSQL 17 on the same machine. The figures below are medians of three runs (the soak ran once), and every one of them comes from [docs/benchmarks.md](docs/benchmarks.md), which holds the method, the exact commands, the spread of the runs and the raw output.
+Throughput, enqueue-to-start latency, the noisy-neighbour wait with and without fair scheduling, recovery time after a worker or broker is killed, and the behaviour of the table over a long run are measured with `jobqueue-bench` on one laptop: an Apple M2 with 16 GB of memory, with PostgreSQL 17 on the same machine. The figures below are medians of three runs, except that the throughput latencies are those of the run with the median maximum and that a soak ran once for each of its configurations. Every one of them comes from [docs/benchmarks.md](docs/benchmarks.md), which holds the method, the exact commands, the spread of the runs and the raw output.
 
 - **Throughput.** One broker sustained 3,781 jobs per second (2,844 to 4,250 over three runs), and at half of that rate the enqueue-to-start latency was 0.97 ms at p50 and 19 ms at p99. Three brokers on the same machine did not triple it: 4,250 jobs per second (4,250 to 6,125).
 - **What the optimisations buy.** Batched leases raise the sustained rate by a factor of 1.6 and coalesced acknowledgements by 1.4. With `NOTIFY`, a job on an idle queue starts after 5.4 ms at p50, against 498 ms with polling alone.
 - **A noisy neighbour.** While another tenant floods the queue with 100,000 jobs, a small tenant's p99 wait is 18 ms under deficit round robin and 28.5 s under first-come-first-served (p50: 2.6 ms and 15.4 s).
 - **Recovery.** The 100 jobs of a killed worker all ran again about 32 s after the kill, inside the bound of 33 s for a lease TTL of 30 s. Cutting one of three brokers off under load cost one to three failed calls and no job.
-- **A soak.** At 1,890 jobs per second throughput did not drift (+0.17%). The first half-hour run, with the table's original settings, did not level off: autovacuum's cost throttle made a vacuum of the jobs table take 47 s at the median of the 60 s it has, and the table grew from 442 MiB to 569 MiB in the last three minutes. With the throttle's delay removed (migration 0002) a vacuum takes 0.69 s at the median, and a 60-minute run held the table at 367.6 MiB at minute 30 and 376.6 MiB at minute 60 (+2.45%).
+- **A soak.** At 1,890 jobs per second throughput did not drift (+0.17%). The first half-hour run, with the table's original settings, did not level off: the table grew from 442 MiB to 569 MiB in the last three minutes. That run kept no vacuum log. A repeat that did showed autovacuum's cost throttle making a vacuum of the jobs table take 47 s at the median of the 60 s it has, which fits the break-away; the repeat itself did not break away inside 30 minutes. With the throttle's delay removed (migration 0002) a vacuum takes 0.69 s at the median, and a 60-minute run held the table at 367.6 MiB at minute 30 and 376.6 MiB at minute 60 (+2.45%).
 - **River as a reference.** River, run as a library with no network hop, sustained 10,250 jobs per second (10,250 to 11,469), 2.7 times one broker.
 
 ![Empirical distribution of tenant B's wait behind a flood of 100,000 jobs, under FIFO and under deficit round robin](docs/benchmarks/noisy-neighbor.svg)
 
-These are the numbers of one laptop with PostgreSQL beside the benchmark, and the maxima move by up to a factor of 1.5 between runs; the file lists what they do and do not say, including the profile of the notify lock that PostgreSQL takes for every committing `NOTIFY`.
+These are the numbers of one laptop with PostgreSQL beside the benchmark, taken on the code of commit `8f72a3c` and not repeated on later commits (the follow-up of the soak ran on later ones), and the maxima move by up to a factor of 1.5 between runs; the file lists what they do and do not say, including the profile of the notify lock that PostgreSQL takes for every committing `NOTIFY`.
 
 ## What is not covered
 
