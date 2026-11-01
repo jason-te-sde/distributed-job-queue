@@ -1,11 +1,15 @@
 package broker
 
 import (
+	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -100,6 +104,61 @@ func TestNewValidatesTheConfiguration(t *testing.T) {
 	cfg.Scheduler = "lifo"
 	if _, err := New(t.Context(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil || !strings.Contains(err.Error(), "--scheduler") {
 		t.Fatalf("New with a bad scheduler = %v, want the validation error", err)
+	}
+}
+
+func TestNewGivesUpOnADatabaseThatNeverAnswers(t *testing.T) {
+	// A database behind a black hole accepts the connection and says nothing.
+	// Without a bound of its own, New waits for as long as the caller's context
+	// lasts, which for a server is for ever.
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var (
+		mu   sync.Mutex
+		held []net.Conn
+	)
+	go func() {
+		for {
+			c, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, c)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = lis.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range held {
+			_ = c.Close()
+		}
+	})
+	cfg := testConfig(t)
+	cfg.DatabaseURL = "postgres://" + lis.Addr().String() + "/never-answers?sslmode=disable"
+	old := startupTimeout
+	startupTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { startupTimeout = old })
+
+	// The caller's context outlasts the bound by far, so that only the bound
+	// can end the call early.
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	b, err := New(ctx, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	elapsed := time.Since(start)
+	if err == nil || b != nil {
+		t.Fatalf("New = %v, %v; want an error and no broker", b, err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("New failed with %v, want a deadline error", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("New gave up after %v, want about the %v of startupTimeout: the database steps have no bound of their own", elapsed, startupTimeout)
 	}
 }
 
