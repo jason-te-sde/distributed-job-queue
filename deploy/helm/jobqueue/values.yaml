@@ -97,3 +97,11 @@ example:
 # Run "jobqueuectl migrate" as a pre-install and pre-upgrade hook.
 migrations:
   enabled: true
+  # The limit for the whole migrate command, as a Go duration such as 90s or 10m;
+  # the chart passes it as --timeout. Without one jobqueuectl gives up after 10
+  # seconds, which a migration that builds an index on a large table does not
+  # meet. Helm waits for a hook for at most its own --timeout, which is 5m unless
+  # you set it, so raise "helm install --timeout" and "helm upgrade --timeout" to
+  # at least this value as well (plus the time to pull the image) when you raise
+  # it.
+  timeout: 10m

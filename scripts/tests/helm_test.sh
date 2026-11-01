@@ -154,8 +154,8 @@ broken_case swapped-probe-paths-fails "the readiness probe to request /readyz on
 # the pod in place fails.
 broken_case wrong-migrate-command-fails 'command: ["/jobqueuectl"]' \
   sub templates/migrate-job.yaml 's#command: \["/jobqueuectl"\]#command: ["/jobqueue-server"]#'
-broken_case wrong-migrate-args-fails 'args: ["migrate"]' \
-  sub templates/migrate-job.yaml 's#args: \["migrate"\]#args: ["migrat"]#'
+broken_case wrong-migrate-args-fails 'args: ["migrate", "--timeout=10m"]' \
+  sub templates/migrate-job.yaml 's#args: \["migrate"#args: ["migrat"#'
 broken_case wrong-migrate-restart-policy-fails "restartPolicy: Never" \
   sub templates/migrate-job.yaml 's/restartPolicy: Never/restartPolicy: OnFailure/'
 
@@ -253,3 +253,14 @@ broken_case shutdown-grace-default-drifts-fails "the broker to be told to drain 
   sub values.yaml 's/^shutdownGraceSeconds: 25$/shutdownGraceSeconds: 20/'
 broken_case shutdown-grace-zero-allowed-fails "shutdownGraceSeconds must be at least 1" \
   sub templates/deployment.yaml 's/{{- if lt (int .Values.shutdownGraceSeconds) 1 }}/{{- if false }}/'
+
+# (aa) The migration hook runs with a timeout of its own, taken from the values,
+# because jobqueuectl's default of 10 seconds cuts a long migration off. Each
+# case breaks one link: the flag missing, the flag not following the value, and
+# a default that drifts back to something short.
+broken_case migrate-timeout-flag-never-passed-fails 'args: ["migrate", "--timeout=10m"]' \
+  sub templates/migrate-job.yaml 's/--timeout=%s/--deadline=%s/'
+broken_case migrate-timeout-ignores-value-fails "the timeout of migrations.timeout" \
+  sub templates/migrate-job.yaml 's/printf "--timeout=%s" .Values.migrations.timeout/printf "--timeout=%s" "10m"/'
+broken_case migrate-timeout-default-drifts-fails "with a timeout of 10m" \
+  sub values.yaml 's/^  timeout: 10m$/  timeout: 10s/'

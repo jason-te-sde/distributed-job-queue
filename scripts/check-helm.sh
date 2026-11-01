@@ -382,8 +382,15 @@ expect_render_error "shutdownGraceSeconds=0, which the broker refuses" \
 
 if render "migration Job" --show-only templates/migrate-job.yaml; then
   expect_text "the migration Job to run jobqueuectl" 'command: ["/jobqueuectl"]'
-  expect_text "the migration Job to run the migrate subcommand" 'args: ["migrate"]'
+  expect_text "the migration Job to run the migrate subcommand with a timeout of 10m" 'args: ["migrate", "--timeout=10m"]'
   expect_text "the migration Job to fail rather than restart in place" "restartPolicy: Never"
+fi
+
+# jobqueuectl gives up after 10 seconds unless it is told otherwise, which a
+# migration that builds an index on a large table does not meet. The hook passes
+# its own, longer timeout, and the timeout is a value of the chart.
+if render "migrations.timeout=45m" --set migrations.timeout=45m --show-only templates/migrate-job.yaml; then
+  expect_text "the migration Job to run the migrate subcommand with the timeout of migrations.timeout" 'args: ["migrate", "--timeout=45m"]'
 fi
 
 # The ScaledObject must scale the Deployment the chart renders for the example

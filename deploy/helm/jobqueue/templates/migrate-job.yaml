@@ -24,7 +24,9 @@ spec:
         - name: migrate
           image: {{ include "jobqueue.image" . | quote }}
           command: ["/jobqueuectl"]
-          args: ["migrate"]
+          # --timeout limits the whole command; jobqueuectl's own default is 10
+          # seconds, which a migration of a large table can exceed.
+          args: ["migrate", {{ printf "--timeout=%s" .Values.migrations.timeout | quote }}]
           env:
             {{- include "jobqueue.databaseEnv" . | nindent 12 }}
           resources:
