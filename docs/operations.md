@@ -84,10 +84,12 @@ The values that matter:
 | `scheduler`, `tenantWeights` | `drr`, empty | Fair scheduling, and weights such as `a=4,b=1` |
 | `scaler.enabled`, `scaler.port`, `scaler.allowNamespace` | `true`, 7072, `keda` | The KEDA scaler endpoint, and the namespace allowed to reach it |
 | `pdb.minAvailable` | 1 | PodDisruptionBudget |
-| `terminationGracePeriodSeconds`, `preStopSleepSeconds` | 40, 5 | The chart refuses to render if the sleep plus the 25 s shutdown grace is not less than the grace period |
+| `shutdownGraceSeconds` | 25 | How long a broker drains after SIGTERM before it cuts off running calls. The chart passes it as `--shutdown-grace`, at least 1 |
+| `terminationGracePeriodSeconds`, `preStopSleepSeconds` | 40, 5 | The chart refuses to render if the sleep plus `shutdownGraceSeconds` is not less than the grace period |
 | `example.enabled`, `example.keda.enabled` | `false` | The thumbnail example worker, and its `ScaledObject` |
 | `example.tokenSecret`, `example.tokenKey` | empty | The Secret key with the example worker's bearer token (a worker token for the queue `thumbnails`), required when the brokers require tokens. With `tls.secretName` the TLS Secret also needs a `ca.crt` key, which the worker trusts |
 | `migrations.enabled` | `true` | The migration hook |
+| `migrations.timeout` | `4m` | The limit for the whole `jobqueuectl migrate`, a Go duration that the chart passes as `--timeout`. Without one `jobqueuectl` gives up after 10 s, too soon for a migration that builds an index on a large table. It stays below the 5 m that Helm waits for a hook; to raise it, raise `--timeout` of `helm install` and `helm upgrade` above it too |
 
 ### Rolling updates and restarts
 
@@ -265,6 +267,7 @@ Every flag has a default; `--database-url` (or `$JOBQUEUE_DATABASE_URL`) is the 
 | --- | --- | --- |
 | `--database-url` | `$JOBQUEUE_DATABASE_URL` | PostgreSQL connection URL |
 | `--max-db-conns` | 20 | Size of the database connection pool |
+| `--max-notify-conns` | 0 (derived) | Most pool connections that `Enqueue`, `Release` and `Requeue` may hold at once, so that Lease, heartbeats and acknowledgements always find one. 0 leaves a reserve of max(2, `--max-db-conns`/4), so 15 of 20 by default. Any other value is 1 to `--max-db-conns` minus 1 (a pool of 1 allows 0 or 1), and the broker refuses to start with one outside that |
 | `--grpc-addr` | `:7070` | Listen address of the gRPC API |
 | `--http-addr` | `:7071` | Listen address of `/healthz`, `/readyz` and `/metrics` |
 | `--scaler-addr` | empty (off) | Listen address of the autoscaler service: unauthenticated plaintext gRPC, to be reachable only by KEDA through a NetworkPolicy |
