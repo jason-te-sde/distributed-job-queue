@@ -36,6 +36,14 @@ const (
 	sdkPingEvery = 30 * time.Second
 )
 
+// startupTimeout bounds the database steps of New: the first connection, the
+// ping and the schema check. It takes the value of defaultStoreTimeout, the
+// longest the broker waits for the store anywhere else. A database that
+// accepts a connection and never answers would otherwise hold the start for as
+// long as the caller's context lasts. It is a variable only so that a test can
+// shorten it.
+var startupTimeout = defaultStoreTimeout
+
 // keepaliveEnforcement is the policy for the pings that clients send. gRPC's
 // default admits a ping only every 5 minutes, and closes a connection whose
 // client sends a third one early, so the SDK's ping every sdkPingEvery would
@@ -100,8 +108,9 @@ func loadAuth(path string) (*Authenticator, error) {
 
 // New validates cfg and builds a broker. It checks everything that can be
 // checked without the database first (the tokens file, the TLS files), then
-// connects, and refuses to go on if the schema is not the one this binary was
-// built for: the error is a *migrate.SchemaMismatchError, unchanged. Finally
+// connects, for at most startupTimeout, and refuses to go on if the schema is
+// not the one this binary was built for: the error is a
+// *migrate.SchemaMismatchError, unchanged. Finally
 // it binds the gRPC and HTTP addresses, so that GRPCAddr and HTTPAddr are
 // known, and a listener on port 0 has its port, before Run. The scaler address
 // is bound last, and only if it is set.
@@ -126,11 +135,13 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*Broker, error) {
 		}
 	}
 
-	pool, err := pgstore.Open(ctx, cfg.DatabaseURL, cfg.MaxDBConns)
+	dbCtx, cancel := context.WithTimeout(ctx, startupTimeout)
+	defer cancel()
+	pool, err := pgstore.Open(dbCtx, cfg.DatabaseURL, cfg.MaxDBConns)
 	if err != nil {
 		return nil, fmt.Errorf("open the database: %w", err)
 	}
-	if err := migrate.Check(ctx, pool); err != nil {
+	if err := migrate.Check(dbCtx, pool); err != nil {
 		pool.Close()
 		return nil, err
 	}

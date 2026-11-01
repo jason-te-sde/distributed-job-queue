@@ -299,6 +299,91 @@ func TestDispatcherPollFindsWorkWithoutNotify(t *testing.T) {
 	t.Logf("delivered %v after the enqueue", time.Since(start))
 }
 
+// slowReturnStore answers each Lease delay after the inner store has leased
+// the jobs, as a store does when the way back from the database is slow, and
+// notes when the call began: the inner store reads its clock after that.
+type slowReturnStore struct {
+	store.Store
+	delay time.Duration
+
+	mu    sync.Mutex
+	began time.Time
+}
+
+func (s *slowReturnStore) Lease(ctx context.Context, req store.LeaseRequest) ([]store.Grant, error) {
+	s.mu.Lock()
+	s.began = time.Now()
+	s.mu.Unlock()
+	grants, err := s.Store.Lease(ctx, req)
+	select {
+	case <-time.After(s.delay):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return grants, err
+}
+
+func (s *slowReturnStore) leaseBegan() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.began
+}
+
+// slowReturn is the delay that a slowReturnStore adds in the tests below.
+const slowReturn = 300 * time.Millisecond
+
+// leaseThroughASlowReturn leases one job from a store that takes slowReturn to
+// answer after it leased the job. It returns the answer, the instant the call
+// was made, and the instant the store was asked, which is no later than the
+// instant it read its clock.
+func leaseThroughASlowReturn(t *testing.T) (e *dispEnv, ans LeaseAnswer, sentAt, asked time.Time) {
+	t.Helper()
+	var ss *slowReturnStore
+	e = newDispEnv(t, DispatcherConfig{}, func(s store.Store) store.Store {
+		ss = &slowReturnStore{Store: s, delay: slowReturn}
+		return ss
+	})
+	e.add("q", "t", 1)
+	sentAt = time.Now()
+	ans, err := e.lease("q", 1, 0)
+	if err != nil {
+		t.Fatalf("Lease: %v", err)
+	}
+	wantGrants(t, leaseResult{ans: ans}, 1)
+	return e, ans, sentAt, ss.leaseBegan()
+}
+
+func TestDispatcherAnswersWithTheWaitUpToTheFetch(t *testing.T) {
+	// A worker takes sentAt + Waited + Remaining as a lower bound of the
+	// lease's expiry. That holds only if Waited ends before the store read its
+	// clock, so it must not count the time the answer took to come back.
+	_, ans, sentAt, asked := leaseThroughASlowReturn(t)
+	if over := sentAt.Add(ans.Waited).Sub(asked); over > 0 {
+		t.Errorf("the answer says the call waited %v, which ends %v after the store was asked: a worker would trust the lease for that much longer than it lasts", ans.Waited, over)
+	}
+}
+
+func TestDispatcherLeaseWaitMetricCountsUpToTheDelivery(t *testing.T) {
+	// The wait that the answer reports ends at the fetch, but what the metric
+	// says is how long a caller waited for its jobs, which ends at the delivery.
+	e, _, _, _ := leaseThroughASlowReturn(t)
+	families, err := e.reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range families {
+		if mf.GetName() != "jobqueue_lease_wait_seconds" {
+			continue
+		}
+		h := mf.GetMetric()[0].GetHistogram()
+		if h.GetSampleCount() != 1 || h.GetSampleSum() < slowReturn.Seconds() {
+			t.Errorf("lease_wait_seconds has %d samples adding up to %vs, want one of at least %vs: the store's return trip counts", h.GetSampleCount(), h.GetSampleSum(), slowReturn.Seconds())
+		}
+		return
+	}
+	t.Error("the lease_wait_seconds metric was not registered")
+}
+
 func TestDispatcherReleasesOrphanedGrants(t *testing.T) {
 	var gs *gateStore
 	e := newDispEnv(t, DispatcherConfig{}, func(s store.Store) store.Store { gs = newGateStore(s); return gs })

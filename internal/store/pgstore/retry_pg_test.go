@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jason-te-sde/distributed-job-queue/internal/core/job"
@@ -215,12 +216,36 @@ func raceBehindAGate(t *testing.T, pool *pgxpool.Pool, refs []store.Ref, callers
 	for i, r := range refs {
 		ids[i] = r.ID
 	}
+	raceBehind(t, pool, callers, func(tx pgx.Tx) error {
+		_, err := tx.Exec(t.Context(), "SELECT id FROM jobqueue.jobs WHERE id = ANY($1::int8[]) ORDER BY id FOR UPDATE", ids)
+		return err
+	}, call)
+}
+
+// raceBehindATableLock is raceBehindAGate for calls that insert rows, which have
+// no rows to wait for yet: the transaction that stops them holds a lock on the
+// table of jobs that every insert needs, so each caller waits at its first
+// insert and they all go on in the same instant.
+func raceBehindATableLock(t *testing.T, pool *pgxpool.Pool, callers int, call func(c int)) {
+	t.Helper()
+	raceBehind(t, pool, callers, func(tx pgx.Tx) error {
+		_, err := tx.Exec(t.Context(), "LOCK TABLE jobqueue.jobs IN SHARE ROW EXCLUSIVE MODE")
+		return err
+	}, call)
+}
+
+// raceBehind runs call(0) to call(callers-1) in goroutines of their own, once
+// hold has taken in a transaction the locks that stop them, and releases the
+// locks when PostgreSQL reports a backend waiting for a lock for each caller.
+// See raceBehindAGate.
+func raceBehind(t *testing.T, pool *pgxpool.Pool, callers int, hold func(tx pgx.Tx) error, call func(c int)) {
+	t.Helper()
 	gate, err := pool.Begin(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = gate.Rollback(context.Background()) }() // does nothing after the commit
-	if _, err := gate.Exec(t.Context(), "SELECT id FROM jobqueue.jobs WHERE id = ANY($1::int8[]) ORDER BY id FOR UPDATE", ids); err != nil {
+	if err := hold(gate); err != nil {
 		t.Fatal(err)
 	}
 
@@ -241,10 +266,10 @@ func raceBehindAGate(t *testing.T, pool *pgxpool.Pool, refs []store.Ref, callers
 		time.Sleep(2 * time.Millisecond)
 	}
 	if waiting < callers {
-		t.Errorf("%d of %d calls were waiting for a row lock, so they did not overlap", waiting, callers)
+		t.Errorf("%d of %d calls were waiting for a lock, so they did not overlap", waiting, callers)
 	}
 	if err := gate.Commit(t.Context()); err != nil {
-		t.Errorf("release the rows: %v", err)
+		t.Errorf("release the locks: %v", err)
 	}
 	wg.Wait()
 }
@@ -378,53 +403,58 @@ func TestPGOppositeOrderReleasesDoNotDeadlock(t *testing.T) {
 // Enqueue keeps the items in request order, because ids follow it, so two
 // batches that insert the same new keys in opposite orders can deadlock in the
 // unique index. PostgreSQL aborts one of them, and the caller must be told that
-// it may try again: the abort is a store.ErrUnavailable and nothing of the
-// batch was written.
+// it may try again: the abort is a store.ErrUnavailable, and after the retries
+// the table holds one job for each key.
+//
+// The callers are held at the same moment, as raceBehindATableLock describes,
+// and the test fails unless an abort was seen: a run in which the calls happened
+// not to overlap, or in which the abort was no longer reported, would otherwise
+// pass.
 func TestPGOppositeOrderEnqueuesDeadlockAsRetryable(t *testing.T) {
 	const (
-		callers = 6
+		callers = 2
 		rounds  = 8
 		keys    = 10
 	)
-	pool, pg := newConcurrentStore(t, callers, quickDeadlockDetection)
+	// A connection for each caller, one for the gate and one to watch.
+	pool, pg := newConcurrentStore(t, callers+2, quickDeadlockDetection)
 
 	var (
-		wg        sync.WaitGroup
 		mu        sync.Mutex
 		deadlocks int
 	)
-	for c := range callers {
-		wg.Go(func() {
-			for round := range rounds {
-				specs := make([]job.Spec, keys)
-				for k := range keys {
-					at := k
-					if c%2 == 1 {
-						at = keys - 1 - k
-					}
-					specs[at] = job.Spec{Queue: "q", Tenant: "t", IdempotencyKey: fmt.Sprintf("r%d-k%d", round, k)}
+	for round := range rounds {
+		raceBehindATableLock(t, pool, callers, func(c int) {
+			specs := make([]job.Spec, keys)
+			for k := range keys {
+				at := k
+				if c%2 == 1 {
+					at = keys - 1 - k
 				}
-				for attempt := 0; ; attempt++ {
-					_, err := pg.Enqueue(t.Context(), specs)
-					if err == nil {
-						break
-					}
-					if !errors.Is(err, store.ErrUnavailable) {
-						t.Errorf("caller %d round %d: Enqueue: %v, want nil or an error wrapping store.ErrUnavailable", c, round, err)
-						return
-					}
-					mu.Lock()
-					deadlocks++
-					mu.Unlock()
-					if attempt == 50 {
-						t.Errorf("caller %d round %d: Enqueue still fails after %d tries: %v", c, round, attempt, err)
-						return
-					}
+				specs[at] = job.Spec{Queue: "q", Tenant: "t", IdempotencyKey: fmt.Sprintf("r%d-k%d", round, k)}
+			}
+			for attempt := 0; ; attempt++ {
+				_, err := pg.Enqueue(t.Context(), specs)
+				if err == nil {
+					return
+				}
+				if !errors.Is(err, store.ErrUnavailable) {
+					t.Errorf("caller %d round %d: Enqueue: %v, want nil or an error wrapping store.ErrUnavailable", c, round, err)
+					return
+				}
+				mu.Lock()
+				deadlocks++
+				mu.Unlock()
+				if attempt == 50 {
+					t.Errorf("caller %d round %d: Enqueue still fails after %d tries: %v", c, round, attempt, err)
+					return
 				}
 			}
 		})
+		if t.Failed() {
+			return
+		}
 	}
-	wg.Wait()
 
 	var n int
 	if err := pool.QueryRow(t.Context(), "SELECT count(*) FROM jobqueue.jobs").Scan(&n); err != nil {
@@ -432,6 +462,9 @@ func TestPGOppositeOrderEnqueuesDeadlockAsRetryable(t *testing.T) {
 	}
 	if want := rounds * keys; n != want {
 		t.Errorf("the table holds %d jobs, want %d: one for each key, however many tries it took", n, want)
+	}
+	if deadlocks == 0 {
+		t.Errorf("no Enqueue was aborted in %d rounds of %d callers: the batches did not collide, so nothing was checked", rounds, callers)
 	}
 	t.Logf("%d enqueues were aborted and retried", deadlocks)
 }

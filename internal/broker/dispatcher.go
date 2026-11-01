@@ -94,6 +94,10 @@ type waiter struct {
 	// -- owned by the loop --
 
 	arrived dispatch.Mono
+	// fetchWaited is the Waited of the latest Fetch effect for the waiter: how
+	// long it had waited when its fetch was started, before the store was asked.
+	// It is what the answer reports, see deliver.
+	fetchWaited time.Duration
 	// grants are the jobs fetched for the waiter and not yet delivered.
 	grants []store.Grant
 	// fetching says a fetch for the waiter is out, or waits for the first
@@ -724,6 +728,7 @@ func (d *Dispatcher) onFetch(f dispatch.Fetch) {
 		return
 	}
 	w.fetching = true
+	w.fetchWaited = f.Waited
 	qi := d.queues[f.Queue]
 	if qi.drr != nil && len(qi.drr.Active()) == 0 {
 		qi.parked = append(qi.parked, f)
@@ -759,17 +764,23 @@ func (d *Dispatcher) launchFetch(f dispatch.Fetch, qi *queueInfo) {
 	}()
 }
 
-// deliver carries out a Deliver effect.
+// deliver carries out a Deliver effect. The answer reports the wait up to the
+// fetch that found the jobs, not up to now: a worker anchors the deadline of
+// each lease on the instant it sent the request plus that wait, which is a
+// lower bound of the lease's expiry only if the wait ends before the store
+// read its clock. The time the store's answer took to come back would put the
+// worker's deadline after the expiry. The lease_wait metric is how long the
+// caller waited for its jobs, and does count it.
 func (d *Dispatcher) deliver(now dispatch.Mono, id dispatch.WaiterID) {
 	w := d.waiterFor(id, "deliver")
 	if w == nil {
 		return
 	}
-	grants, waited := w.grants, now-w.arrived
+	grants := w.grants
 	w.grants = nil
 	d.forget(now, w)
-	d.m.leaseWait.Observe(waited.Seconds())
-	d.answer(w, outcome{ans: LeaseAnswer{Grants: grants, Waited: waited}})
+	d.m.leaseWait.Observe((now - w.arrived).Seconds())
+	d.answer(w, outcome{ans: LeaseAnswer{Grants: grants, Waited: w.fetchWaited}})
 }
 
 // respond carries out a Respond effect.
