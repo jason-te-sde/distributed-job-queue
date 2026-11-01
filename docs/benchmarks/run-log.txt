@@ -290,3 +290,28 @@ e5-soak run 1
   command: go run ./cmd/jobqueue-bench soak --duration 30m --rate 1890 --payload-bytes 64 --concurrency 64 --out e5-soak.json
   took 1804 s; 1-minute load after: 9.84
   raw output: e5-soak.json
+
+# The E5 follow-up (issue 64), 2026-10-31 and 2026-11-01. Every run below started on a fresh database, brought to the
+# current schema with jobqueuectl migrate, and had ALTER TABLE jobqueue.jobs SET (log_autovacuum_min_duration = 0) applied
+# before the load, so that the server log has every vacuum of the table. A sampler ran beside each (profile/e5-sampler.sql).
+
+e5 repeat with the sampler (the diagnosis), settings of 0001
+  started 2026-10-31 23:37:51; 1-minute load before: 2.38
+  database: created fresh for this run; code of main at b747f93
+  command: go run ./cmd/jobqueue-bench soak --duration 30m --rate 1890 --payload-bytes 64 --concurrency 64 --out e5-repeat-soak.json
+  took 1805 s; 1-minute load after: 8.31
+  raw output: profile/e5-repeat-soak.json; sampler: profile/e5-repeat-samples.jsonl; server log: profile/e5-repeat-autovacuum.log
+
+e5 with autovacuum_vacuum_cost_delay = 0 on the table
+  started 2026-11-01 00:10:24; 1-minute load before: 2.75
+  database: created fresh for this run; code of main at 89f6323; ALTER TABLE jobqueue.jobs SET (log_autovacuum_min_duration = 0, autovacuum_vacuum_cost_delay = 0)
+  command: go run ./cmd/jobqueue-bench soak --duration 30m --rate 1890 --payload-bytes 64 --concurrency 64 --out e5-cost-delay-0-soak.json
+  took 1806 s; 1-minute load after: 6.34
+  raw output: profile/e5-cost-delay-0-soak.json; sampler: profile/e5-cost-delay-0-samples.jsonl; server log: profile/e5-cost-delay-0-autovacuum.log
+
+e5 validation, 60 minutes, migration 0002 applied by jobqueuectl migrate
+  started 2026-11-01 00:46:52; 1-minute load before: 3.57 (the script waited about 20 s for it to fall to 4 or lower)
+  database: created fresh for this run; code of main at 89f6323 plus migration 0002 (branch fix/64-jobs-autovacuum)
+  command: go run ./cmd/jobqueue-bench soak --duration 60m --rate 1890 --payload-bytes 64 --concurrency 64 --out e5-soak-0002.json
+  took 3605 s; 1-minute load after: 7.15
+  raw output: e5-soak-0002.json; sampler: profile/e5-soak-0002-samples.jsonl; server log: profile/e5-soak-0002-autovacuum.log

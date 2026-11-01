@@ -2,7 +2,7 @@
 
 What was measured, how, and what it means. Every performance figure that the README or any other document quotes comes from this file, with the command that produced it and the raw output under `docs/benchmarks/`.
 
-The measurements were taken on 2026-10-31, on the code of commit `8f72a3c` (the documentation commits on top of it change no code). The harness is `jobqueue-bench`, in the `bench` directory, which is a Go module of its own; `jobqueue-bench <experiment> -h` lists the flags of each experiment.
+The measurements were taken on 2026-10-31, on the code of commit `8f72a3c` (the documentation commits on top of it change no code). The follow-up of E5, which diagnosed the table's size and tested the fix, ran on 2026-10-31 and 2026-11-01, on main at `b747f93` (the diagnosis run) and at `89f6323` (the other two), the last with migration 0002 added; those commits differ from `8f72a3c` in the deploy files, the tests and the broker's lease deadline, none of which touches the vacuum. The harness is `jobqueue-bench`, in the `bench` directory, which is a Go module of its own; `jobqueue-bench <experiment> -h` lists the flags of each experiment.
 
 ## Method
 
@@ -12,7 +12,7 @@ The measurements were taken on 2026-10-31, on the code of commit `8f72a3c` (the 
 - **Open-loop load.** The intended send time of job `k` is `start + k / rate`, and the latency of a job is measured **from its intended time**, never from the actual send. A system that stalls then shows the stall in every job that was due during it. A closed loop, which waits for each answer before sending the next, would hide it (this is coordinated omission).
 - **HDR histograms.** Latencies are recorded in an HDR histogram, in microseconds, from 1 µs to 1 h with three significant digits, and reported as p50, p90, p99, p99.9 and max.
 - **Sustained, and the maximum.** A rate is sustained if the p99 enqueue-to-start latency stays under 1 s and the backlog is finished within 2 s of the end of the load. `--find-max` probes the low end of a range, then bisects between the highest rate that was sustained and the lowest that was not, and reports the highest rate that passed a probe. It then measures at 50% and 80% of that rate. A probe is one run of the load for `--duration`, so the maximum is the highest rate that passed once: near the limit, the same rate passes in one run and fails in the next, and the maximum is an optimistic figure, not a rate that holds every time. The tables below show each run for that reason.
-- **Repetition.** Each command runs three times, one after the other. The tables show the three runs ordered by their maximum and labelled min, median and max, so that every figure in a row comes from one run; the raw JSON of all three is committed. **E5 ran once, at 30 minutes:** a soak is a time series, and three 30-minute runs would add an hour without adding a new kind of evidence, so the drift and the table size are judged from its series.
+- **Repetition.** Each command runs three times, one after the other. The tables show the three runs ordered by their maximum and labelled min, median and max, so that every figure in a row comes from one run; the raw JSON of all three is committed. **E5 ran once per configuration:** a soak is a time series, and three 30-minute runs would add an hour without adding a new kind of evidence, so the drift and the table size are judged from each series. It ran four times in all, each on a fresh database: the first run, a repeat with a sampler, the same with one table setting changed, and a 60-minute validation of the fix.
 - **Brokers and workers** run in the benchmark process (`internal/broker` in-process) over a real network connection to a real PostgreSQL, with empty handlers unless an experiment says otherwise. One benchmark process holds the brokers, the workers and the load generator, and PostgreSQL runs beside it on the same eight cores.
 - **CI numbers are smoke only.** CI runs a short benchmark to catch a harness that no longer works. Its figures are never quoted.
 
@@ -26,12 +26,12 @@ In the commands, `jobqueue-bench` stands for `go run ./cmd/jobqueue-bench`, run 
 | E2 | What does each optimisation buy? Batched leases (1 vs 64 jobs per call), coalesced acknowledgements (off vs the 2 ms or 128 window), `NOTIFY` against polling alone (the latency of an enqueue on an idle queue) | `jobqueue-bench ablate --what batch --find-max --lo 500 --hi 8000 --steps 5 --duration 30s --payload-bytes 64 --concurrency 64`, the same with `--what coalesce`; `jobqueue-bench ablate --what notify --rate 20 --duration 60s --payload-bytes 64 --concurrency 64` (the brokers of the second variant start with `--disable-listen`) |
 | E3 | How long does a small tenant wait while another floods the queue, under first-come-first-served and under deficit round robin? Tenant A enqueues 100,000 jobs, tenant B 10 per second; each handler takes `--service-time` (2 ms by default), which sets the capacity that the flood exceeds | `jobqueue-bench noisy --scheduler fifo`, `jobqueue-bench noisy --scheduler drr` (defaults: 100,000 flood jobs, 10 jobs per second for B for 30 s, 2 ms per job, 2 workers with 4 handlers each, 64-byte payloads), then `jobqueue-bench plot --in noisy-fifo.json --in noisy-drr.json --out docs/benchmarks/noisy-neighbor.svg` on the median runs |
 | E4 | How long until the jobs of a killed worker run again, against the bound TTL + reap interval + first backoff (up to 1 s) + dispatch latency? How long is the error window that workers see when a broker dies? | `jobqueue-bench recovery --kill worker` (the worker holds 100 leases, TTL 30 s, margin 3 s), `jobqueue-bench recovery --kill broker` (3 brokers, 200 jobs per second for 20 s, one broker cut off at 10 s) |
-| E5 | Does throughput drift, and does the size of `jobqueue.jobs` plateau, over 30 minutes at half the maximum rate, with pruning on? | `jobqueue-bench soak --duration 30m --rate 1890 --payload-bytes 64 --concurrency 64`: 1890 is half of E1's median maximum for one broker. Finished jobs are kept for 5 minutes instead of the production 24 hours and pruned every minute, so that the pruner reaches its steady state inside the run |
+| E5 | Does throughput drift, and does the size of `jobqueue.jobs` plateau, over a long run at half the maximum rate, with pruning on? | `jobqueue-bench soak --duration 30m --rate 1890 --payload-bytes 64 --concurrency 64` (the first run and its diagnosis); with migration 0002, `jobqueue-bench soak --duration 60m --rate 1890 --payload-bytes 64 --concurrency 64` (the validation). 1890 is half of E1's median maximum for one broker. Finished jobs are kept for 5 minutes instead of the production 24 hours and pruned every minute, so that the pruner reaches its steady state inside the run |
 | E6 | How does it compare with River on the same machine and PostgreSQL? River runs as a library with no network hop, so this is a reference point and not a comparison of like with like | `jobqueue-bench river --find-max --lo 500 --hi 20000 --steps 6 --duration 30s --payload-bytes 64` (River v0.50.0, `MaxWorkers` 256, `FetchCooldown` 1 ms; River's own default is 100 ms) |
 
 E3 is the experiment behind the noisy-neighbour graph: the empirical distribution of tenant B's wait under the two schedulers.
 
-E5 also tests a design choice. The table's `fillfactor` and autovacuum settings in `internal/store/pgstore/migrate/sql/0001_init.sql` are meant to keep its size level under churn. If the table keeps growing, the settings change in a new migration, with the reason, and the soak is run again.
+E5 also tests a design choice. The table's `fillfactor` and autovacuum settings in `internal/store/pgstore/migrate/sql/0001_init.sql` are meant to keep its size level under churn. If the table keeps growing, the settings change in a new migration, with the reason, and the soak is run again. It did keep growing, and the settings changed: see E5.
 
 ## Results
 
@@ -43,7 +43,7 @@ In the tables, a rate marked with `*` is a phase that did not meet the sustained
 | E2 | Batched leases: 1.6 times the rate (4,250 against 2,609 jobs per second with one job per call). Coalesced acknowledgements: 1.4 times (3,312 against 2,375). `NOTIFY`: a job on an idle queue starts after 5.4 ms at p50, against 498 ms with polling alone |
 | E3 | Tenant B's wait behind a flood of 100,000 jobs: p99 28.5 s under FIFO, 18 ms under deficit round robin (p50 15.4 s against 2.6 ms) |
 | E4 | A killed worker's 100 jobs all started again about 32 s after the kill (31.96 to 31.97 s; bound 33 s, TTL 30 s). A broker cut off under load: 1 to 3 failed `Lease` calls within under a millisecond, and 4,000 of 4,000 jobs started |
-| E5 | 30 minutes at 1,890 jobs per second, run once: throughput did not drift (+0.17%), but the table did not plateau: it was level at 433 to 442 MiB from minute 15 to 27, then grew to 569 MiB at minute 30 and was still growing |
+| E5 | First run, 30 minutes at 1,890 jobs per second: throughput did not drift (+0.17%), but the table did not plateau. The cause was autovacuum's cost throttle, which made each vacuum of the jobs table take 47 s at the median of the 60 s it has. Migration 0002 removes the table's cost delay: a vacuum then takes 0.69 s at the median, and a 60-minute validation held the table at 367.6 MiB at minute 30 and 376.6 MiB at minute 60 (+2.45%), which meets the criterion fixed before it |
 | E6 | River in library mode: 10,250 jobs per second (10,250 to 11,469), 2.7 times one broker |
 
 ### E1: throughput and latency
@@ -139,9 +139,9 @@ Cutting a broker off, one of three, while 200 jobs per second flow. The harness 
 
 Between 1 and 3 `Lease` calls failed, all within a window of under a millisecond that began 0.5 to 0.8 ms after the cut, and none failed before it. No acknowledgement or heartbeat failed, the load went on through the other two brokers, and every job of the load (4,000 of 4,000) started, none of them twice. Because the harness cuts connections instead of crashing the process, this measures how fast clients move to another broker; what a broker that dies in the middle of a transaction leaves behind is not measured here.
 
-### E5: a half-hour soak
+### E5: a soak, the size of the jobs table, and the setting that fixed it
 
-The soak offered 1,890 jobs per second for 30 minutes, keeping finished jobs for 5 minutes and pruning every minute. It ran once (see Method). All 3,402,000 jobs that were sent started, none of them twice.
+The soak offered 1,890 jobs per second for 30 minutes, keeping finished jobs for 5 minutes and pruning every minute. This is the first run (`e5-soak.json`), with the settings of `0001_init.sql`. All 3,402,000 jobs that were sent started, none of them twice.
 
 **Throughput did not drift.** The mean of the first five one-minute samples was 1,886.8 jobs per second and of the last five 1,890.0, which is +0.17%.
 
@@ -149,7 +149,7 @@ The soak offered 1,890 jobs per second for 30 minutes, keeping finished jobs for
 
 **The server checkpointed on WAL volume throughout.** With the default `max_wal_size` of 1 GB it started a checkpoint every 70 to 80 seconds (`checkpoint starting: wal` in the server log). That is a candidate for the intervals whose p99 is a second or more (minutes 16 and 21); it was not shown to be the cause.
 
-**Verdict: the size of `jobqueue.jobs` did not plateau in this run**, so this soak does not validate the `fillfactor` and autovacuum settings of `0001_init.sql`. The question is open. No migration was written and the soak was not run again.
+**Verdict of the first run: the size of `jobqueue.jobs` did not plateau**, so this run does not validate the `fillfactor` and autovacuum settings of `0001_init.sql`. What follows is the diagnosis of why, the setting that fixed it, and a 60-minute run that tests the fix.
 
 | Minute | Jobs/s | p50 | p99 | Table + indexes (MiB) | Rows | Dead tuples |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -183,6 +183,81 @@ The soak offered 1,890 jobs per second for 30 minutes, keeping finished jobs for
 | 28 | 1,883 | 97 ms | 635 ms | 451.0 | 632,369 | 586,177 |
 | 29 | 1,897 | 75 ms | 691 ms | 525.8 | 614,249 | 945,895 |
 | 30 | 1,891 | 28 ms | 581 ms | 569.3 | 628,950 | 571,943 |
+
+**Diagnosis.** The same command was run again on a fresh database with a sampler (`profile/e5-sampler.sql`: every 5 s the progress of the vacuum of `jobqueue.jobs`, `pg_stat_user_tables`, the size of each index and the wait event of the autovacuum worker) and with `log_autovacuum_min_duration = 0` set on the table with `ALTER TABLE`, so that the server log has every vacuum of it (`profile/e5-repeat-*`). The break-away of the first run did not repeat inside 30 minutes: table plus indexes was 424 to 438 MiB from minute 15 to 30, with the heap at 253 MiB at minute 15 and 241 MiB at minute 30. What the run showed, for the three questions that were asked:
+
+- **Does a vacuum take longer than the time it has?** It comes close. The table had 29 vacuums. The first took 0.1 s, one at about minute 4 took 20.6 s, the median was 47 s, and the last 18 took 42 to 60 s, the last of them 60.4 s. A worker can start in a database about once per `autovacuum_naptime`, which is 60 s on this server, and consecutive vacuums ended a median of 62 s apart (75 s at most): a vacuum as long as the naptime has no time to spare, and the worker was busy in 63% of the 5-second samples (226 of 361). When a vacuum takes longer than the time between starts, dead tuples pile up faster than it removes them, the next vacuum is longer still, and the heap grows. The repeat grew by 10.7 MiB in its last minute, when its vacuum took 60.4 s, and the first run grew by 127 MiB in minutes 28 to 30. The first run had no sampler and no vacuum log, so the second is what fits it and not something that was seen.
+- **Is it bound by the cost throttle?** Yes. In 219 of the 226 samples in which a vacuum of the table was running (97%) the worker was waiting in `Timeout/VacuumDelay`, and a vacuum used about 1 s of CPU (0.4 s user, 0.6 s system) in its 50 s. The cost count of a vacuum (1.0 to 1.2 million units, with a 2 ms sleep for every 200) allows 10 to 12 s of sleeping, so most of the time went into waiting to be scheduled again after the sleeps on a machine with 14 to 16 busy backends, which I did not measure directly. The server settings are in `profile/e5-vacuum-settings.txt`.
+- **Is one index growing for a reason no setting fixes?** One is, but it is not what broke away. `jobs_idempotency` is the largest index, 107.5 MiB at minute 15 and 122.9 MiB at minute 30 (28% of the total), and it grew about 1 MiB a minute at the end; every vacuum reports it with no deleted and no reusable pages. The keys that the SDK makes for enqueues are random, so deleting finished rows leaves its pages part empty and nothing frees one. The other indexes were level, and so was the heap apart from its truncations. That growth belongs to the index and not to the pace of the vacuum: in the 60-minute run below it was 95.0 MiB at minute 30 and 98.9 MiB at minute 60.
+
+**The setting.** `ALTER TABLE jobqueue.jobs SET (autovacuum_vacuum_cost_delay = 0)` on a fresh database, with nothing else changed, and the same soak (`profile/e5-cost-delay-0-*`). It had 31 vacuums, with a median of 0.69 s and a longest of 6.0 s; the worker was busy in 4 of 361 samples; the dead tuples had a median of 184,000 against 374,500; and table plus indexes was 367 MiB at minute 30 against 438 MiB, and 383 MiB at its largest against 438 MiB. The delay rather than a higher `autovacuum_vacuum_cost_limit`, because the time was spent sleeping (97% of the samples): a higher limit makes the worker sleep less often, but each sleep still waits for the scheduler, and the limit that is high enough depends on the machine, while without the delay a vacuum takes what its reads and writes take. A higher limit was not run. **What it costs:** an unthrottled vacuum dirties up to about 50,000 pages and writes up to about 180 MB of WAL in about a second, and in this 30-minute run the p99 of the load was 1.8 to 6.3 s in six of the eight minutes from minute 13 to 20 (the p99 of the whole run 2.3 s against 0.5 s for the repeat, and 6 minutes with a p99 above 1 s against 1). The cause of those minutes was not found. Migration `0002_jobs_autovacuum_cost_delay.sql` sets this one parameter on the jobs table, and the schema version is now 2.
+
+**Validation: 60 minutes, with migration 0002.** The same command with `--duration 60m`, run from the tree that has the migration, on a fresh database that `jobqueuectl migrate` brought to version 2 (the only setting added by hand was `log_autovacuum_min_duration = 0`, for the log; the table's options in the result show both). The criterion was fixed before the run: after minute 10, the table-plus-indexes size at the end within 5% of its size at minute 30, and no sample after minute 30 more than 10% above the size at minute 30.
+
+**It passed.** Table plus indexes was 367.6 MiB at minute 30 and 376.6 MiB at minute 60, which is +2.45% (the limit is 5%), and the largest size after minute 30 was the last one, +2.45% (the limit is 10%); the 5-second sampler gives the same, +2.46%. The heap was 207.0 MiB at minute 30 and 211.9 MiB at minute 60, `jobs_idempotency` 95.0 and 98.9 MiB, and the other indexes were level (`jobs_pkey` 24.0 and 24.1 MiB). There were 61 vacuums, with a median of 0.69 s and a longest of 5.9 s; the worker was busy in 2 of 721 samples. Throughput did not drift (+0.17%), and all 6,804,000 jobs that were sent started, none of them twice. The tail over the whole run was p50 1.2 ms, p99 367 ms, p99.9 1.9 s and max 3.5 s, and 3 of the 60 minutes had a p99 above 1 s (minutes 29, 57 and 59: 1.07 s, 1.97 s and 3.23 s). The minutes of seconds-long p99 that the 30-minute run with the setting had in the middle did not come back. The index `jobs_idempotency` is still growing slowly, and 60 minutes is too short to say where it settles; the criterion was about the size at the end, and it was met.
+
+| Minute | Jobs/s | p50 | p99 | Table + indexes (MiB) | Rows | Dead tuples |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1,874 | 0.94 ms | 12 ms | 72.8 | 112,457 | 193,422 |
+| 2 | 1,890 | 0.98 ms | 8.3 ms | 117.9 | 225,856 | 191,978 |
+| 3 | 1,890 | 0.96 ms | 21 ms | 166.8 | 339,258 | 191,274 |
+| 4 | 1,890 | 0.96 ms | 44 ms | 214.5 | 452,657 | 192,934 |
+| 5 | 1,890 | 1.00 ms | 22 ms | 263.2 | 566,056 | 192,536 |
+| 6 | 1,890 | 1.0 ms | 25 ms | 311.5 | 679,455 | 188,335 |
+| 7 | 1,890 | 1.0 ms | 88 ms | 325.6 | 674,245 | 190,374 |
+| 8 | 1,890 | 1.1 ms | 793 ms | 328.0 | 672,702 | 189,492 |
+| 9 | 1,890 | 1.0 ms | 117 ms | 330.0 | 673,806 | 189,904 |
+| 10 | 1,890 | 1.1 ms | 197 ms | 336.3 | 673,368 | 190,118 |
+| 11 | 1,890 | 1.0 ms | 27 ms | 338.4 | 673,714 | 191,011 |
+| 12 | 1,890 | 1.0 ms | 33 ms | 339.1 | 673,833 | 190,217 |
+| 13 | 1,890 | 1.0 ms | 60 ms | 339.9 | 671,098 | 188,582 |
+| 14 | 1,890 | 1.1 ms | 85 ms | 340.7 | 672,069 | 190,513 |
+| 15 | 1,890 | 1.1 ms | 56 ms | 341.5 | 671,031 | 189,422 |
+| 16 | 1,890 | 1.1 ms | 354 ms | 342.2 | 671,083 | 188,547 |
+| 17 | 1,890 | 1.1 ms | 38 ms | 343.4 | 672,304 | 189,282 |
+| 18 | 1,890 | 1.1 ms | 57 ms | 338.5 | 672,272 | 193,107 |
+| 19 | 1,890 | 1.5 ms | 881 ms | 343.0 | 651,191 | 272,990 |
+| 20 | 1,890 | 1.6 ms | 129 ms | 362.1 | 644,906 | 263,376 |
+| 21 | 1,890 | 1.2 ms | 88 ms | 371.2 | 658,841 | 241,159 |
+| 22 | 1,890 | 1.1 ms | 23 ms | 372.3 | 672,514 | 189,105 |
+| 23 | 1,890 | 1.1 ms | 49 ms | 372.4 | 670,886 | 190,362 |
+| 24 | 1,890 | 1.2 ms | 34 ms | 372.5 | 670,485 | 190,560 |
+| 25 | 1,890 | 1.2 ms | 108 ms | 372.7 | 666,169 | 190,643 |
+| 26 | 1,890 | 1.2 ms | 62 ms | 372.9 | 668,493 | 192,503 |
+| 27 | 1,890 | 1.2 ms | 40 ms | 373.1 | 664,795 | 189,551 |
+| 28 | 1,886 | 3.0 ms | 589 ms | 374.9 | 671,518 | 187,487 |
+| 29 | 1,894 | 1.2 ms | 1.07 s | 367.4 | 664,126 | 192,881 |
+| 30 | 1,890 | 1.2 ms | 91 ms | 367.6 | 672,381 | 188,784 |
+| 31 | 1,890 | 1.3 ms | 213 ms | 367.7 | 663,209 | 188,823 |
+| 32 | 1,890 | 1.2 ms | 148 ms | 367.8 | 669,559 | 194,293 |
+| 33 | 1,890 | 1.4 ms | 296 ms | 368.1 | 653,550 | 240,372 |
+| 34 | 1,890 | 1.3 ms | 226 ms | 369.1 | 658,369 | 249,420 |
+| 35 | 1,890 | 1.2 ms | 61 ms | 370.0 | 671,900 | 187,418 |
+| 36 | 1,890 | 1.3 ms | 579 ms | 370.1 | 667,652 | 192,154 |
+| 37 | 1,890 | 1.3 ms | 82 ms | 370.2 | 668,850 | 188,095 |
+| 38 | 1,890 | 1.3 ms | 248 ms | 370.4 | 664,801 | 187,115 |
+| 39 | 1,890 | 1.2 ms | 436 ms | 370.5 | 667,821 | 188,984 |
+| 40 | 1,890 | 1.3 ms | 238 ms | 370.6 | 664,505 | 190,082 |
+| 41 | 1,890 | 1.2 ms | 83 ms | 370.7 | 669,801 | 187,619 |
+| 42 | 1,890 | 1.2 ms | 85 ms | 370.8 | 665,228 | 188,598 |
+| 43 | 1,890 | 1.2 ms | 105 ms | 370.8 | 665,144 | 188,008 |
+| 44 | 1,890 | 1.2 ms | 95 ms | 371.0 | 669,148 | 187,281 |
+| 45 | 1,890 | 1.2 ms | 148 ms | 371.0 | 663,755 | 188,099 |
+| 46 | 1,890 | 1.2 ms | 42 ms | 371.1 | 663,539 | 189,189 |
+| 47 | 1,890 | 1.3 ms | 46 ms | 371.2 | 662,440 | 187,982 |
+| 48 | 1,890 | 1.2 ms | 99 ms | 371.2 | 663,704 | 186,633 |
+| 49 | 1,890 | 1.2 ms | 201 ms | 371.3 | 667,646 | 187,038 |
+| 50 | 1,890 | 1.3 ms | 92 ms | 371.4 | 665,304 | 185,385 |
+| 51 | 1,890 | 1.2 ms | 147 ms | 371.4 | 666,223 | 187,211 |
+| 52 | 1,890 | 1.2 ms | 64 ms | 371.5 | 661,983 | 186,922 |
+| 53 | 1,890 | 1.2 ms | 73 ms | 371.6 | 665,826 | 187,492 |
+| 54 | 1,890 | 1.2 ms | 34 ms | 371.6 | 662,951 | 186,695 |
+| 55 | 1,890 | 1.2 ms | 108 ms | 371.6 | 666,629 | 188,538 |
+| 56 | 1,890 | 1.2 ms | 48 ms | 371.7 | 664,299 | 190,935 |
+| 57 | 1,890 | 1.3 ms | 1.97 s | 371.7 | 664,962 | 186,086 |
+| 58 | 1,890 | 1.3 ms | 277 ms | 371.9 | 658,862 | 243,562 |
+| 59 | 1,890 | 1.4 ms | 3.23 s | 372.4 | 655,178 | 272,113 |
+| 60 | 1,890 | 1.3 ms | 125 ms | 376.6 | 668,398 | 188,892 |
 
 ### E6: River as a reference
 
@@ -218,7 +293,7 @@ With the notification the rate stops growing at four clients, at about 15,000 co
 
 ### Duplicate starts
 
-Every result carries `duplicate_starts`, the number of times a job that had already started was started again. Across the 299 results in `docs/benchmarks/` it is 0 in 293 and non-zero in six. All six are probes that did not meet the sustained criterion, at rates above the maximum found for that configuration, and each was far behind: it delivered 904 to 3,147 jobs per second against 4,250 to 10,050 offered, and its longest wait was 38 to 111 s. None is a sustained probe, a 50% or 80% phase, an E3, E4 or E2 notify run, or the soak (3,402,000 jobs sent, 3,402,000 started, none twice). Below saturation it was 0 everywhere.
+Every result carries `duplicate_starts`, the number of times a job that had already started was started again. Across the 422 results in `docs/benchmarks/` it is 0 in 416 and non-zero in six. All six are probes that did not meet the sustained criterion, at rates above the maximum found for that configuration, and each was far behind: it delivered 904 to 3,147 jobs per second against 4,250 to 10,050 offered, and its longest wait was 38 to 111 s. None is a sustained probe, a 50% or 80% phase, an E3, E4 or E2 notify run, or any of the four soaks (3,402,000 jobs sent and started in each 30-minute run, 6,804,000 in the 60-minute run, none twice). Below saturation it was 0 everywhere.
 
 The six are `e1-3brokers-run1.json` (6,359 jobs per second offered, 1,483 duplicates), `e1-3brokers-run3.json` (4,484, 22,975), `e2-coalesce-run2.json` (`ack_batch_1` at 4,250, 58,978), `exploratory/e1-wide-range-reused-db-1broker-run1.json` (7,562, 28,784), and two fixed-rate profile runs at 10,050 (`profile/fixed-rate-no-enqueue-notify-10050.json`, 67,103; `profile/reused-vs-fresh-overload-between.json`, 46,314).
 
@@ -252,9 +327,9 @@ Everything under `docs/benchmarks/`:
 - `e2-batch-run*.json`, `e2-coalesce-run*.json`, `e2-notify-run*.json`: E2.
 - `e3-fifo-run*.json`, `e3-drr-run*.json`, `noisy-neighbor.svg`: E3 and its graph.
 - `e4-kill-worker-run*.json`, `e4-kill-broker-run*.json`: E4.
-- `e5-soak.json`: E5, one line per minute and a summary.
+- `e5-soak.json`: the first run of E5, one line per minute and a summary. `e5-soak-0002.json`: the 60-minute validation with migration 0002.
 - `e6-river-run*.json`: E6.
 - `postgresql-settings.txt`: the machine and the server settings.
 - `run-log.txt`: every run with its command as run, the time it started and took, and the 1-minute load average before and after it.
-- `profile/`: the notify-lock profile (the statement, the scripts, the wait events, the patch of the scratch copy, and the fixed-rate runs).
+- `profile/`: the notify-lock profile (the statement, the scripts, the wait events, the patch of the scratch copy, and the fixed-rate runs), and for the E5 follow-up the sampler's query, the sampler's output of the three runs (`e5-*-samples.jsonl`, one line every 5 s), the autovacuum and checkpoint entries of the server log (`e5-*-autovacuum.log`), the soak results of the repeat and of the run with the setting (`e5-repeat-soak.json`, `e5-cost-delay-0-soak.json`) and the server's vacuum settings.
 - `exploratory/`: the first series of E1, which is not used (see E1).

@@ -1,0 +1,22 @@
+# The server's autovacuum and vacuum cost settings during the E5 follow-up runs (SELECT name, setting FROM pg_settings), unchanged from the first run.
+autovacuum_analyze_scale_factor=0.1
+autovacuum_analyze_threshold=50
+autovacuum_freeze_max_age=200000000
+autovacuum_max_workers=3
+autovacuum_multixact_freeze_max_age=400000000
+autovacuum_naptime=60s
+autovacuum_vacuum_cost_delay=2ms
+autovacuum_vacuum_cost_limit=-1
+autovacuum_vacuum_insert_scale_factor=0.2
+autovacuum_vacuum_insert_threshold=1000
+autovacuum_vacuum_scale_factor=0.2
+autovacuum_vacuum_threshold=50
+autovacuum_work_mem=-1kB
+autovacuum=on
+log_autovacuum_min_duration=600000ms
+maintenance_work_mem=65536kB
+vacuum_cost_delay=0ms
+vacuum_cost_limit=200
+vacuum_cost_page_dirty=20
+vacuum_cost_page_hit=1
+vacuum_cost_page_miss=2

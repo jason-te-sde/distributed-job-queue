@@ -16,7 +16,7 @@ Contents: [Running it](#running-it), [The symptoms](#the-symptoms), [Reference](
 ### Migrate before you start
 
 ```sh
-jobqueuectl migrate --database-url "$JOBQUEUE_DATABASE_URL"     # prints: applied=1 version=1
+jobqueuectl migrate --database-url "$JOBQUEUE_DATABASE_URL"     # prints: applied=2 version=2
 ```
 
 Migrations are forward-only and take an advisory lock, so running them from several places at once is safe. A broker checks the schema version when it starts and exits if it differs, with `database schema version X, this binary needs Y: run jobqueuectl migrate`. The Helm chart runs the migration as a pre-install and pre-upgrade hook.
@@ -159,7 +159,7 @@ How to read `last_error`:
 
 ### The table is bloating
 
-**What it means.** `jobqueue.jobs` churns: every job leaves dead row versions when it is leased, heartbeated and finished, and finished rows stay for their retention. The table has `fillfactor = 85` and tighter autovacuum settings, so its size should level off at about the retention times the finish rate. A size that keeps climbing past that means vacuum is not keeping up, or something holds it back, or pruning is not running.
+**What it means.** `jobqueue.jobs` churns: every job leaves dead row versions when it is leased, heartbeated and finished, and finished rows stay for their retention. The table has `fillfactor = 85`, tighter autovacuum settings and no autovacuum cost delay, so its size should level off at about the retention times the finish rate. A size that keeps climbing past that means vacuum is not keeping up, or something holds it back, or pruning is not running.
 
 **Confirm.**
 
@@ -183,7 +183,7 @@ Then, in this order:
    ```
 4. *Is autovacuum starved?* `last_autovacuum` is old or null while `n_dead_tup` grows: check `autovacuum_max_workers`, `autovacuum_vacuum_cost_limit` and whether other large tables occupy the workers.
 
-**What to do.** End or fix the long transaction or the slot. Give autovacuum more room (more workers, a higher cost limit). Shorten `--retention-done` if you do not need a day of history. Do not `VACUUM FULL` a live queue: it takes an exclusive lock on the table. If you must reclaim space, `pg_repack` or a maintenance window are the options. The settings of the table and the reasons for them are in `internal/store/pgstore/migrate/sql/0001_init.sql`, and the soak experiment in [docs/benchmarks.md](benchmarks.md) measures whether the size plateaus.
+**What to do.** End or fix the long transaction or the slot. Give autovacuum more room (more workers, a higher cost limit). Shorten `--retention-done` if you do not need a day of history. Do not `VACUUM FULL` a live queue: it takes an exclusive lock on the table. If you must reclaim space, `pg_repack` or a maintenance window are the options. The settings of the table and the reasons for them are in `internal/store/pgstore/migrate/sql/0001_init.sql` and `0002_jobs_autovacuum_cost_delay.sql`, and the soak experiment in [docs/benchmarks.md](benchmarks.md) measures whether the size plateaus.
 
 ### A broker is not ready
 

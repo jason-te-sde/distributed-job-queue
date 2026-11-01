@@ -22,7 +22,7 @@ export JOBQUEUE_DATABASE_URL='postgres://localhost:5432/jobqueue?sslmode=disable
 
 go build -o bin/ ./cmd/jobqueue-server ./cmd/jobqueuectl
 
-bin/jobqueuectl migrate        # applied=1 version=1
+bin/jobqueuectl migrate        # applied=2 version=2
 bin/jobqueue-server --grpc-addr 127.0.0.1:7070 --database-url "$JOBQUEUE_DATABASE_URL"
 ```
 
@@ -171,7 +171,7 @@ Throughput, enqueue-to-start latency, the noisy-neighbour wait with and without 
 - **What the optimisations buy.** Batched leases raise the sustained rate by a factor of 1.6 and coalesced acknowledgements by 1.4. With `NOTIFY`, a job on an idle queue starts after 5.4 ms at p50, against 498 ms with polling alone.
 - **A noisy neighbour.** While another tenant floods the queue with 100,000 jobs, a small tenant's p99 wait is 18 ms under deficit round robin and 28.5 s under first-come-first-served (p50: 2.6 ms and 15.4 s).
 - **Recovery.** The 100 jobs of a killed worker all ran again about 32 s after the kill, inside the bound of 33 s for a lease TTL of 30 s. Cutting one of three brokers off under load cost one to three failed calls and no job.
-- **A half-hour soak.** At 1,890 jobs per second throughput did not drift (+0.17%), but the size of the jobs table did not plateau: it was level at 433 to 442 MiB from minute 15 to 27 and then grew to 569 MiB by minute 30. The autovacuum and fillfactor settings of the table are not validated by this run yet.
+- **A soak.** At 1,890 jobs per second throughput did not drift (+0.17%). The first half-hour run, with the table's original settings, did not level off: autovacuum's cost throttle made a vacuum of the jobs table take 47 s at the median of the 60 s it has, and the table grew from 442 MiB to 569 MiB in the last three minutes. With the throttle's delay removed (migration 0002) a vacuum takes 0.69 s at the median, and a 60-minute run held the table at 367.6 MiB at minute 30 and 376.6 MiB at minute 60 (+2.45%).
 - **River as a reference.** River, run as a library with no network hop, sustained 10,250 jobs per second (10,250 to 11,469), 2.7 times one broker.
 
 ![Empirical distribution of tenant B's wait behind a flood of 100,000 jobs, under FIFO and under deficit round robin](docs/benchmarks/noisy-neighbor.svg)
