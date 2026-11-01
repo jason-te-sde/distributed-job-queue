@@ -232,8 +232,16 @@ func ping(t *testing.T, conn net.Conn, payload []byte, within time.Duration) boo
 // any partition, the way a pool or a channel that has been up for a while is
 // connected: it reads the server's first bytes, which are its SETTINGS frame,
 // sends the client's preface and checks that the broker answers a PING.
+//
+// It first waits until the proxy carries no toxic. The end of an earlier
+// partition removes its two toxics one after the other, and the first removal
+// already closes the connections that went through the cut, so a caller that
+// saw its connection close may come here while the second toxic is still on:
+// a connection made then would lose the server's SETTINGS to it and be closed
+// by its removal.
 func establishedConnection(t *testing.T, c *Cluster) net.Conn {
 	t.Helper()
+	waitNoToxics(t, c, BrokerProxy(0), 5*time.Second)
 	conn, err := net.DialTimeout("tcp", c.BrokerAddrs()[0], 5*time.Second)
 	if err != nil {
 		t.Fatalf("connect to the proxy: %v", err)
@@ -252,6 +260,32 @@ func establishedConnection(t *testing.T, c *Cluster) net.Conn {
 		t.Fatal("before any partition the broker did not answer a PING")
 	}
 	return conn
+}
+
+// waitNoToxics waits until the proxy named proxy carries no toxic, and fails
+// the test if it still does after within.
+func waitNoToxics(t *testing.T, c *Cluster, proxy string, within time.Duration) {
+	t.Helper()
+	c.mu.Lock()
+	p, ok := c.proxies[proxy]
+	c.mu.Unlock()
+	if !ok {
+		t.Fatalf("no proxy %q", proxy)
+	}
+	deadline := time.Now().Add(within)
+	for {
+		toxics, err := p.Toxics()
+		if err != nil {
+			t.Fatalf("list the toxics of %s: %v", proxy, err)
+		}
+		if len(toxics) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s still carries %d toxic(s) %s after the partition ended", proxy, len(toxics), within)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // requireSilent checks that nothing comes back through a partition: a PING that
