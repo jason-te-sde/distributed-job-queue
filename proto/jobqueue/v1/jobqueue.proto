@@ -88,6 +88,12 @@ message LeasedJob {
 
 message LeaseResponse {
   repeated LeasedJob jobs = 1;
+  // How long the broker held the request before it asked the store for the
+  // jobs, on the broker's monotonic clock. The store reads its clock after
+  // that, so the instant the client sent the request plus waited plus a job's
+  // remaining is never later than the lease's expiry, however long the answer
+  // took to come back. A client counts the deadline of each lease from it.
+  // When jobs is empty, it is how long the broker held the request in all.
   google.protobuf.Duration waited = 2;
 }
 

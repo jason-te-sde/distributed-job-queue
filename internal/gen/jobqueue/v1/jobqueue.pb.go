@@ -599,9 +599,15 @@ func (x *LeasedJob) GetEnqueuedAt() *timestamppb.Timestamp {
 }
 
 type LeaseResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Jobs          []*LeasedJob           `protobuf:"bytes,1,rep,name=jobs,proto3" json:"jobs,omitempty"`
-	Waited        *durationpb.Duration   `protobuf:"bytes,2,opt,name=waited,proto3" json:"waited,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Jobs  []*LeasedJob           `protobuf:"bytes,1,rep,name=jobs,proto3" json:"jobs,omitempty"`
+	// How long the broker held the request before it asked the store for the
+	// jobs, on the broker's monotonic clock. The store reads its clock after
+	// that, so the instant the client sent the request plus waited plus a job's
+	// remaining is never later than the lease's expiry, however long the answer
+	// took to come back. A client counts the deadline of each lease from it.
+	// When jobs is empty, it is how long the broker held the request in all.
+	Waited        *durationpb.Duration `protobuf:"bytes,2,opt,name=waited,proto3" json:"waited,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

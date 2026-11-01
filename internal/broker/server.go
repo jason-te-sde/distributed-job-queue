@@ -53,7 +53,10 @@ type LeaseCall struct {
 type LeaseAnswer struct {
 	// Grants are the jobs leased, possibly none.
 	Grants []store.Grant
-	// Waited is how long the call waited.
+	// Waited is how long the call waited before the store was asked for its
+	// jobs, which ends before the store read its clock; see
+	// jobqueuev1.LeaseResponse.Waited. An answer with no jobs reports how long
+	// the call waited in all.
 	Waited time.Duration
 }
 
