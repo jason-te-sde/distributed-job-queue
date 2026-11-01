@@ -363,6 +363,53 @@ func TestDispatcherAnswersWithTheWaitUpToTheFetch(t *testing.T) {
 	}
 }
 
+func TestDispatcherAnswersAReparkedWaiterWithTheWaitUpToItsLaterFetch(t *testing.T) {
+	// The test above has the waiter served by the fetch that its arrival
+	// starts, which has waited nothing. Here the first fetch finds no job and
+	// takes slowReturn to say so, so the waiter is parked again having waited at
+	// least that long. A notification then starts a second fetch, which finds the
+	// job. The answer must report the wait up to that second fetch: the wait up
+	// to the first, or none, would put the worker's deadline early by the whole
+	// time the waiter was parked, and the worker would give the lease up sooner
+	// than it must.
+	var ss *slowReturnStore
+	e := newDispEnv(t, DispatcherConfig{}, func(s store.Store) store.Store {
+		ss = &slowReturnStore{Store: s, delay: slowReturn}
+		return ss
+	})
+	sentAt := time.Now()
+	res := e.leaseAsync("q", 1, 30*time.Second)
+	e.waitFetches("q", fetchEmpty, 1)
+	firstAsked := ss.leaseBegan() // the waiter arrived no later than this
+	e.add("q", "t", 1)
+	notifiedAt := time.Now() // the second fetch starts no earlier than this
+	e.d.Notify("q", "t")
+
+	r := recv(t, res, quickly)
+	wantGrants(t, r, 1)
+	delivered := time.Now()
+	secondAsked := ss.leaseBegan()
+	if !secondAsked.After(firstAsked) {
+		t.Fatalf("the store was last asked at %v, no later than the first fetch at %v: the job was not found by a second fetch", secondAsked, firstAsked)
+	}
+
+	// The first fetch does not return before slowReturn has passed, so the wait
+	// that the second fetch has to report is at least that.
+	atLeast := notifiedAt.Sub(firstAsked)
+	if atLeast < slowReturn {
+		t.Fatalf("the waiter was parked for only %v before the notification, want at least %v: the store did not delay the first fetch", atLeast, slowReturn)
+	}
+	if r.ans.Waited < atLeast {
+		t.Errorf("the answer says the call waited %v, want at least %v, the time from the first fetch to the one that found the job: a worker would give the lease up that much earlier than it must", r.ans.Waited, atLeast)
+	}
+	if upTo := delivered.Sub(sentAt); r.ans.Waited > upTo {
+		t.Errorf("the answer says the call waited %v, more than the %v from the call to the delivery", r.ans.Waited, upTo)
+	}
+	if over := sentAt.Add(r.ans.Waited).Sub(secondAsked); over > 0 {
+		t.Errorf("the answer says the call waited %v, which ends %v after the store was asked: a worker would trust the lease for that much longer than it lasts", r.ans.Waited, over)
+	}
+}
+
 func TestDispatcherLeaseWaitMetricCountsUpToTheDelivery(t *testing.T) {
 	// The wait that the answer reports ends at the fetch, but what the metric
 	// says is how long a caller waited for its jobs, which ends at the delivery.
