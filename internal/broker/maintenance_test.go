@@ -219,6 +219,59 @@ func TestMaintenanceLoopsSurviveStoreErrors(t *testing.T) {
 	}
 }
 
+// blockingStore holds every Reap and Prune call until its context ends, and
+// says when one has begun.
+type blockingStore struct {
+	store.Store
+	began chan struct{}
+}
+
+func (b *blockingStore) Reap(ctx context.Context, _ int, _ store.BackoffFunc) (int, error) {
+	b.began <- struct{}{}
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+
+func (b *blockingStore) Prune(ctx context.Context, _ store.Retention, _ int) (int, error) {
+	b.began <- struct{}{}
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+
+func TestMaintenanceLoopsDoNotLogTheEndOfTheirOwnContext(t *testing.T) {
+	// A shutdown that interrupts a call makes it fail with the context's
+	// error. That is not a failure of the store, and a clean shutdown must not
+	// log one.
+	e := newMaintEnv(t)
+	logs := &syncBuffer{}
+	log := slog.New(slog.NewTextHandler(logs, nil))
+	st := &blockingStore{began: make(chan struct{}, 2)}
+	ctx, cancel := context.WithCancel(t.Context())
+	var wg sync.WaitGroup
+	wg.Go(func() { RunReaper(ctx, st, time.Millisecond, 10, 1, e.m, log) })
+	wg.Go(func() {
+		RunPruner(ctx, st, time.Millisecond, 10, store.Retention{Done: time.Hour, Dead: time.Hour}, e.m, log)
+	})
+	for range 2 {
+		select {
+		case <-st.began:
+		case <-time.After(quickly):
+			t.Fatal("a loop did not call the store")
+		}
+	}
+	cancel()
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the loops did not return after their context ended")
+	}
+	if s := logs.String(); s != "" {
+		t.Errorf("the loops logged while shutting down: %s", s)
+	}
+}
+
 func TestMaintenanceLoopsDoNotSpinOnABatchBelowOne(t *testing.T) {
 	// A pass that found nothing never repeats, whatever the batch is, so a
 	// batch of 0 (which Config.Validate rules out) cannot make the loop spin.

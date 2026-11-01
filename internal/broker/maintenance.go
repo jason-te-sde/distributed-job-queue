@@ -42,10 +42,13 @@ func RunReaper(ctx context.Context, st store.Store, every time.Duration, batch i
 	// The store calls this synchronously inside Reap, so the generator is only
 	// ever used from this goroutine.
 	backoff := func(attempts int32) time.Duration { return job.DefaultBackoff.Delay(attempts, rng.Float64()) }
-	runWhileFull(ctx, every, batch, func(ctx context.Context) (int, error) {
-		n, err := st.Reap(ctx, batch, backoff)
+	runWhileFull(ctx, every, batch, func(callCtx context.Context) (int, error) {
+		n, err := st.Reap(callCtx, batch, backoff)
 		if err != nil {
-			log.Warn("reap failed", slog.String("op", "reap"), slog.Any("err", err))
+			// A shutdown that cuts the call short is not a failure to report.
+			if ctx.Err() == nil {
+				log.Warn("reap failed", slog.String("op", "reap"), slog.Any("err", err))
+			}
 			return 0, err
 		}
 		if n > 0 {
@@ -65,10 +68,13 @@ func RunPruner(ctx context.Context, st store.Store, every time.Duration, batch i
 	if every <= 0 {
 		panic(fmt.Sprintf("broker.RunPruner: every must be positive, got %v", every))
 	}
-	runWhileFull(ctx, every, batch, func(ctx context.Context) (int, error) {
-		n, err := st.Prune(ctx, r, batch)
+	runWhileFull(ctx, every, batch, func(callCtx context.Context) (int, error) {
+		n, err := st.Prune(callCtx, r, batch)
 		if err != nil {
-			log.Warn("prune failed", slog.String("op", "prune"), slog.Any("err", err))
+			// A shutdown that cuts the call short is not a failure to report.
+			if ctx.Err() == nil {
+				log.Warn("prune failed", slog.String("op", "prune"), slog.Any("err", err))
+			}
 			return 0, err
 		}
 		if n > 0 {
