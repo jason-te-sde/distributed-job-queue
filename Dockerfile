@@ -15,7 +15,12 @@
 # each target platform, so a multi-arch build does not run a compiler under
 # emulation. With CGO_ENABLED=0 the binaries are static, which is what lets the
 # final stage be distroless.
-FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS build
+#
+# Both base images are pinned by digest, with the tag kept for the reader. The
+# digest is that of the multi-platform index, so the same line serves amd64 and
+# arm64. A tag can be moved to other contents; a digest cannot. Dependabot's
+# docker entry proposes a new digest, and a new tag, when either changes.
+FROM --platform=$BUILDPLATFORM golang:1.27-bookworm@sha256:d9b6a1beb9474adc2a1ce842573639b44b2a0dd49b6669f51d3821baf9ec37c9 AS build
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -53,7 +58,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # exist, and the distroless README lists debian13 as the current one). The
 # image has CA certificates, tzdata and a nonroot user, and nothing else: no
 # shell and no package manager.
-FROM gcr.io/distroless/static-debian13:nonroot
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329
 
 COPY --from=build /out/jobqueue-server /jobqueue-server
 COPY --from=build /out/jobqueuectl /jobqueuectl
