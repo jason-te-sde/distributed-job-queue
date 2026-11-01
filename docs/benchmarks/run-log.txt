@@ -1,0 +1,317 @@
+# Run log of the benchmark run of 2026-10-31
+# Machine: Apple M2, 16 GB, macOS 26.6.2, PostgreSQL 17.10, Go 1.27.3. The run began at 18:34 with a 1-minute load average of 2.00.
+# For every run: the start time, the 1-minute load average when the run began (the script waited for it to be 4 or lower), the command as run,
+# the time the run took and the 1-minute load average when it ended. The profile runs (profile/) used the same wait for a load of 4 or lower and are not listed.
+# Runs marked NOT USED are described in benchmarks.md (the first series of E1) or were started on a reused database and run again (the first attempt at E2).
+
+e1-1broker run 1  NOT USED (first series of E1: wide range, one database reused across runs)
+  started 18:34:24; 1-minute load before: 2.00
+  database: reused from the previous run, with a VACUUM of the jobs table before it
+  command: go run ./cmd/jobqueue-bench throughput --brokers 1 --find-max --duration 30s --payload-bytes 64 --concurrency 64 --out e1-wide-range-reused-db-1broker-run1.json
+  took 560 s; 1-minute load after: 8.65
+  raw output: exploratory/e1-wide-range-reused-db-1broker-run1.json
+
+e1-1broker run 2  NOT USED (first series of E1: wide range, one database reused across runs)
+  started 18:44:59; 1-minute load before: 3.44 (the script waited about 75 s for it to fall to 4 or lower)
+  database: reused from the previous run, with a VACUUM of the jobs table before it
+  command: go run ./cmd/jobqueue-bench throughput --brokers 1 --find-max --duration 30s --payload-bytes 64 --concurrency 64 --out e1-wide-range-reused-db-1broker-run2.json
+  took 399 s; 1-minute load after: 5.93
+  raw output: exploratory/e1-wide-range-reused-db-1broker-run2.json
+
+e1-1broker run 3  NOT USED (first series of E1: wide range, one database reused across runs)
+  started 18:52:23; 1-minute load before: 3.42 (the script waited about 45 s for it to fall to 4 or lower)
+  database: reused from the previous run, with a VACUUM of the jobs table before it
+  command: go run ./cmd/jobqueue-bench throughput --brokers 1 --find-max --duration 30s --payload-bytes 64 --concurrency 64 --out e1-wide-range-reused-db-1broker-run3.json
+  took 413 s; 1-minute load after: 8.51
+  raw output: exploratory/e1-wide-range-reused-db-1broker-run3.json
+
+e1-3brokers run 1  NOT USED (first series of E1: wide range, one database reused across runs)
+  started 19:00:30; 1-minute load before: 3.95 (the script waited about 45 s for it to fall to 4 or lower)
+  database: reused from the previous run, with a VACUUM of the jobs table before it
+  command: go run ./cmd/jobqueue-bench throughput --brokers 3 --find-max --duration 30s --payload-bytes 64 --concurrency 64 --out e1-wide-range-reused-db-3brokers-run1.json
+  took 536 s; 1-minute load after: 12.02
+  raw output: exploratory/e1-wide-range-reused-db-3brokers-run1.json
+
+e1-3brokers run 2  NOT USED (first series of E1: wide range, one database reused across runs)
+  started 19:11:42; 1-minute load before: 3.53 (the script waited about 135 s for it to fall to 4 or lower)
+  database: reused from the previous run, with a VACUUM of the jobs table before it
+  command: go run ./cmd/jobqueue-bench throughput --brokers 3 --find-max --duration 30s --payload-bytes 64 --concurrency 64 --out e1-wide-range-reused-db-3brokers-run2.json
+  took 493 s; 1-minute load after: 29.09
+  raw output: exploratory/e1-wide-range-reused-db-3brokers-run2.json
+
+e1-3brokers run 3  NOT USED (first series of E1: wide range, one database reused across runs)
+  started 19:22:26; 1-minute load before: 3.71 (the script waited about 150 s for it to fall to 4 or lower)
+  database: reused from the previous run, with a VACUUM of the jobs table before it
+  command: go run ./cmd/jobqueue-bench throughput --brokers 3 --find-max --duration 30s --payload-bytes 64 --concurrency 64 --out e1-wide-range-reused-db-3brokers-run3.json
+  took 490 s; 1-minute load after: 13.98
+  raw output: exploratory/e1-wide-range-reused-db-3brokers-run3.json
+
+e2-notify run 1  NOT USED (started on a reused database; discarded and run again)
+  started 19:50:03; 1-minute load before: 3.84 (the script waited about 75 s for it to fall to 4 or lower)
+  database: reused from the previous run, with a VACUUM of the jobs table before it
+  command: go run ./cmd/jobqueue-bench ablate --what notify --rate 20 --duration 60s --payload-bytes 64 --concurrency 64 --out (discarded)
+  took 122 s; 1-minute load after: 2.10
+  raw output: (discarded)
+
+e2-notify run 2  NOT USED (started on a reused database; discarded and run again)
+  started 19:52:05; 1-minute load before: 2.10
+  database: reused from the previous run, with a VACUUM of the jobs table before it
+  command: go run ./cmd/jobqueue-bench ablate --what notify --rate 20 --duration 60s --payload-bytes 64 --concurrency 64 --out (discarded)
+  took 122 s; 1-minute load after: 1.40
+  raw output: (discarded)
+
+e2-notify run 3  NOT USED (started on a reused database; discarded and run again)
+  started 19:54:07; 1-minute load before: 1.40
+  database: reused from the previous run, with a VACUUM of the jobs table before it
+  command: go run ./cmd/jobqueue-bench ablate --what notify --rate 20 --duration 60s --payload-bytes 64 --concurrency 64 --out (discarded)
+  took 121 s; 1-minute load after: 1.63
+  raw output: (discarded)
+
+e2-batch run 1  NOT USED (started on a reused database; discarded and run again)
+  started 19:56:08; 1-minute load before: 1.63
+  database: reused from the previous run, with a VACUUM of the jobs table before it
+  command: go run ./cmd/jobqueue-bench ablate --what batch --find-max --lo 500 --hi 8000 --steps 5 --duration 30s --payload-bytes 64 --concurrency 64 --out (discarded)
+  took None s; 1-minute load after: None
+  raw output: (discarded)
+
+e2-notify run 1
+  started 20:06:01; 1-minute load before: 3.51 (the script waited about 30 s for it to fall to 4 or lower)
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench ablate --what notify --rate 20 --duration 60s --payload-bytes 64 --concurrency 64 --out e2-notify-run1.json
+  took 122 s; 1-minute load after: 1.62
+  raw output: e2-notify-run1.json
+
+e2-notify run 2
+  started 20:08:03; 1-minute load before: 1.62
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench ablate --what notify --rate 20 --duration 60s --payload-bytes 64 --concurrency 64 --out e2-notify-run2.json
+  took 122 s; 1-minute load after: 1.09
+  raw output: e2-notify-run2.json
+
+e2-notify run 3
+  started 20:10:05; 1-minute load before: 1.09
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench ablate --what notify --rate 20 --duration 60s --payload-bytes 64 --concurrency 64 --out e2-notify-run3.json
+  took 122 s; 1-minute load after: 1.45
+  raw output: e2-notify-run3.json
+
+e2-batch run 1
+  started 20:12:07; 1-minute load before: 1.45
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench ablate --what batch --find-max --lo 500 --hi 8000 --steps 5 --duration 30s --payload-bytes 64 --concurrency 64 --out e2-batch-run1.json
+  took 536 s; 1-minute load after: 7.33
+  raw output: e2-batch-run1.json
+
+e2-batch run 2
+  started 20:22:03; 1-minute load before: 3.68 (the script waited about 60 s for it to fall to 4 or lower)
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench ablate --what batch --find-max --lo 500 --hi 8000 --steps 5 --duration 30s --payload-bytes 64 --concurrency 64 --out e2-batch-run2.json
+  took 578 s; 1-minute load after: 11.38
+  raw output: e2-batch-run2.json
+
+e2-batch run 3
+  started 20:32:56; 1-minute load before: 3.93 (the script waited about 75 s for it to fall to 4 or lower)
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench ablate --what batch --find-max --lo 500 --hi 8000 --steps 5 --duration 30s --payload-bytes 64 --concurrency 64 --out e2-batch-run3.json
+  took 567 s; 1-minute load after: 10.36
+  raw output: e2-batch-run3.json
+
+e2-coalesce run 1
+  started 20:43:38; 1-minute load before: 3.80 (the script waited about 75 s for it to fall to 4 or lower)
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench ablate --what coalesce --find-max --lo 500 --hi 8000 --steps 5 --duration 30s --payload-bytes 64 --concurrency 64 --out e2-coalesce-run1.json
+  took 517 s; 1-minute load after: 8.75
+  raw output: e2-coalesce-run1.json
+
+e2-coalesce run 2
+  started 20:53:30; 1-minute load before: 3.80 (the script waited about 75 s for it to fall to 4 or lower)
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench ablate --what coalesce --find-max --lo 500 --hi 8000 --steps 5 --duration 30s --payload-bytes 64 --concurrency 64 --out e2-coalesce-run2.json
+  took 782 s; 1-minute load after: 10.13
+  raw output: e2-coalesce-run2.json
+
+e2-coalesce run 3
+  started 21:08:02; 1-minute load before: 3.81 (the script waited about 90 s for it to fall to 4 or lower)
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench ablate --what coalesce --find-max --lo 500 --hi 8000 --steps 5 --duration 30s --payload-bytes 64 --concurrency 64 --out e2-coalesce-run3.json
+  took 536 s; 1-minute load after: 7.25
+  raw output: e2-coalesce-run3.json
+
+e1-1broker run 1
+  started 21:17:59; 1-minute load before: 3.28 (the script waited about 45 s for it to fall to 4 or lower)
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench throughput --brokers 1 --find-max --lo 500 --hi 8000 --steps 5 --duration 30s --payload-bytes 64 --concurrency 64 --out e1-1broker-run1.json
+  took 248 s; 1-minute load after: 8.80
+  raw output: e1-1broker-run1.json
+
+e1-1broker run 2
+  started 21:23:23; 1-minute load before: 3.40 (the script waited about 75 s for it to fall to 4 or lower)
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench throughput --brokers 1 --find-max --lo 500 --hi 8000 --steps 5 --duration 30s --payload-bytes 64 --concurrency 64 --out e1-1broker-run2.json
+  took 255 s; 1-minute load after: 8.36
+  raw output: e1-1broker-run2.json
+
+e1-1broker run 3
+  started 21:28:53; 1-minute load before: 3.83 (the script waited about 75 s for it to fall to 4 or lower)
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench throughput --brokers 1 --find-max --lo 500 --hi 8000 --steps 5 --duration 30s --payload-bytes 64 --concurrency 64 --out e1-1broker-run3.json
+  took 353 s; 1-minute load after: 12.12
+  raw output: e1-1broker-run3.json
+
+e1-3brokers run 1
+  started 21:36:17; 1-minute load before: 3.46 (the script waited about 90 s for it to fall to 4 or lower)
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench throughput --brokers 3 --find-max --lo 500 --hi 8000 --steps 5 --duration 30s --payload-bytes 64 --concurrency 64 --out e1-3brokers-run1.json
+  took 463 s; 1-minute load after: 16.90
+  raw output: e1-3brokers-run1.json
+
+e1-3brokers run 2
+  started 21:45:45; 1-minute load before: 3.82 (the script waited about 105 s for it to fall to 4 or lower)
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench throughput --brokers 3 --find-max --lo 500 --hi 8000 --steps 5 --duration 30s --payload-bytes 64 --concurrency 64 --out e1-3brokers-run2.json
+  took 280 s; 1-minute load after: 17.66
+  raw output: e1-3brokers-run2.json
+
+e1-3brokers run 3
+  started 21:52:11; 1-minute load before: 3.92 (the script waited about 105 s for it to fall to 4 or lower)
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench throughput --brokers 3 --find-max --lo 500 --hi 8000 --steps 5 --duration 30s --payload-bytes 64 --concurrency 64 --out e1-3brokers-run3.json
+  took 381 s; 1-minute load after: 19.79
+  raw output: e1-3brokers-run3.json
+
+e3-fifo run 1
+  started 22:02:51; 1-minute load before: 3.61 (the script waited about 60 s for it to fall to 4 or lower)
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench noisy --scheduler fifo --out e3-fifo-run1.json
+  took 33 s; 1-minute load after: 3.79
+  raw output: e3-fifo-run1.json
+
+e3-fifo run 2
+  started 22:03:24; 1-minute load before: 3.79
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench noisy --scheduler fifo --out e3-fifo-run2.json
+  took 33 s; 1-minute load after: 4.22
+  raw output: e3-fifo-run2.json
+
+e3-fifo run 3
+  started 22:04:12; 1-minute load before: 3.48 (the script waited about 15 s for it to fall to 4 or lower)
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench noisy --scheduler fifo --out e3-fifo-run3.json
+  took 33 s; 1-minute load after: 3.17
+  raw output: e3-fifo-run3.json
+
+e3-drr run 1
+  started 22:04:45; 1-minute load before: 3.17
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench noisy --scheduler drr --out e3-drr-run1.json
+  took 34 s; 1-minute load after: 4.39
+  raw output: e3-drr-run1.json
+
+e3-drr run 2
+  started 22:05:34; 1-minute load before: 3.70 (the script waited about 15 s for it to fall to 4 or lower)
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench noisy --scheduler drr --out e3-drr-run2.json
+  took 34 s; 1-minute load after: 3.88
+  raw output: e3-drr-run2.json
+
+e3-drr run 3
+  started 22:06:08; 1-minute load before: 3.88
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench noisy --scheduler drr --out e3-drr-run3.json
+  took 33 s; 1-minute load after: 3.46
+  raw output: e3-drr-run3.json
+
+e4-kill-worker run 1
+  started 22:07:00; 1-minute load before: 3.36
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench recovery --kill worker --out e4-kill-worker-run1.json
+  took 32 s; 1-minute load after: 3.29
+  raw output: e4-kill-worker-run1.json
+
+e4-kill-worker run 2
+  started 22:07:32; 1-minute load before: 3.29
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench recovery --kill worker --out e4-kill-worker-run2.json
+  took 32 s; 1-minute load after: 2.77
+  raw output: e4-kill-worker-run2.json
+
+e4-kill-worker run 3
+  started 22:08:05; 1-minute load before: 2.77
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench recovery --kill worker --out e4-kill-worker-run3.json
+  took 32 s; 1-minute load after: 2.72
+  raw output: e4-kill-worker-run3.json
+
+e4-kill-broker run 1
+  started 22:08:37; 1-minute load before: 2.72
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench recovery --kill broker --out e4-kill-broker-run1.json
+  took 21 s; 1-minute load after: 3.59
+  raw output: e4-kill-broker-run1.json
+
+e4-kill-broker run 2
+  started 22:08:58; 1-minute load before: 3.59
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench recovery --kill broker --out e4-kill-broker-run2.json
+  took 21 s; 1-minute load after: 3.68
+  raw output: e4-kill-broker-run2.json
+
+e4-kill-broker run 3
+  started 22:09:19; 1-minute load before: 3.68
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench recovery --kill broker --out e4-kill-broker-run3.json
+  took 21 s; 1-minute load after: 3.74
+  raw output: e4-kill-broker-run3.json
+
+e6-river run 1
+  started 22:13:11; 1-minute load before: 3.69 (the script waited about 45 s for it to fall to 4 or lower)
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench river --find-max --lo 500 --hi 20000 --steps 6 --duration 30s --payload-bytes 64 --out e6-river-run1.json
+  took 306 s; 1-minute load after: 9.77
+  raw output: e6-river-run1.json
+
+e6-river run 2
+  started 22:19:48; 1-minute load before: 3.49 (the script waited about 90 s for it to fall to 4 or lower)
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench river --find-max --lo 500 --hi 20000 --steps 6 --duration 30s --payload-bytes 64 --out e6-river-run2.json
+  took 298 s; 1-minute load after: 9.23
+  raw output: e6-river-run2.json
+
+e6-river run 3
+  started 22:26:02; 1-minute load before: 3.50 (the script waited about 75 s for it to fall to 4 or lower)
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench river --find-max --lo 500 --hi 20000 --steps 6 --duration 30s --payload-bytes 64 --out e6-river-run3.json
+  took 298 s; 1-minute load after: 8.14
+  raw output: e6-river-run3.json
+
+e5-soak run 1
+  started 22:31:56; 1-minute load before: 4.00 (the script waited about 45 s for it to fall to 4 or lower)
+  database: created fresh for this run
+  command: go run ./cmd/jobqueue-bench soak --duration 30m --rate 1890 --payload-bytes 64 --concurrency 64 --out e5-soak.json
+  took 1804 s; 1-minute load after: 9.84
+  raw output: e5-soak.json
+
+# The E5 follow-up (issue 64), 2026-10-31 and 2026-11-01. Every run below started on a fresh database, brought to the
+# current schema with jobqueuectl migrate, and had ALTER TABLE jobqueue.jobs SET (log_autovacuum_min_duration = 0) applied
+# before the load, so that the server log has every vacuum of the table. A sampler ran beside each (profile/e5-sampler.sql).
+
+e5 repeat with the sampler (the diagnosis), settings of 0001
+  started 2026-10-31 23:37:51; 1-minute load before: 2.38
+  database: created fresh for this run; code of main at b747f93
+  command: go run ./cmd/jobqueue-bench soak --duration 30m --rate 1890 --payload-bytes 64 --concurrency 64 --out e5-repeat-soak.json
+  took 1805 s; 1-minute load after: 8.31
+  raw output: profile/e5-repeat-soak.json; sampler: profile/e5-repeat-samples.jsonl; server log: profile/e5-repeat-autovacuum.log
+
+e5 with autovacuum_vacuum_cost_delay = 0 on the table
+  started 2026-11-01 00:10:24; 1-minute load before: 2.75
+  database: created fresh for this run; code of main at 89f6323; ALTER TABLE jobqueue.jobs SET (log_autovacuum_min_duration = 0, autovacuum_vacuum_cost_delay = 0)
+  command: go run ./cmd/jobqueue-bench soak --duration 30m --rate 1890 --payload-bytes 64 --concurrency 64 --out e5-cost-delay-0-soak.json
+  took 1806 s; 1-minute load after: 6.34
+  raw output: profile/e5-cost-delay-0-soak.json; sampler: profile/e5-cost-delay-0-samples.jsonl; server log: profile/e5-cost-delay-0-autovacuum.log
+
+e5 validation, 60 minutes, migration 0002 applied by jobqueuectl migrate
+  started 2026-11-01 00:46:52; 1-minute load before: 3.57 (the script waited about 20 s for it to fall to 4 or lower)
+  database: created fresh for this run; code of main at 89f6323 plus migration 0002 (branch fix/64-jobs-autovacuum)
+  command: go run ./cmd/jobqueue-bench soak --duration 60m --rate 1890 --payload-bytes 64 --concurrency 64 --out e5-soak-0002.json
+  took 3605 s; 1-minute load after: 7.15
+  raw output: e5-soak-0002.json; sampler: profile/e5-soak-0002-samples.jsonl; server log: profile/e5-soak-0002-autovacuum.log

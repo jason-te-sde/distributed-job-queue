@@ -1,0 +1,11 @@
+--- a/internal/store/pgstore/enqueue.go
++++ b/internal/store/pgstore/enqueue.go
+@@ -37,7 +37,7 @@
+     RETURNING id, queue, tenant, run_at
+ ),
+ wake AS (
+-    SELECT pg_notify('`+NotifyChannel+`', ins.queue || chr(9) || ins.tenant)
++    SELECT 1
+     FROM ins, clock
+     WHERE ins.run_at <= clock.now
+ )

@@ -1,0 +1,46 @@
+# The Enqueue statement of internal/store/pgstore/enqueue.go, run by pgbench against the migrated jobqueue schema, with and without its pg_notify.
+# enq-notify.sql is the statement as it is; enq-nonotify.sql replaces the pg_notify call by SELECT 1.
+# Command: pgbench -n -c <clients> -j 4 -T 10 -f <script> <database URL>. The jobs table was truncated between runs; no broker was running.
+# 'tps' is committed enqueues per second; the uptime line is the load average when the run began.
+
+== clients=1 script=enq-nonotify  19:33  up 15 days, 18:37, 1 user, load averages: 3.81 12.77 14.38
+latency average = 0.204 ms
+tps = 4911.083912 (without initial connection time)
+== clients=1 script=enq-notify  19:33  up 15 days, 18:37, 1 user, load averages: 3.38 12.38 14.22
+latency average = 0.215 ms
+tps = 4647.384254 (without initial connection time)
+== clients=4 script=enq-nonotify  19:33  up 15 days, 18:37, 1 user, load averages: 3.01 12.01 14.07
+latency average = 0.243 ms
+tps = 16429.809539 (without initial connection time)
+== clients=4 script=enq-notify  19:33  up 15 days, 18:37, 1 user, load averages: 3.24 11.76 13.95
+latency average = 0.268 ms
+tps = 14925.152324 (without initial connection time)
+== clients=8 script=enq-nonotify  19:34  up 15 days, 18:38, 1 user, load averages: 3.35 11.50 13.84
+latency average = 0.351 ms
+tps = 22779.893659 (without initial connection time)
+== clients=8 script=enq-notify  19:34  up 15 days, 18:38, 1 user, load averages: 3.98 11.37 13.76
+latency average = 0.541 ms
+tps = 14786.641067 (without initial connection time)
+== clients=16 script=enq-nonotify  19:34  up 15 days, 18:38, 1 user, load averages: 3.91 11.11 13.64
+latency average = 0.709 ms
+tps = 22580.338734 (without initial connection time)
+waiting: load1=4.91
+waiting: load1=4.52
+waiting: load1=4.30
+== clients=16 script=enq-notify  19:35  up 15 days, 18:39, 1 user, load averages: 3.87 10.25 13.21
+latency average = 0.976 ms
+tps = 16392.603690 (without initial connection time)
+waiting: load1=4.20
+== clients=45 script=enq-nonotify  19:35  up 15 days, 18:39, 1 user, load averages: 3.64 9.79 12.98
+latency average = 1.498 ms
+tps = 30034.360189 (without initial connection time)
+waiting: load1=9.04
+waiting: load1=7.81
+waiting: load1=6.76
+waiting: load1=5.87
+waiting: load1=5.04
+waiting: load1=4.42
+waiting: load1=4.44
+== clients=45 script=enq-notify  19:36  up 15 days, 18:40, 1 user, load averages: 3.91 8.80 12.34
+latency average = 2.779 ms
+tps = 16194.447695 (without initial connection time)

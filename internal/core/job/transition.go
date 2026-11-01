@@ -88,8 +88,10 @@ func Heartbeat(j Job, token int64, now time.Time, ttl time.Duration) (Job, Outco
 }
 
 // Complete records that the worker holding token finished the job with
-// result. The lease's expiry is ignored: finished work is kept as long as
-// nobody else has leased the job since. Completing a job that is already
+// result. The lease's expiry is ignored: finished work is kept until the
+// reaper takes the job back. A reaped job is ready again under the same
+// epoch, so a Complete under that token after the reap is Fenced even if
+// nobody has leased the job since. Completing a job that is already
 // succeeded under the same token is a Duplicate and keeps the first result.
 // Every other call is Fenced.
 func Complete(j Job, token int64, now time.Time, result []byte) (Job, Outcome) {

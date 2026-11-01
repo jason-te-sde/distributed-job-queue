@@ -18,7 +18,10 @@ var ErrNotFound = errors.New("job not found")
 // cannot say which. A retry is therefore safe only for a call that tolerates
 // repetition: an acknowledgement is fenced by its token and an Enqueue with an
 // idempotency key is deduplicated, but an Enqueue without a key may create the
-// job twice. The caller's own mistakes are job.ErrInvalid and are never retried.
+// job twice. A call that ends because the caller's context was cancelled or
+// expired is not ErrUnavailable, and its outcome is as unknown: the commit may
+// have happened first. The caller's own mistakes are job.ErrInvalid and are
+// never retried.
 var ErrUnavailable = errors.New("store unavailable")
 
 // InternalError reports that the store found a job in a state that its own

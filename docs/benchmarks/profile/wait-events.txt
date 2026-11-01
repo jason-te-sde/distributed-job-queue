@@ -1,0 +1,51 @@
+# Wait events of the active backends in jobqueue_bench during a 30 s fixed-rate run (throughput --brokers 1 --rate R --duration 30s).
+# Sampled every 0.25 s from pg_stat_activity (state = 'active'); each line below is the mean number of backends per sample in that wait state.
+# '-/-' is an active backend with no wait event, that is, one running on a CPU. Lock/object is the notify lock (locktype object, classid 1262).
+# 'with notify' is the unmodified tree; 'no enqueue notify' is a scratch copy where Enqueue's pg_notify is replaced by SELECT 1 (no-enqueue-notify.patch).
+
+## with notify, offered 1500/s (113 samples)
+-/-                          1.35
+IO/WalWrite                  0.26
+Client/ClientRead            0.17
+LWLock/WALWrite              0.03
+Timeout/VacuumDelay          0.01
+
+## with notify, offered 3000/s (121 samples)
+-/-                          6.79
+Lock/object                  0.45
+Client/ClientRead            0.38
+IO/WalWrite                  0.31
+LWLock/WALWrite              0.17
+LWLock/BufferContent         0.07
+
+## with notify, offered 6000/s (229 samples)
+-/-                          14.66
+Lock/object                  2.60
+LWLock/BufferContent         0.34
+Timeout/VacuumDelay          0.28
+IO/WalWrite                  0.18
+IO/BuffileWrite              0.15
+
+## no enqueue notify, offered 3000/s (124 samples)
+-/-                          7.10
+LWLock/WALWrite              0.44
+LWLock/BufferContent         0.31
+IO/WalWrite                  0.19
+LWLock/WALInsert             0.17
+Client/ClientRead            0.07
+
+## no enqueue notify, offered 6000/s (250 samples)
+-/-                          13.94
+LWLock/WALWrite              0.60
+Timeout/VacuumDelay          0.34
+LWLock/BufferContent         0.17
+IO/WalWrite                  0.14
+Client/ClientRead            0.14
+
+## no enqueue notify, offered 10050/s (393 samples)
+-/-                          15.92
+LWLock/WALWrite              1.13
+Timeout/VacuumDelay          0.32
+IO/WalWrite                  0.23
+LWLock/BufferContent         0.22
+IO/BuffileWrite              0.16

@@ -15,7 +15,9 @@ import (
 
 // classify wraps an error from the database for the caller of operation op.
 // A cancelled or expired context is the caller's doing, so it is wrapped as it
-// is and is never reported as unavailability. A failure of the connection, a
+// is and is never reported as unavailability. It does not say what became of a
+// write that was committing when the context ended: the job may or may not have
+// been committed, as after a lost connection. A failure of the connection, a
 // pool that has been closed, a server that is shutting down, starting up or out
 // of connections, and a call that PostgreSQL rolled back because it deadlocked
 // with another or could not be serialized, wrap store.ErrUnavailable, which the

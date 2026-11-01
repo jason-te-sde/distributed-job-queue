@@ -1,0 +1,44 @@
+# Machine and server state of the benchmark run (2026-10-31)
+# sysctl -n machdep.cpu.brand_string hw.memsize
+# Apple M2
+# 17179869184
+# uptime, before the run began
+# 18:33  up 15 days, 17:37, 1 user, load averages: 3.31 4.78 7.21
+# pg_config --version
+# PostgreSQL 17.10 (Homebrew)
+# SELECT name, setting FROM pg_settings WHERE source <> 'default' ORDER BY name
+# name | setting
+config_file|/opt/homebrew/var/postgresql@17/postgresql.conf
+data_directory|/opt/homebrew/var/postgresql@17
+DateStyle|ISO, MDY
+default_text_search_config|pg_catalog.english
+dynamic_shared_memory_type|posix
+hba_file|/opt/homebrew/var/postgresql@17/pg_hba.conf
+ident_file|/opt/homebrew/var/postgresql@17/pg_ident.conf
+lc_messages|en_US.UTF-8
+lc_monetary|en_US.UTF-8
+lc_numeric|en_US.UTF-8
+lc_time|en_US.UTF-8
+log_timezone|America/Los_Angeles
+max_connections|100
+max_wal_size|1024
+min_wal_size|80
+shared_buffers|16384
+TimeZone|America/Los_Angeles
+transaction_deferrable|off
+transaction_isolation|read committed
+transaction_read_only|off
+# Settings that decide durability and memory, whether default or not (current_setting)
+synchronous_commit|on
+fsync|on
+full_page_writes|on
+wal_sync_method|open_datasync
+wal_level|replica
+shared_buffers|128MB
+effective_cache_size|4GB
+work_mem|4MB
+max_wal_size|1GB
+checkpoint_timeout|5min
+max_connections|100
+autovacuum|on
+autovacuum_naptime|1min

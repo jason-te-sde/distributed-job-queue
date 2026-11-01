@@ -1,0 +1,1394 @@
+# E5 validation, 60 minutes, migration 0002 applied (log_autovacuum_min_duration = 0 on the table)
+# Entries of the PostgreSQL server log during the run: every autovacuum and autoanalyze of jobqueue.jobs (log_autovacuum_min_duration = 0 on the table) and every checkpoint.
+# Times are local (PDT). The first line of each autovacuum entry gives the time it ended; the last gives its elapsed time.
+
+2026-11-01 00:46:57.840 PDT [24201] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 279 remain, 279 scanned (100.00% of total)
+	tuples: 2811 removed, 4363 remain, 12 are dead but not yet removable
+	removable cutoff: 87272786, which was 28 XIDs old when operation ended
+	new relfrozenxid: 87261246, which is 84 XIDs ahead of previous value
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	index scan needed: 278 pages from table (99.64% of total) had 8682 dead item identifiers removed
+	index "jobs_pkey": pages: 14 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_ready_tenant": pages: 2 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_ready_fifo": pages: 2 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_leased_expiry": pages: 19 in total, 16 newly deleted, 16 currently deleted, 0 reusable
+	index "jobs_idempotency": pages: 68 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 19 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 0.000 MB/s, avg write rate: 6.643 MB/s
+	buffer usage: 1244 hits, 0 misses, 3 dirtied
+	WAL usage: 931 records, 1 full page images, 95028 bytes
+	system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.00 s
+2026-11-01 00:46:57.876 PDT [24201] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 0.000 MB/s, avg write rate: 0.211 MB/s
+	buffer usage: 876 hits, 0 misses, 1 dirtied
+	system usage: CPU: user: 0.02 s, system: 0.00 s, elapsed: 0.03 s
+2026-11-01 00:47:03.949 PDT [24220] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 939 remain, 939 scanned (100.00% of total)
+	tuples: 11467 removed, 15902 remain, 14 are dead but not yet removable
+	tuples missed: 1 dead from 1 pages not removed due to cleanup lock contention
+	removable cutoff: 87305635, which was 63 XIDs old when operation ended
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	index scan needed: 936 pages from table (99.68% of total) had 23072 dead item identifiers removed
+	index "jobs_pkey": pages: 47 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_ready_tenant": pages: 2 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_ready_fifo": pages: 2 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_leased_expiry": pages: 63 in total, 44 newly deleted, 60 currently deleted, 16 reusable
+	index "jobs_idempotency": pages: 235 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 63 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 0.000 MB/s, avg write rate: 1.915 MB/s
+	buffer usage: 3669 hits, 0 misses, 3 dirtied
+	WAL usage: 3197 records, 0 full page images, 276879 bytes
+	system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.01 s
+2026-11-01 00:47:04.073 PDT [24220] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 0.000 MB/s, avg write rate: 0.000 MB/s
+	buffer usage: 1554 hits, 0 misses, 0 dirtied
+	system usage: CPU: user: 0.07 s, system: 0.01 s, elapsed: 0.12 s
+2026-11-01 00:48:04.126 PDT [24468] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 7896 remain, 7896 scanned (100.00% of total)
+	tuples: 78922 removed, 129584 remain, 49 are dead but not yet removable
+	removable cutoff: 87620183, which was 443 XIDs old when operation ended
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	index scan needed: 7873 pages from table (99.71% of total) had 227282 dead item identifiers removed
+	index "jobs_pkey": pages: 367 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_ready_tenant": pages: 4 in total, 1 newly deleted, 1 currently deleted, 0 reusable
+	index "jobs_ready_fifo": pages: 4 in total, 1 newly deleted, 1 currently deleted, 0 reusable
+	index "jobs_leased_expiry": pages: 63 in total, 0 newly deleted, 60 currently deleted, 60 reusable
+	index "jobs_idempotency": pages: 2018 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 501 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 0.000 MB/s, avg write rate: 0.000 MB/s
+	buffer usage: 26903 hits, 0 misses, 0 dirtied
+	WAL usage: 24306 records, 0 full page images, 2014659 bytes
+	system usage: CPU: user: 0.05 s, system: 0.01 s, elapsed: 0.08 s
+2026-11-01 00:48:04.605 PDT [24468] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 0.000 MB/s, avg write rate: 0.000 MB/s
+	buffer usage: 8490 hits, 0 misses, 0 dirtied
+	system usage: CPU: user: 0.31 s, system: 0.02 s, elapsed: 0.47 s
+2026-11-01 00:49:04.174 PDT [24675] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 11317 remain, 11317 scanned (100.00% of total)
+	tuples: 50398 removed, 243038 remain, 89 are dead but not yet removable
+	removable cutoff: 87934581, which was 664 XIDs old when operation ended
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	index scan needed: 11153 pages from table (98.55% of total) had 226800 dead item identifiers removed
+	index "jobs_pkey": pages: 689 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_ready_tenant": pages: 10 in total, 6 newly deleted, 7 currently deleted, 1 reusable
+	index "jobs_ready_fifo": pages: 9 in total, 5 newly deleted, 6 currently deleted, 1 reusable
+	index "jobs_leased_expiry": pages: 63 in total, 3 newly deleted, 60 currently deleted, 57 reusable
+	index "jobs_idempotency": pages: 3538 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 937 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 39.017 MB/s, avg write rate: 0.630 MB/s
+	buffer usage: 38703 hits, 681 misses, 11 dirtied
+	WAL usage: 33112 records, 0 full page images, 2465182 bytes
+	system usage: CPU: user: 0.09 s, system: 0.02 s, elapsed: 0.13 s
+2026-11-01 00:49:04.659 PDT [24675] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 2.239 MB/s, avg write rate: 0.129 MB/s
+	buffer usage: 11769 hits, 139 misses, 8 dirtied
+	system usage: CPU: user: 0.36 s, system: 0.02 s, elapsed: 0.48 s
+2026-11-01 00:49:16.185 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 00:50:04.498 PDT [24890] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 15158 remain, 15158 scanned (100.00% of total)
+	tuples: 58097 removed, 356732 remain, 112 are dead but not yet removable
+	removable cutoff: 88251397, which was 1468 XIDs old when operation ended
+	frozen: 3194 pages from table (21.07% of total) had 82855 tuples frozen
+	index scan needed: 14266 pages from table (94.12% of total) had 227341 dead item identifiers removed
+	index "jobs_pkey": pages: 1018 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_ready_tenant": pages: 16 in total, 7 newly deleted, 13 currently deleted, 6 reusable
+	index "jobs_ready_fifo": pages: 14 in total, 6 newly deleted, 11 currently deleted, 5 reusable
+	index "jobs_leased_expiry": pages: 63 in total, 3 newly deleted, 60 currently deleted, 57 reusable
+	index "jobs_idempotency": pages: 5160 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 1376 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 223.088 MB/s, avg write rate: 294.624 MB/s
+	buffer usage: 42370 hits, 10232 misses, 13513 dirtied
+	WAL usage: 42507 records, 6363 full page images, 43165885 bytes
+	system usage: CPU: user: 0.14 s, system: 0.09 s, elapsed: 0.35 s
+2026-11-01 00:50:05.007 PDT [24890] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 67.826 MB/s, avg write rate: 0.169 MB/s
+	buffer usage: 11356 hits, 4419 misses, 11 dirtied
+	system usage: CPU: user: 0.35 s, system: 0.03 s, elapsed: 0.50 s
+2026-11-01 00:51:04.570 PDT [25114] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 19014 remain, 19014 scanned (100.00% of total)
+	tuples: 58006 removed, 470236 remain, 77 are dead but not yet removable
+	removable cutoff: 88567351, which was 1613 XIDs old when operation ended
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	index scan needed: 16022 pages from table (84.26% of total) had 227128 dead item identifiers removed
+	index "jobs_pkey": pages: 1349 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_ready_tenant": pages: 22 in total, 12 newly deleted, 19 currently deleted, 7 reusable
+	index "jobs_ready_fifo": pages: 19 in total, 10 newly deleted, 16 currently deleted, 6 reusable
+	index "jobs_leased_expiry": pages: 63 in total, 5 newly deleted, 60 currently deleted, 55 reusable
+	index "jobs_idempotency": pages: 6715 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 1813 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 463.056 MB/s, avg write rate: 432.274 MB/s
+	buffer usage: 44956 hits, 19526 misses, 18228 dirtied
+	WAL usage: 47962 records, 0 full page images, 3372782 bytes
+	system usage: CPU: user: 0.15 s, system: 0.13 s, elapsed: 0.32 s
+2026-11-01 00:51:05.107 PDT [25114] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 140.712 MB/s, avg write rate: 0.189 MB/s
+	buffer usage: 9967 hits, 9672 misses, 13 dirtied
+	system usage: CPU: user: 0.38 s, system: 0.05 s, elapsed: 0.53 s
+2026-11-01 00:51:05.524 PDT [56140] LOG:  checkpoint complete: wrote 5627 buffers (34.3%); 0 WAL file(s) added, 0 removed, 33 recycled; write=109.201 s, sync=0.106 s, total=109.340 s; sync files=319, longest=0.072 s, average=0.001 s; distance=525914 kB, estimate=525914 kB; lsn=2D/4EBEE290, redo lsn=2D/31000838
+2026-11-01 00:51:19.975 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 00:52:04.766 PDT [25322] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 22867 remain, 22755 scanned (99.51% of total)
+	tuples: 58501 removed, 583405 remain, 105 are dead but not yet removable
+	removable cutoff: 88881865, which was 1910 XIDs old when operation ended
+	frozen: 3979 pages from table (17.40% of total) had 93039 tuples frozen
+	index scan needed: 16743 pages from table (73.22% of total) had 227361 dead item identifiers removed
+	index "jobs_pkey": pages: 1677 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_ready_tenant": pages: 25 in total, 10 newly deleted, 22 currently deleted, 12 reusable
+	index "jobs_ready_fifo": pages: 22 in total, 9 newly deleted, 19 currently deleted, 10 reusable
+	index "jobs_leased_expiry": pages: 63 in total, 4 newly deleted, 60 currently deleted, 56 reusable
+	index "jobs_idempotency": pages: 8334 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 2251 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 500.001 MB/s, avg write rate: 362.962 MB/s
+	buffer usage: 47526 hits, 27547 misses, 19997 dirtied
+	WAL usage: 50984 records, 9911 full page images, 67432213 bytes
+	system usage: CPU: user: 0.20 s, system: 0.18 s, elapsed: 0.43 s
+2026-11-01 00:52:05.448 PDT [25322] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 171.348 MB/s, avg write rate: 0.137 MB/s
+	buffer usage: 8533 hits, 14958 misses, 12 dirtied
+	system usage: CPU: user: 0.39 s, system: 0.06 s, elapsed: 0.68 s
+2026-11-01 00:52:56.815 PDT [56140] LOG:  checkpoint complete: wrote 2880 buffers (17.6%); 0 WAL file(s) added, 0 removed, 33 recycled; write=96.611 s, sync=0.171 s, total=96.840 s; sync files=22, longest=0.135 s, average=0.008 s; distance=540670 kB, estimate=540670 kB; lsn=2D/6FD1C1E0, redo lsn=2D/52000110
+2026-11-01 00:53:03.121 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 00:53:04.989 PDT [25527] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26656 remain, 26656 scanned (100.00% of total)
+	tuples: 172483 removed, 578761 remain, 87 are dead but not yet removable
+	removable cutoff: 89194188, which was 2697 XIDs old when operation ended
+	new relfrozenxid: 87590031, which is 328785 XIDs ahead of previous value
+	frozen: 15343 pages from table (57.56% of total) had 194963 tuples frozen
+	index scan needed: 22587 pages from table (84.74% of total) had 345520 dead item identifiers removed
+	index "jobs_pkey": pages: 2027 in total, 334 newly deleted, 334 currently deleted, 334 reusable
+	index "jobs_ready_tenant": pages: 30 in total, 17 newly deleted, 27 currently deleted, 10 reusable
+	index "jobs_ready_fifo": pages: 26 in total, 14 newly deleted, 23 currently deleted, 9 reusable
+	index "jobs_leased_expiry": pages: 63 in total, 5 newly deleted, 60 currently deleted, 55 reusable
+	index "jobs_idempotency": pages: 9981 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 2687 in total, 455 newly deleted, 455 currently deleted, 455 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 492.402 MB/s, avg write rate: 402.634 MB/s
+	buffer usage: 55769 hits, 40997 misses, 33523 dirtied
+	WAL usage: 73464 records, 30857 full page images, 153927571 bytes
+	system usage: CPU: user: 0.28 s, system: 0.29 s, elapsed: 0.65 s
+2026-11-01 00:53:05.494 PDT [25527] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 293.108 MB/s, avg write rate: 0.185 MB/s
+	buffer usage: 8305 hits, 18984 misses, 12 dirtied
+	system usage: CPU: user: 0.38 s, system: 0.07 s, elapsed: 0.50 s
+2026-11-01 00:54:04.949 PDT [25738] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26705 remain, 25557 scanned (95.70% of total)
+	tuples: 147251 removed, 585137 remain, 258 are dead but not yet removable
+	removable cutoff: 89506696, which was 2938 XIDs old when operation ended
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	index scan needed: 21376 pages from table (80.04% of total) had 342153 dead item identifiers removed
+	index "jobs_pkey": pages: 2054 in total, 326 newly deleted, 326 currently deleted, 326 reusable
+	index "jobs_ready_tenant": pages: 47 in total, 27 newly deleted, 44 currently deleted, 17 reusable
+	index "jobs_ready_fifo": pages: 34 in total, 17 newly deleted, 31 currently deleted, 14 reusable
+	index "jobs_leased_expiry": pages: 63 in total, 8 newly deleted, 60 currently deleted, 52 reusable
+	index "jobs_idempotency": pages: 10243 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 2687 in total, 443 newly deleted, 461 currently deleted, 461 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 489.041 MB/s, avg write rate: 363.340 MB/s
+	buffer usage: 55397 hits, 38232 misses, 28405 dirtied
+	WAL usage: 71139 records, 769 full page images, 11525844 bytes
+	system usage: CPU: user: 0.23 s, system: 0.27 s, elapsed: 0.61 s
+2026-11-01 00:54:05.558 PDT [25738] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 241.304 MB/s, avg write rate: 0.154 MB/s
+	buffer usage: 8448 hits, 18841 misses, 12 dirtied
+	system usage: CPU: user: 0.39 s, system: 0.08 s, elapsed: 0.60 s
+2026-11-01 00:54:21.375 PDT [56140] LOG:  checkpoint complete: wrote 7158 buffers (43.7%); 0 WAL file(s) added, 0 removed, 33 recycled; write=78.014 s, sync=0.166 s, total=78.255 s; sync files=23, longest=0.105 s, average=0.008 s; distance=540673 kB, estimate=540673 kB; lsn=2D/90BFBC10, redo lsn=2D/730006D8
+2026-11-01 00:54:36.311 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 00:55:04.933 PDT [25951] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26705 remain, 25313 scanned (94.79% of total)
+	tuples: 148796 removed, 585673 remain, 258 are dead but not yet removable
+	removable cutoff: 89812174, which was 2410 XIDs old when operation ended
+	frozen: 636 pages from table (2.38% of total) had 12972 tuples frozen
+	index scan needed: 21288 pages from table (79.72% of total) had 338990 dead item identifiers removed
+	index "jobs_pkey": pages: 2122 in total, 322 newly deleted, 322 currently deleted, 322 reusable
+	index "jobs_ready_tenant": pages: 47 in total, 17 newly deleted, 44 currently deleted, 27 reusable
+	index "jobs_ready_fifo": pages: 34 in total, 13 newly deleted, 31 currently deleted, 18 reusable
+	index "jobs_leased_expiry": pages: 63 in total, 4 newly deleted, 60 currently deleted, 56 reusable
+	index "jobs_idempotency": pages: 10501 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 2687 in total, 432 newly deleted, 456 currently deleted, 456 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 509.463 MB/s, avg write rate: 409.453 MB/s
+	buffer usage: 54524 hits, 38705 misses, 31107 dirtied
+	WAL usage: 72220 records, 1994 full page images, 18129542 bytes
+	system usage: CPU: user: 0.24 s, system: 0.27 s, elapsed: 0.59 s
+2026-11-01 00:55:05.462 PDT [25951] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 279.948 MB/s, avg write rate: 0.192 MB/s
+	buffer usage: 8370 hits, 18920 misses, 13 dirtied
+	system usage: CPU: user: 0.40 s, system: 0.07 s, elapsed: 0.52 s
+2026-11-01 00:55:55.667 PDT [56140] LOG:  checkpoint complete: wrote 2352 buffers (14.4%); 0 WAL file(s) added, 0 removed, 33 recycled; write=79.215 s, sync=0.084 s, total=79.356 s; sync files=23, longest=0.041 s, average=0.004 s; distance=540671 kB, estimate=540673 kB; lsn=2D/B1CC73E8, redo lsn=2D/94000438
+2026-11-01 00:56:03.161 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 00:56:05.051 PDT [26162] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26705 remain, 22784 scanned (85.32% of total)
+	tuples: 140030 removed, 571597 remain, 91 are dead but not yet removable
+	removable cutoff: 90122607, which was 2352 XIDs old when operation ended
+	frozen: 16493 pages from table (61.76% of total) had 267581 tuples frozen
+	index scan needed: 20283 pages from table (75.95% of total) had 340359 dead item identifiers removed
+	index "jobs_pkey": pages: 2159 in total, 330 newly deleted, 330 currently deleted, 0 reusable
+	index "jobs_ready_tenant": pages: 47 in total, 27 newly deleted, 44 currently deleted, 17 reusable
+	index "jobs_ready_fifo": pages: 39 in total, 23 newly deleted, 36 currently deleted, 13 reusable
+	index "jobs_leased_expiry": pages: 63 in total, 8 newly deleted, 60 currently deleted, 52 reusable
+	index "jobs_idempotency": pages: 10640 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 2687 in total, 438 newly deleted, 458 currently deleted, 20 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 391.057 MB/s, avg write rate: 359.561 MB/s
+	buffer usage: 51203 hits, 35547 misses, 32684 dirtied
+	WAL usage: 70911 records, 27862 full page images, 133530930 bytes
+	system usage: CPU: user: 0.26 s, system: 0.25 s, elapsed: 0.71 s
+2026-11-01 00:56:05.693 PDT [26162] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 235.020 MB/s, avg write rate: 0.110 MB/s
+	buffer usage: 7968 hits, 19313 misses, 9 dirtied
+	system usage: CPU: user: 0.40 s, system: 0.07 s, elapsed: 0.64 s
+2026-11-01 00:57:04.919 PDT [26377] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26705 remain, 23162 scanned (86.73% of total)
+	tuples: 140391 removed, 574955 remain, 237 are dead but not yet removable
+	removable cutoff: 90432559, which was 2726 XIDs old when operation ended
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	index scan needed: 22232 pages from table (83.25% of total) had 340141 dead item identifiers removed
+	index "jobs_pkey": pages: 2527 in total, 327 newly deleted, 657 currently deleted, 657 reusable
+	index "jobs_ready_tenant": pages: 50 in total, 20 newly deleted, 47 currently deleted, 27 reusable
+	index "jobs_ready_fifo": pages: 44 in total, 18 newly deleted, 41 currently deleted, 23 reusable
+	index "jobs_leased_expiry": pages: 63 in total, 8 newly deleted, 60 currently deleted, 52 reusable
+	index "jobs_idempotency": pages: 10772 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3104 in total, 435 newly deleted, 873 currently deleted, 873 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 522.181 MB/s, avg write rate: 443.308 MB/s
+	buffer usage: 53209 hits, 38631 misses, 32796 dirtied
+	WAL usage: 76180 records, 762 full page images, 11696330 bytes
+	system usage: CPU: user: 0.23 s, system: 0.27 s, elapsed: 0.57 s
+2026-11-01 00:57:05.439 PDT [26377] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 293.795 MB/s, avg write rate: 0.135 MB/s
+	buffer usage: 7726 hits, 19555 misses, 9 dirtied
+	system usage: CPU: user: 0.39 s, system: 0.07 s, elapsed: 0.52 s
+2026-11-01 00:57:23.660 PDT [56140] LOG:  checkpoint complete: wrote 4911 buffers (30.0%); 0 WAL file(s) added, 0 removed, 33 recycled; write=80.268 s, sync=0.132 s, total=80.499 s; sync files=20, longest=0.080 s, average=0.007 s; distance=540674 kB, estimate=540674 kB; lsn=2D/D2BDA5E0, redo lsn=2D/B5000C40
+2026-11-01 00:57:38.630 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 00:58:05.011 PDT [26594] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26705 remain, 25932 scanned (97.11% of total)
+	tuples: 145369 removed, 583558 remain, 247 are dead but not yet removable
+	removable cutoff: 90744381, which was 3102 XIDs old when operation ended
+	frozen: 3673 pages from table (13.75% of total) had 38319 tuples frozen
+	index scan needed: 24291 pages from table (90.96% of total) had 340156 dead item identifiers removed
+	index "jobs_pkey": pages: 2527 in total, 348 newly deleted, 645 currently deleted, 645 reusable
+	index "jobs_ready_tenant": pages: 50 in total, 18 newly deleted, 47 currently deleted, 29 reusable
+	index "jobs_ready_fifo": pages: 44 in total, 13 newly deleted, 41 currently deleted, 28 reusable
+	index "jobs_leased_expiry": pages: 63 in total, 5 newly deleted, 60 currently deleted, 55 reusable
+	index "jobs_idempotency": pages: 10852 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3104 in total, 436 newly deleted, 873 currently deleted, 437 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 510.318 MB/s, avg write rate: 418.063 MB/s
+	buffer usage: 55518 hits, 43644 misses, 35754 dirtied
+	WAL usage: 81315 records, 9206 full page images, 65778209 bytes
+	system usage: CPU: user: 0.27 s, system: 0.32 s, elapsed: 0.66 s
+2026-11-01 00:58:05.591 PDT [26594] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 265.127 MB/s, avg write rate: 0.121 MB/s
+	buffer usage: 7598 hits, 19683 misses, 9 dirtied
+	system usage: CPU: user: 0.36 s, system: 0.06 s, elapsed: 0.57 s
+2026-11-01 00:58:53.159 PDT [56140] LOG:  checkpoint complete: wrote 1259 buffers (7.7%); 0 WAL file(s) added, 0 removed, 33 recycled; write=74.354 s, sync=0.098 s, total=74.530 s; sync files=21, longest=0.062 s, average=0.005 s; distance=540670 kB, estimate=540673 kB; lsn=2D/F3BA9440, redo lsn=2D/D60006F8
+2026-11-01 00:59:01.157 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 00:59:05.097 PDT [26802] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26705 remain, 26556 scanned (99.44% of total)
+	tuples: 154332 removed, 579437 remain, 381 are dead but not yet removable
+	removable cutoff: 91055778, which was 3176 XIDs old when operation ended
+	new relfrozenxid: 89483744, which is 1893713 XIDs ahead of previous value
+	frozen: 20179 pages from table (75.56% of total) had 279386 tuples frozen
+	index scan needed: 25535 pages from table (95.62% of total) had 342958 dead item identifiers removed
+	index "jobs_pkey": pages: 2527 in total, 372 newly deleted, 649 currently deleted, 649 reusable
+	index "jobs_ready_tenant": pages: 51 in total, 30 newly deleted, 48 currently deleted, 18 reusable
+	index "jobs_ready_fifo": pages: 44 in total, 18 newly deleted, 41 currently deleted, 23 reusable
+	index "jobs_leased_expiry": pages: 63 in total, 6 newly deleted, 60 currently deleted, 54 reusable
+	index "jobs_idempotency": pages: 10950 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3104 in total, 447 newly deleted, 883 currently deleted, 883 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 464.768 MB/s, avg write rate: 401.148 MB/s
+	buffer usage: 59170 hits, 44782 misses, 38652 dirtied
+	WAL usage: 86134 records, 32076 full page images, 163837086 bytes
+	system usage: CPU: user: 0.32 s, system: 0.34 s, elapsed: 0.75 s
+2026-11-01 00:59:05.784 PDT [26802] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 211.745 MB/s, avg write rate: 0.102 MB/s
+	buffer usage: 8661 hits, 18620 misses, 9 dirtied
+	system usage: CPU: user: 0.40 s, system: 0.07 s, elapsed: 0.68 s
+2026-11-01 01:00:05.002 PDT [27004] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26705 remain, 25886 scanned (96.93% of total)
+	tuples: 145902 removed, 594835 remain, 439 are dead but not yet removable
+	removable cutoff: 91366566, which was 3112 XIDs old when operation ended
+	new relfrozenxid: 89789536, which is 305792 XIDs ahead of previous value
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	index scan needed: 24809 pages from table (92.90% of total) had 339029 dead item identifiers removed
+	index "jobs_pkey": pages: 2527 in total, 384 newly deleted, 665 currently deleted, 665 reusable
+	index "jobs_ready_tenant": pages: 72 in total, 39 newly deleted, 69 currently deleted, 30 reusable
+	index "jobs_ready_fifo": pages: 47 in total, 26 newly deleted, 44 currently deleted, 18 reusable
+	index "jobs_leased_expiry": pages: 63 in total, 7 newly deleted, 60 currently deleted, 53 reusable
+	index "jobs_idempotency": pages: 11038 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3104 in total, 433 newly deleted, 881 currently deleted, 881 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 521.753 MB/s, avg write rate: 424.203 MB/s
+	buffer usage: 57388 hits, 43896 misses, 35689 dirtied
+	WAL usage: 83651 records, 817 full page images, 12095244 bytes
+	system usage: CPU: user: 0.26 s, system: 0.32 s, elapsed: 0.65 s
+2026-11-01 01:00:05.578 PDT [27004] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 250.109 MB/s, avg write rate: 0.122 MB/s
+	buffer usage: 8841 hits, 18440 misses, 9 dirtied
+	system usage: CPU: user: 0.38 s, system: 0.07 s, elapsed: 0.57 s
+2026-11-01 01:00:15.335 PDT [56140] LOG:  checkpoint complete: wrote 3712 buffers (22.7%); 0 WAL file(s) added, 0 removed, 33 recycled; write=73.955 s, sync=0.154 s, total=74.178 s; sync files=20, longest=0.095 s, average=0.008 s; distance=540671 kB, estimate=540673 kB; lsn=2E/14BCCF20, redo lsn=2D/F70006F0
+2026-11-01 01:00:30.341 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:01:04.987 PDT [27224] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26705 remain, 25929 scanned (97.09% of total)
+	tuples: 148924 removed, 592642 remain, 186 are dead but not yet removable
+	removable cutoff: 91676079, which was 3083 XIDs old when operation ended
+	new relfrozenxid: 90099783, which is 310247 XIDs ahead of previous value
+	frozen: 107 pages from table (0.40% of total) had 1829 tuples frozen
+	index scan needed: 24771 pages from table (92.76% of total) had 341502 dead item identifiers removed
+	index "jobs_pkey": pages: 2527 in total, 368 newly deleted, 661 currently deleted, 661 reusable
+	index "jobs_ready_tenant": pages: 84 in total, 42 newly deleted, 81 currently deleted, 39 reusable
+	index "jobs_ready_fifo": pages: 59 in total, 30 newly deleted, 56 currently deleted, 26 reusable
+	index "jobs_leased_expiry": pages: 63 in total, 10 newly deleted, 60 currently deleted, 50 reusable
+	index "jobs_idempotency": pages: 11120 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3104 in total, 439 newly deleted, 883 currently deleted, 883 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 529.986 MB/s, avg write rate: 434.781 MB/s
+	buffer usage: 57909 hits, 43566 misses, 35740 dirtied
+	WAL usage: 82789 records, 1170 full page images, 14027104 bytes
+	system usage: CPU: user: 0.26 s, system: 0.31 s, elapsed: 0.64 s
+2026-11-01 01:01:05.535 PDT [27224] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 263.016 MB/s, avg write rate: 0.128 MB/s
+	buffer usage: 8832 hits, 18449 misses, 9 dirtied
+	system usage: CPU: user: 0.36 s, system: 0.07 s, elapsed: 0.54 s
+2026-11-01 01:01:44.816 PDT [56140] LOG:  checkpoint complete: wrote 2719 buffers (16.6%); 0 WAL file(s) added, 0 removed, 33 recycled; write=74.376 s, sync=0.080 s, total=74.475 s; sync files=21, longest=0.056 s, average=0.004 s; distance=540672 kB, estimate=540673 kB; lsn=2E/35B8F128, redo lsn=2E/180007A8
+2026-11-01 01:01:58.223 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:02:05.086 PDT [27431] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26705 remain, 25987 scanned (97.31% of total)
+	tuples: 152970 removed, 591440 remain, 218 are dead but not yet removable
+	removable cutoff: 91983153, which was 2448 XIDs old when operation ended
+	new relfrozenxid: 90409664, which is 309881 XIDs ahead of previous value
+	frozen: 10908 pages from table (40.85% of total) had 189662 tuples frozen
+	index scan needed: 24748 pages from table (92.67% of total) had 340128 dead item identifiers removed
+	index "jobs_pkey": pages: 2527 in total, 369 newly deleted, 639 currently deleted, 270 reusable
+	index "jobs_ready_tenant": pages: 84 in total, 38 newly deleted, 81 currently deleted, 43 reusable
+	index "jobs_ready_fifo": pages: 62 in total, 29 newly deleted, 59 currently deleted, 30 reusable
+	index "jobs_leased_expiry": pages: 63 in total, 5 newly deleted, 60 currently deleted, 55 reusable
+	index "jobs_idempotency": pages: 11168 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3104 in total, 437 newly deleted, 885 currently deleted, 505 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 463.198 MB/s, avg write rate: 390.376 MB/s
+	buffer usage: 56402 hits, 43781 misses, 36898 dirtied
+	WAL usage: 84377 records, 18539 full page images, 101896364 bytes
+	system usage: CPU: user: 0.28 s, system: 0.31 s, elapsed: 0.73 s
+2026-11-01 01:02:05.809 PDT [27431] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 200.110 MB/s, avg write rate: 0.097 MB/s
+	buffer usage: 8762 hits, 18519 misses, 9 dirtied
+	system usage: CPU: user: 0.40 s, system: 0.07 s, elapsed: 0.72 s
+2026-11-01 01:03:05.036 PDT [27662] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26705 remain, 22767 scanned (85.25% of total)
+	tuples: 138403 removed, 576041 remain, 336 are dead but not yet removable
+	removable cutoff: 92290919, which was 3245 XIDs old when operation ended
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	index scan needed: 22194 pages from table (83.11% of total) had 339316 dead item identifiers removed
+	index "jobs_pkey": pages: 2638 in total, 355 newly deleted, 724 currently deleted, 724 reusable
+	index "jobs_ready_tenant": pages: 84 in total, 36 newly deleted, 81 currently deleted, 45 reusable
+	index "jobs_ready_fifo": pages: 62 in total, 26 newly deleted, 59 currently deleted, 33 reusable
+	index "jobs_leased_expiry": pages: 63 in total, 7 newly deleted, 60 currently deleted, 53 reusable
+	index "jobs_idempotency": pages: 11264 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3104 in total, 431 newly deleted, 877 currently deleted, 839 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 440.740 MB/s, avg write rate: 395.960 MB/s
+	buffer usage: 54703 hits, 38789 misses, 34848 dirtied
+	WAL usage: 78058 records, 786 full page images, 11777209 bytes
+	system usage: CPU: user: 0.23 s, system: 0.30 s, elapsed: 0.68 s
+2026-11-01 01:03:05.131 PDT [56140] LOG:  checkpoint complete: wrote 233 buffers (1.4%); 0 WAL file(s) added, 0 removed, 33 recycled; write=66.722 s, sync=0.150 s, total=66.909 s; sync files=20, longest=0.075 s, average=0.008 s; distance=540674 kB, estimate=540674 kB; lsn=2E/56D40198, redo lsn=2E/39001140
+2026-11-01 01:03:05.636 PDT [27662] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 279.737 MB/s, avg write rate: 0.132 MB/s
+	buffer usage: 8232 hits, 19049 misses, 9 dirtied
+	system usage: CPU: user: 0.39 s, system: 0.07 s, elapsed: 0.53 s
+2026-11-01 01:03:19.562 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:04:06.522 PDT [27868] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 690 removed, 26015 remain, 24854 scanned (93.07% of total)
+	tuples: 140046 removed, 586682 remain, 288 are dead but not yet removable
+	removable cutoff: 92577703, which was 10307 XIDs old when operation ended
+	frozen: 1416 pages from table (5.30% of total) had 11068 tuples frozen
+	index scan needed: 24541 pages from table (91.90% of total) had 340023 dead item identifiers removed
+	index "jobs_pkey": pages: 2638 in total, 364 newly deleted, 731 currently deleted, 731 reusable
+	index "jobs_ready_tenant": pages: 84 in total, 29 newly deleted, 81 currently deleted, 52 reusable
+	index "jobs_ready_fifo": pages: 62 in total, 25 newly deleted, 59 currently deleted, 34 reusable
+	index "jobs_leased_expiry": pages: 63 in total, 6 newly deleted, 60 currently deleted, 54 reusable
+	index "jobs_idempotency": pages: 11322 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3104 in total, 437 newly deleted, 879 currently deleted, 853 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 157.594 MB/s, avg write rate: 140.507 MB/s
+	buffer usage: 55537 hits, 43846 misses, 39092 dirtied
+	WAL usage: 84858 records, 3966 full page images, 32698234 bytes
+	system usage: CPU: user: 0.26 s, system: 0.31 s, elapsed: 2.17 s
+2026-11-01 01:04:07.091 PDT [27868] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 263.469 MB/s, avg write rate: 0.124 MB/s
+	buffer usage: 7402 hits, 19189 misses, 9 dirtied
+	system usage: CPU: user: 0.40 s, system: 0.06 s, elapsed: 0.56 s
+2026-11-01 01:04:38.261 PDT [56140] LOG:  checkpoint complete: wrote 260 buffers (1.6%); 0 WAL file(s) added, 0 removed, 33 recycled; write=78.531 s, sync=0.065 s, total=78.699 s; sync files=21, longest=0.050 s, average=0.004 s; distance=540668 kB, estimate=540673 kB; lsn=2E/77BA5430, redo lsn=2E/5A0002B8
+2026-11-01 01:04:53.336 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:05:05.242 PDT [28081] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26091 remain, 26091 scanned (100.00% of total)
+	tuples: 95204 removed, 628059 remain, 5094 are dead but not yet removable
+	removable cutoff: 92855651, which was 1330 XIDs old when operation ended
+	new relfrozenxid: 91199706, which is 790042 XIDs ahead of previous value
+	frozen: 4920 pages from table (18.86% of total) had 105913 tuples frozen
+	index scan needed: 25845 pages from table (99.06% of total) had 288158 dead item identifiers removed
+	index "jobs_pkey": pages: 2638 in total, 191 newly deleted, 519 currently deleted, 482 reusable
+	index "jobs_ready_tenant": pages: 157 in total, 125 newly deleted, 154 currently deleted, 29 reusable
+	index "jobs_ready_fifo": pages: 131 in total, 103 newly deleted, 128 currently deleted, 25 reusable
+	index "jobs_leased_expiry": pages: 63 in total, 30 newly deleted, 60 currently deleted, 30 reusable
+	index "jobs_idempotency": pages: 11377 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3104 in total, 239 newly deleted, 683 currently deleted, 444 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 348.552 MB/s, avg write rate: 348.429 MB/s
+	buffer usage: 61762 hits, 39659 misses, 39645 dirtied
+	WAL usage: 79564 records, 9441 full page images, 58769718 bytes
+	system usage: CPU: user: 0.25 s, system: 0.24 s, elapsed: 0.88 s
+2026-11-01 01:05:05.733 PDT [28081] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 198.218 MB/s, avg write rate: 0.143 MB/s
+	buffer usage: 14213 hits, 12483 misses, 9 dirtied
+	system usage: CPU: user: 0.38 s, system: 0.04 s, elapsed: 0.49 s
+2026-11-01 01:06:01.137 PDT [56140] LOG:  checkpoint complete: wrote 537 buffers (3.3%); 0 WAL file(s) added, 0 removed, 33 recycled; write=67.655 s, sync=0.078 s, total=67.801 s; sync files=20, longest=0.066 s, average=0.004 s; distance=540673 kB, estimate=540673 kB; lsn=2E/98BB7B60, redo lsn=2E/7B000778
+2026-11-01 01:06:05.377 PDT [28306] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 27033 remain, 27033 scanned (100.00% of total)
+	tuples: 111523 removed, 627143 remain, 2503 are dead but not yet removable
+	tuples missed: 3655 dead from 798 pages not removed due to cleanup lock contention
+	removable cutoff: 93119783, which was 4279 XIDs old when operation ended
+	new relfrozenxid: 91394956, which is 195250 XIDs ahead of previous value
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	index scan needed: 26227 pages from table (97.02% of total) had 341429 dead item identifiers removed
+	index "jobs_pkey": pages: 2638 in total, 331 newly deleted, 397 currently deleted, 272 reusable
+	index "jobs_ready_tenant": pages: 335 in total, 194 newly deleted, 319 currently deleted, 125 reusable
+	index "jobs_ready_fifo": pages: 289 in total, 173 newly deleted, 276 currently deleted, 103 reusable
+	index "jobs_leased_expiry": pages: 111 in total, 73 newly deleted, 103 currently deleted, 30 reusable
+	index "jobs_idempotency": pages: 11689 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3104 in total, 398 newly deleted, 642 currently deleted, 244 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 324.203 MB/s, avg write rate: 287.215 MB/s
+	buffer usage: 65126 hits, 42502 misses, 37653 dirtied
+	WAL usage: 84857 records, 820 full page images, 11888667 bytes
+	system usage: CPU: user: 0.29 s, system: 0.35 s, elapsed: 1.02 s
+2026-11-01 01:06:05.985 PDT [28306] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 189.106 MB/s, avg write rate: 0.116 MB/s
+	buffer usage: 13032 hits, 14717 misses, 9 dirtied
+	system usage: CPU: user: 0.40 s, system: 0.06 s, elapsed: 0.60 s
+2026-11-01 01:06:10.407 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:07:05.358 PDT [28512] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 27435 remain, 27435 scanned (100.00% of total)
+	tuples: 126155 removed, 615770 remain, 1102 are dead but not yet removable
+	tuples missed: 4 dead from 1 pages not removed due to cleanup lock contention
+	removable cutoff: 93374599, which was 4040 XIDs old when operation ended
+	new relfrozenxid: 91854129, which is 459173 XIDs ahead of previous value
+	frozen: 1190 pages from table (4.34% of total) had 25401 tuples frozen
+	index scan needed: 26652 pages from table (97.15% of total) had 351498 dead item identifiers removed
+	index "jobs_pkey": pages: 2824 in total, 442 newly deleted, 567 currently deleted, 125 reusable
+	index "jobs_ready_tenant": pages: 1140 in total, 938 newly deleted, 1132 currently deleted, 194 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 223 newly deleted, 396 currently deleted, 173 reusable
+	index "jobs_leased_expiry": pages: 178 in total, 101 newly deleted, 174 currently deleted, 73 reusable
+	index "jobs_idempotency": pages: 11876 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3298 in total, 520 newly deleted, 918 currently deleted, 398 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 364.747 MB/s, avg write rate: 365.469 MB/s
+	buffer usage: 70064 hits, 46964 misses, 47057 dirtied
+	WAL usage: 90822 records, 2739 full page images, 23647110 bytes
+	system usage: CPU: user: 0.29 s, system: 0.34 s, elapsed: 1.00 s
+2026-11-01 01:07:06.069 PDT [28512] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 181.731 MB/s, avg write rate: 0.099 MB/s
+	buffer usage: 11632 hits, 16539 misses, 9 dirtied
+	system usage: CPU: user: 0.38 s, system: 0.07 s, elapsed: 0.71 s
+2026-11-01 01:07:24.349 PDT [56140] LOG:  checkpoint complete: wrote 1829 buffers (11.2%); 0 WAL file(s) added, 0 removed, 33 recycled; write=73.693 s, sync=0.154 s, total=73.943 s; sync files=21, longest=0.099 s, average=0.008 s; distance=540672 kB, estimate=540673 kB; lsn=2E/B9BF7140, redo lsn=2E/9C000AD8
+2026-11-01 01:07:39.379 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:08:05.049 PDT [28740] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 27595 remain, 26230 scanned (95.05% of total)
+	tuples: 163130 removed, 583932 remain, 236 are dead but not yet removable
+	removable cutoff: 93657858, which was 3045 XIDs old when operation ended
+	frozen: 1700 pages from table (6.16% of total) had 29483 tuples frozen
+	index scan needed: 25802 pages from table (93.50% of total) had 379668 dead item identifiers removed
+	index "jobs_pkey": pages: 3068 in total, 549 newly deleted, 991 currently deleted, 914 reusable
+	index "jobs_ready_tenant": pages: 1140 in total, 46 newly deleted, 1136 currently deleted, 1090 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 31 newly deleted, 399 currently deleted, 368 reusable
+	index "jobs_leased_expiry": pages: 178 in total, 13 newly deleted, 175 currently deleted, 162 reusable
+	index "jobs_idempotency": pages: 11909 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 588 newly deleted, 1108 currently deleted, 1108 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 555.476 MB/s, avg write rate: 470.269 MB/s
+	buffer usage: 60182 hits, 49402 misses, 41824 dirtied
+	WAL usage: 89523 records, 3712 full page images, 26131559 bytes
+	system usage: CPU: user: 0.27 s, system: 0.34 s, elapsed: 0.69 s
+2026-11-01 01:08:05.555 PDT [28740] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 312.176 MB/s, avg write rate: 0.139 MB/s
+	buffer usage: 7952 hits, 20219 misses, 9 dirtied
+	system usage: CPU: user: 0.38 s, system: 0.07 s, elapsed: 0.50 s
+2026-11-01 01:08:49.003 PDT [56140] LOG:  checkpoint complete: wrote 2300 buffers (14.0%); 0 WAL file(s) added, 0 removed, 33 recycled; write=69.446 s, sync=0.094 s, total=69.625 s; sync files=20, longest=0.068 s, average=0.005 s; distance=540670 kB, estimate=540673 kB; lsn=2E/DABBCBB0, redo lsn=2E/BD0005C8
+2026-11-01 01:09:00.191 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:09:05.170 PDT [28949] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 27595 remain, 23172 scanned (83.97% of total)
+	tuples: 144063 removed, 581749 remain, 289 are dead but not yet removable
+	removable cutoff: 93942740, which was 2833 XIDs old when operation ended
+	frozen: 20131 pages from table (72.95% of total) had 374152 tuples frozen
+	index scan needed: 22607 pages from table (81.92% of total) had 342046 dead item identifiers removed
+	index "jobs_pkey": pages: 3068 in total, 365 newly deleted, 993 currently deleted, 955 reusable
+	index "jobs_ready_tenant": pages: 1140 in total, 35 newly deleted, 1136 currently deleted, 1101 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 23 newly deleted, 399 currently deleted, 376 reusable
+	index "jobs_leased_expiry": pages: 178 in total, 6 newly deleted, 175 currently deleted, 169 reusable
+	index "jobs_idempotency": pages: 11912 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 443 newly deleted, 1114 currently deleted, 1063 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 457.541 MB/s, avg write rate: 410.060 MB/s
+	buffer usage: 57614 hits, 41995 misses, 37637 dirtied
+	WAL usage: 80975 records, 27454 full page images, 134405307 bytes
+	system usage: CPU: user: 0.31 s, system: 0.33 s, elapsed: 0.71 s
+2026-11-01 01:09:05.757 PDT [28949] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 262.045 MB/s, avg write rate: 0.120 MB/s
+	buffer usage: 8482 hits, 19689 misses, 9 dirtied
+	system usage: CPU: user: 0.39 s, system: 0.08 s, elapsed: 0.58 s
+2026-11-01 01:10:05.074 PDT [29151] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 27595 remain, 24201 scanned (87.70% of total)
+	tuples: 145507 removed, 584740 remain, 191 are dead but not yet removable
+	removable cutoff: 94225554, which was 2698 XIDs old when operation ended
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	index scan needed: 24163 pages from table (87.56% of total) had 340672 dead item identifiers removed
+	index "jobs_pkey": pages: 3068 in total, 375 newly deleted, 1002 currently deleted, 975 reusable
+	index "jobs_ready_tenant": pages: 1140 in total, 47 newly deleted, 1136 currently deleted, 1089 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 40 newly deleted, 399 currently deleted, 359 reusable
+	index "jobs_leased_expiry": pages: 178 in total, 10 newly deleted, 175 currently deleted, 165 reusable
+	index "jobs_idempotency": pages: 11926 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 437 newly deleted, 1115 currently deleted, 1115 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 561.872 MB/s, avg write rate: 494.643 MB/s
+	buffer usage: 59126 hits, 44387 misses, 39076 dirtied
+	WAL usage: 85976 records, 812 full page images, 12336197 bytes
+	system usage: CPU: user: 0.25 s, system: 0.30 s, elapsed: 0.61 s
+2026-11-01 01:10:05.562 PDT [29151] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 309.516 MB/s, avg write rate: 0.144 MB/s
+	buffer usage: 8877 hits, 19294 misses, 9 dirtied
+	system usage: CPU: user: 0.37 s, system: 0.06 s, elapsed: 0.48 s
+2026-11-01 01:10:17.180 PDT [56140] LOG:  checkpoint complete: wrote 1854 buffers (11.3%); 0 WAL file(s) added, 0 removed, 33 recycled; write=76.799 s, sync=0.135 s, total=76.989 s; sync files=20, longest=0.080 s, average=0.007 s; distance=540671 kB, estimate=540673 kB; lsn=2E/FBBE19B8, redo lsn=2E/DE0002D0
+2026-11-01 01:10:32.163 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:11:05.255 PDT [29358] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 27595 remain, 26743 scanned (96.91% of total)
+	tuples: 157948 removed, 577441 remain, 252 are dead but not yet removable
+	tuples missed: 17 dead from 1 pages not removed due to cleanup lock contention
+	removable cutoff: 94505633, which was 2874 XIDs old when operation ended
+	frozen: 395 pages from table (1.43% of total) had 4101 tuples frozen
+	index scan needed: 26697 pages from table (96.75% of total) had 344991 dead item identifiers removed
+	index "jobs_pkey": pages: 3068 in total, 477 newly deleted, 1087 currently deleted, 778 reusable
+	index "jobs_ready_tenant": pages: 1140 in total, 76 newly deleted, 1136 currently deleted, 1060 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 58 newly deleted, 399 currently deleted, 341 reusable
+	index "jobs_leased_expiry": pages: 178 in total, 14 newly deleted, 175 currently deleted, 161 reusable
+	index "jobs_idempotency": pages: 11953 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 450 newly deleted, 1126 currently deleted, 986 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 537.305 MB/s, avg write rate: 477.671 MB/s
+	buffer usage: 62943 hits, 48059 misses, 42725 dirtied
+	WAL usage: 94260 records, 1908 full page images, 18817011 bytes
+	system usage: CPU: user: 0.28 s, system: 0.35 s, elapsed: 0.69 s
+2026-11-01 01:11:05.807 PDT [29358] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 252.666 MB/s, avg write rate: 0.128 MB/s
+	buffer usage: 10351 hits, 17820 misses, 9 dirtied
+	system usage: CPU: user: 0.39 s, system: 0.06 s, elapsed: 0.55 s
+2026-11-01 01:11:45.209 PDT [56140] LOG:  checkpoint complete: wrote 701 buffers (4.3%); 0 WAL file(s) added, 0 removed, 33 recycled; write=72.899 s, sync=0.097 s, total=73.047 s; sync files=20, longest=0.070 s, average=0.005 s; distance=540673 kB, estimate=540673 kB; lsn=2F/1CBAAEA0, redo lsn=2E/FF000820
+2026-11-01 01:11:58.893 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:12:05.299 PDT [29581] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 27595 remain, 27174 scanned (98.47% of total)
+	tuples: 153184 removed, 577791 remain, 248 are dead but not yet removable
+	removable cutoff: 94782699, which was 3096 XIDs old when operation ended
+	frozen: 7256 pages from table (26.29% of total) had 84057 tuples frozen
+	index scan needed: 26969 pages from table (97.73% of total) had 338046 dead item identifiers removed
+	index "jobs_pkey": pages: 3068 in total, 448 newly deleted, 1140 currently deleted, 933 reusable
+	index "jobs_ready_tenant": pages: 1140 in total, 68 newly deleted, 1136 currently deleted, 1068 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 47 newly deleted, 399 currently deleted, 352 reusable
+	index "jobs_leased_expiry": pages: 178 in total, 11 newly deleted, 175 currently deleted, 164 reusable
+	index "jobs_idempotency": pages: 11979 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 432 newly deleted, 1122 currently deleted, 886 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 522.790 MB/s, avg write rate: 463.414 MB/s
+	buffer usage: 62452 hits, 49659 misses, 44019 dirtied
+	WAL usage: 94257 records, 14559 full page images, 78346192 bytes
+	system usage: CPU: user: 0.29 s, system: 0.36 s, elapsed: 0.74 s
+2026-11-01 01:12:05.830 PDT [29581] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 278.754 MB/s, avg write rate: 0.132 MB/s
+	buffer usage: 9189 hits, 18982 misses, 9 dirtied
+	system usage: CPU: user: 0.37 s, system: 0.07 s, elapsed: 0.53 s
+2026-11-01 01:13:05.113 PDT [56140] LOG:  checkpoint complete: wrote 627 buffers (3.8%); 0 WAL file(s) added, 0 removed, 33 recycled; write=65.963 s, sync=0.155 s, total=66.221 s; sync files=21, longest=0.089 s, average=0.008 s; distance=540672 kB, estimate=540673 kB; lsn=2F/3E023C70, redo lsn=2F/200008D0
+2026-11-01 01:13:10.480 PDT [29785] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 27595 remain, 26641 scanned (96.54% of total)
+	tuples: 162961 removed, 590117 remain, 345 are dead but not yet removable
+	removable cutoff: 95061999, which was 28192 XIDs old when operation ended
+	new relfrozenxid: 93652691, which is 1798562 XIDs ahead of previous value
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	index scan needed: 26445 pages from table (95.83% of total) had 343675 dead item identifiers removed
+	index "jobs_pkey": pages: 3068 in total, 401 newly deleted, 1156 currently deleted, 879 reusable
+	index "jobs_ready_tenant": pages: 1140 in total, 83 newly deleted, 1136 currently deleted, 1053 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 73 newly deleted, 399 currently deleted, 326 reusable
+	index "jobs_leased_expiry": pages: 178 in total, 16 newly deleted, 175 currently deleted, 159 reusable
+	index "jobs_idempotency": pages: 12005 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 451 newly deleted, 1137 currently deleted, 1083 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 61.261 MB/s, avg write rate: 51.776 MB/s
+	buffer usage: 64455 hits, 46439 misses, 39249 dirtied
+	WAL usage: 92708 records, 852 full page images, 12997801 bytes
+	system usage: CPU: user: 0.27 s, system: 0.36 s, elapsed: 5.92 s
+2026-11-01 01:13:10.947 PDT [29785] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 354.089 MB/s, avg write rate: 0.151 MB/s
+	buffer usage: 7005 hits, 21166 misses, 9 dirtied
+	system usage: CPU: user: 0.35 s, system: 0.06 s, elapsed: 0.46 s
+2026-11-01 01:13:17.912 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:14:10.269 PDT [30004] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 27595 remain, 25765 scanned (93.37% of total)
+	tuples: 148523 removed, 613679 remain, 287 are dead but not yet removable
+	removable cutoff: 95337205, which was 27291 XIDs old when operation ended
+	frozen: 624 pages from table (2.26% of total) had 13892 tuples frozen
+	index scan needed: 25675 pages from table (93.04% of total) had 333378 dead item identifiers removed
+	index "jobs_pkey": pages: 3068 in total, 338 newly deleted, 1130 currently deleted, 1119 reusable
+	index "jobs_ready_tenant": pages: 1140 in total, 106 newly deleted, 1136 currently deleted, 1030 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 19 newly deleted, 399 currently deleted, 380 reusable
+	index "jobs_leased_expiry": pages: 178 in total, 7 newly deleted, 175 currently deleted, 168 reusable
+	index "jobs_idempotency": pages: 12026 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 409 newly deleted, 1109 currently deleted, 1095 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 66.187 MB/s, avg write rate: 55.510 MB/s
+	buffer usage: 59787 hits, 48364 misses, 40562 dirtied
+	WAL usage: 87969 records, 1957 full page images, 18608230 bytes
+	system usage: CPU: user: 0.27 s, system: 0.34 s, elapsed: 5.70 s
+2026-11-01 01:14:10.775 PDT [30004] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 341.264 MB/s, avg write rate: 0.185 MB/s
+	buffer usage: 6076 hits, 22103 misses, 12 dirtied
+	system usage: CPU: user: 0.38 s, system: 0.07 s, elapsed: 0.50 s
+2026-11-01 01:14:35.691 PDT [56140] LOG:  checkpoint complete: wrote 4156 buffers (25.4%); 0 WAL file(s) added, 0 removed, 33 recycled; write=77.630 s, sync=0.062 s, total=77.780 s; sync files=23, longest=0.048 s, average=0.003 s; distance=540670 kB, estimate=540672 kB; lsn=2F/5EBA1168, redo lsn=2F/41000478
+2026-11-01 01:14:50.800 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:15:06.966 PDT [30206] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 1097 removed, 26498 remain, 26447 scanned (95.84% of total)
+	tuples: 168548 removed, 592405 remain, 238 are dead but not yet removable
+	removable cutoff: 95585763, which was 12377 XIDs old when operation ended
+	new relfrozenxid: 94221652, which is 568961 XIDs ahead of previous value
+	frozen: 1320 pages from table (4.78% of total) had 35009 tuples frozen
+	index scan needed: 26265 pages from table (95.18% of total) had 344828 dead item identifiers removed
+	index "jobs_pkey": pages: 3068 in total, 391 newly deleted, 972 currently deleted, 972 reusable
+	index "jobs_ready_tenant": pages: 1140 in total, 174 newly deleted, 1136 currently deleted, 974 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 74 newly deleted, 399 currently deleted, 325 reusable
+	index "jobs_leased_expiry": pages: 395 in total, 383 newly deleted, 390 currently deleted, 7 reusable
+	index "jobs_idempotency": pages: 12138 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 467 newly deleted, 1144 currently deleted, 1144 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 156.431 MB/s, avg write rate: 132.783 MB/s
+	buffer usage: 64887 hits, 48189 misses, 40904 dirtied
+	WAL usage: 93024 records, 5792 full page images, 39625188 bytes
+	system usage: CPU: user: 0.30 s, system: 0.35 s, elapsed: 2.40 s
+2026-11-01 01:15:07.439 PDT [30206] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 311.123 MB/s, avg write rate: 0.216 MB/s
+	buffer usage: 8323 hits, 18757 misses, 13 dirtied
+	system usage: CPU: user: 0.35 s, system: 0.06 s, elapsed: 0.47 s
+2026-11-01 01:15:56.833 PDT [56140] LOG:  checkpoint complete: wrote 2052 buffers (12.5%); 0 WAL file(s) added, 0 removed, 33 recycled; write=65.848 s, sync=0.097 s, total=66.033 s; sync files=24, longest=0.055 s, average=0.005 s; distance=540672 kB, estimate=540672 kB; lsn=2F/7FBE5D60, redo lsn=2F/620006D8
+2026-11-01 01:16:05.295 PDT [30413] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26498 remain, 23920 scanned (90.27% of total)
+	tuples: 141459 removed, 568256 remain, 188 are dead but not yet removable
+	tuples missed: 4 dead from 1 pages not removed due to cleanup lock contention
+	removable cutoff: 95871531, which was 2701 XIDs old when operation ended
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	index scan needed: 23691 pages from table (89.41% of total) had 335221 dead item identifiers removed
+	index "jobs_pkey": pages: 3068 in total, 345 newly deleted, 941 currently deleted, 597 reusable
+	index "jobs_ready_tenant": pages: 1140 in total, 30 newly deleted, 1136 currently deleted, 1106 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 21 newly deleted, 399 currently deleted, 378 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 30 newly deleted, 413 currently deleted, 390 reusable
+	index "jobs_idempotency": pages: 12154 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 403 newly deleted, 1104 currently deleted, 1104 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 550.471 MB/s, avg write rate: 487.362 MB/s
+	buffer usage: 56257 hits, 44790 misses, 39655 dirtied
+	WAL usage: 84554 records, 750 full page images, 11759298 bytes
+	system usage: CPU: user: 0.25 s, system: 0.31 s, elapsed: 0.63 s
+2026-11-01 01:16:05.797 PDT [30413] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 297.342 MB/s, avg write rate: 0.156 MB/s
+	buffer usage: 7972 hits, 19106 misses, 10 dirtied
+	system usage: CPU: user: 0.39 s, system: 0.06 s, elapsed: 0.50 s
+2026-11-01 01:16:05.925 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:17:05.341 PDT [30650] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26498 remain, 24923 scanned (94.06% of total)
+	tuples: 157016 removed, 566260 remain, 286 are dead but not yet removable
+	removable cutoff: 96144584, which was 2868 XIDs old when operation ended
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	index scan needed: 24920 pages from table (94.04% of total) had 349394 dead item identifiers removed
+	index "jobs_pkey": pages: 3068 in total, 443 newly deleted, 981 currently deleted, 981 reusable
+	index "jobs_ready_tenant": pages: 1140 in total, 106 newly deleted, 1136 currently deleted, 1030 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 86 newly deleted, 399 currently deleted, 313 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 28 newly deleted, 413 currently deleted, 385 reusable
+	index "jobs_idempotency": pages: 12176 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 473 newly deleted, 1140 currently deleted, 667 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 502.535 MB/s, avg write rate: 437.886 MB/s
+	buffer usage: 62327 hits, 43717 misses, 38093 dirtied
+	WAL usage: 89881 records, 958 full page images, 13387741 bytes
+	system usage: CPU: user: 0.27 s, system: 0.30 s, elapsed: 0.67 s
+2026-11-01 01:17:06.102 PDT [30650] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 161.297 MB/s, avg write rate: 0.175 MB/s
+	buffer usage: 11403 hits, 15691 misses, 17 dirtied
+	system usage: CPU: user: 0.35 s, system: 0.06 s, elapsed: 0.75 s
+2026-11-01 01:17:27.893 PDT [56140] LOG:  checkpoint complete: wrote 1880 buffers (11.5%); 0 WAL file(s) added, 0 removed, 33 recycled; write=81.732 s, sync=0.134 s, total=81.968 s; sync files=23, longest=0.082 s, average=0.006 s; distance=540672 kB, estimate=540672 kB; lsn=2F/A0BC24C8, redo lsn=2F/830006D8
+2026-11-01 01:17:42.947 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:18:05.345 PDT [30876] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26498 remain, 25305 scanned (95.50% of total)
+	tuples: 148758 removed, 574315 remain, 263 are dead but not yet removable
+	removable cutoff: 96421879, which was 2713 XIDs old when operation ended
+	frozen: 337 pages from table (1.27% of total) had 8885 tuples frozen
+	index scan needed: 25287 pages from table (95.43% of total) had 334053 dead item identifiers removed
+	index "jobs_pkey": pages: 3068 in total, 353 newly deleted, 945 currently deleted, 914 reusable
+	index "jobs_ready_tenant": pages: 1140 in total, 57 newly deleted, 1136 currently deleted, 1079 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 46 newly deleted, 399 currently deleted, 353 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 10 newly deleted, 413 currently deleted, 403 reusable
+	index "jobs_idempotency": pages: 12190 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 411 newly deleted, 1114 currently deleted, 1114 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 535.252 MB/s, avg write rate: 475.956 MB/s
+	buffer usage: 59854 hits, 46813 misses, 41627 dirtied
+	WAL usage: 90001 records, 2105 full page images, 19012914 bytes
+	system usage: CPU: user: 0.27 s, system: 0.34 s, elapsed: 0.68 s
+2026-11-01 01:18:05.919 PDT [30876] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 249.660 MB/s, avg write rate: 0.122 MB/s
+	buffer usage: 8731 hits, 18343 misses, 9 dirtied
+	system usage: CPU: user: 0.39 s, system: 0.07 s, elapsed: 0.57 s
+2026-11-01 01:18:55.132 PDT [56140] LOG:  checkpoint complete: wrote 1963 buffers (12.0%); 0 WAL file(s) added, 0 removed, 33 recycled; write=71.970 s, sync=0.110 s, total=72.185 s; sync files=21, longest=0.063 s, average=0.006 s; distance=540671 kB, estimate=540672 kB; lsn=2F/C1B95570, redo lsn=2F/A40004D8
+2026-11-01 01:19:05.235 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:19:05.638 PDT [31095] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26498 remain, 25893 scanned (97.72% of total)
+	tuples: 119631 removed, 613480 remain, 6339 are dead but not yet removable
+	removable cutoff: 96700749, which was 3279 XIDs old when operation ended
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	index scan needed: 25832 pages from table (97.49% of total) had 304317 dead item identifiers removed
+	index "jobs_pkey": pages: 3068 in total, 244 newly deleted, 783 currently deleted, 630 reusable
+	index "jobs_ready_tenant": pages: 1140 in total, 124 newly deleted, 1135 currently deleted, 1011 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 96 newly deleted, 399 currently deleted, 303 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 27 newly deleted, 413 currently deleted, 386 reusable
+	index "jobs_idempotency": pages: 12208 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 301 newly deleted, 979 currently deleted, 943 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 345.639 MB/s, avg write rate: 358.162 MB/s
+	buffer usage: 64553 hits, 42866 misses, 44419 dirtied
+	WAL usage: 77669 records, 27027 full page images, 142721970 bytes
+	system usage: CPU: user: 0.30 s, system: 0.35 s, elapsed: 0.96 s
+2026-11-01 01:19:06.261 PDT [31095] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 167.373 MB/s, avg write rate: 0.113 MB/s
+	buffer usage: 13727 hits, 13347 misses, 9 dirtied
+	system usage: CPU: user: 0.42 s, system: 0.04 s, elapsed: 0.62 s
+2026-11-01 01:20:05.336 PDT [31297] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26498 remain, 26498 scanned (100.00% of total)
+	tuples: 101272 removed, 624050 remain, 1043 are dead but not yet removable
+	tuples missed: 59 dead from 9 pages not removed due to cleanup lock contention
+	removable cutoff: 96970554, which was 2510 XIDs old when operation ended
+	new relfrozenxid: 95370180, which is 1148528 XIDs ahead of previous value
+	frozen: 4 pages from table (0.02% of total) had 113 tuples frozen
+	index scan needed: 26346 pages from table (99.43% of total) had 326238 dead item identifiers removed
+	index "jobs_pkey": pages: 3068 in total, 404 newly deleted, 762 currently deleted, 358 reusable
+	index "jobs_ready_tenant": pages: 1140 in total, 183 newly deleted, 1128 currently deleted, 945 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 152 newly deleted, 394 currently deleted, 242 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 65 newly deleted, 410 currently deleted, 345 reusable
+	index "jobs_idempotency": pages: 12265 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 378 newly deleted, 922 currently deleted, 544 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 527.625 MB/s, avg write rate: 444.597 MB/s
+	buffer usage: 66069 hits, 45138 misses, 38035 dirtied
+	WAL usage: 87123 records, 808 full page images, 11686628 bytes
+	system usage: CPU: user: 0.28 s, system: 0.31 s, elapsed: 0.66 s
+2026-11-01 01:20:05.942 PDT [31297] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 176.325 MB/s, avg write rate: 0.116 MB/s
+	buffer usage: 13514 hits, 13632 misses, 9 dirtied
+	system usage: CPU: user: 0.40 s, system: 0.05 s, elapsed: 0.60 s
+2026-11-01 01:20:20.456 PDT [56140] LOG:  checkpoint complete: wrote 5063 buffers (30.9%); 0 WAL file(s) added, 0 removed, 33 recycled; write=75.023 s, sync=0.134 s, total=75.222 s; sync files=21, longest=0.090 s, average=0.007 s; distance=540671 kB, estimate=540672 kB; lsn=2F/E2BCEC90, redo lsn=2F/C5000370
+2026-11-01 01:20:35.388 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:21:05.487 PDT [31508] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26570 remain, 26570 scanned (100.00% of total)
+	tuples: 160764 removed, 577349 remain, 104 are dead but not yet removable
+	removable cutoff: 97249571, which was 2897 XIDs old when operation ended
+	new relfrozenxid: 95847014, which is 476834 XIDs ahead of previous value
+	frozen: 123 pages from table (0.46% of total) had 2356 tuples frozen
+	index scan needed: 26402 pages from table (99.37% of total) had 387930 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 650 newly deleted, 1054 currently deleted, 1054 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 952 newly deleted, 1135 currently deleted, 183 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 36 newly deleted, 399 currently deleted, 363 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 10 newly deleted, 413 currently deleted, 403 reusable
+	index "jobs_idempotency": pages: 12315 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 624 newly deleted, 1108 currently deleted, 1072 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 567.073 MB/s, avg write rate: 493.514 MB/s
+	buffer usage: 66561 hits, 52345 misses, 45555 dirtied
+	WAL usage: 95225 records, 2355 full page images, 21961837 bytes
+	system usage: CPU: user: 0.28 s, system: 0.36 s, elapsed: 0.72 s
+2026-11-01 01:21:06.009 PDT [31508] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 305.662 MB/s, avg write rate: 0.135 MB/s
+	buffer usage: 6825 hits, 20384 misses, 9 dirtied
+	system usage: CPU: user: 0.39 s, system: 0.07 s, elapsed: 0.52 s
+2026-11-01 01:21:42.774 PDT [56140] LOG:  checkpoint complete: wrote 451 buffers (2.8%); 0 WAL file(s) added, 0 removed, 33 recycled; write=67.086 s, sync=0.091 s, total=67.386 s; sync files=19, longest=0.072 s, average=0.005 s; distance=540672 kB, estimate=540672 kB; lsn=30/3B8C868, redo lsn=2F/E60005C8
+2026-11-01 01:21:57.230 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:22:05.575 PDT [31725] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26633 remain, 24914 scanned (93.55% of total)
+	tuples: 153938 removed, 580958 remain, 361 are dead but not yet removable
+	removable cutoff: 97525101, which was 3338 XIDs old when operation ended
+	frozen: 1216 pages from table (4.57% of total) had 25896 tuples frozen
+	index scan needed: 24578 pages from table (92.28% of total) had 344788 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 397 newly deleted, 1055 currently deleted, 706 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 78 newly deleted, 1139 currently deleted, 1061 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 52 newly deleted, 399 currently deleted, 347 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 13 newly deleted, 413 currently deleted, 400 reusable
+	index "jobs_idempotency": pages: 12326 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 452 newly deleted, 1123 currently deleted, 737 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 444.482 MB/s, avg write rate: 392.538 MB/s
+	buffer usage: 58675 hits, 45908 misses, 40543 dirtied
+	WAL usage: 88053 records, 6186 full page images, 34039058 bytes
+	system usage: CPU: user: 0.27 s, system: 0.33 s, elapsed: 0.80 s
+2026-11-01 01:22:06.085 PDT [31725] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 278.339 MB/s, avg write rate: 0.153 MB/s
+	buffer usage: 9046 hits, 18170 misses, 10 dirtied
+	system usage: CPU: user: 0.39 s, system: 0.06 s, elapsed: 0.50 s
+2026-11-01 01:22:44.526 PDT [56140] LOG:  checkpoint complete: wrote 195 buffers (1.2%); 0 WAL file(s) added, 0 removed, 33 recycled; write=47.084 s, sync=0.095 s, total=47.297 s; sync files=20, longest=0.073 s, average=0.005 s; distance=540671 kB, estimate=540672 kB; lsn=30/1FBE4458, redo lsn=30/7000438
+2026-11-01 01:23:05.598 PDT [31931] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26633 remain, 24486 scanned (91.94% of total)
+	tuples: 147696 removed, 580176 remain, 380 are dead but not yet removable
+	removable cutoff: 97802736, which was 2934 XIDs old when operation ended
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	index scan needed: 24282 pages from table (91.17% of total) had 339335 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 403 newly deleted, 1073 currently deleted, 1073 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 55 newly deleted, 1139 currently deleted, 1139 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 41 newly deleted, 399 currently deleted, 358 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 10 newly deleted, 413 currently deleted, 403 reusable
+	index "jobs_idempotency": pages: 12340 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 433 newly deleted, 1119 currently deleted, 686 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 486.230 MB/s, avg write rate: 430.389 MB/s
+	buffer usage: 58961 hits, 45357 misses, 40148 dirtied
+	WAL usage: 86923 records, 836 full page images, 12368650 bytes
+	system usage: CPU: user: 0.26 s, system: 0.32 s, elapsed: 0.72 s
+2026-11-01 01:23:06.084 PDT [31931] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 295.959 MB/s, avg write rate: 0.193 MB/s
+	buffer usage: 8807 hits, 18411 misses, 12 dirtied
+	system usage: CPU: user: 0.37 s, system: 0.06 s, elapsed: 0.48 s
+2026-11-01 01:23:15.132 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:24:05.577 PDT [32153] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26633 remain, 24811 scanned (93.16% of total)
+	tuples: 152169 removed, 577631 remain, 224 are dead but not yet removable
+	removable cutoff: 98076343, which was 2934 XIDs old when operation ended
+	frozen: 1 pages from table (0.00% of total) had 27 tuples frozen
+	index scan needed: 24809 pages from table (93.15% of total) had 344233 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 407 newly deleted, 1078 currently deleted, 1078 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 87 newly deleted, 1139 currently deleted, 1052 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 71 newly deleted, 399 currently deleted, 328 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 21 newly deleted, 413 currently deleted, 392 reusable
+	index "jobs_idempotency": pages: 12361 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 452 newly deleted, 1135 currently deleted, 1106 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 492.738 MB/s, avg write rate: 439.918 MB/s
+	buffer usage: 62379 hits, 44572 misses, 39794 dirtied
+	WAL usage: 89443 records, 968 full page images, 13406484 bytes
+	system usage: CPU: user: 0.27 s, system: 0.32 s, elapsed: 0.70 s
+2026-11-01 01:24:06.075 PDT [32153] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 262.796 MB/s, avg write rate: 0.141 MB/s
+	buffer usage: 10491 hits, 16718 misses, 9 dirtied
+	system usage: CPU: user: 0.38 s, system: 0.06 s, elapsed: 0.49 s
+2026-11-01 01:24:34.765 PDT [56140] LOG:  checkpoint complete: wrote 3944 buffers (24.1%); 0 WAL file(s) added, 0 removed, 33 recycled; write=79.368 s, sync=0.068 s, total=79.633 s; sync files=23, longest=0.060 s, average=0.003 s; distance=540672 kB, estimate=540672 kB; lsn=30/45BB30B8, redo lsn=30/28000550
+2026-11-01 01:24:49.718 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:25:05.644 PDT [32360] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26633 remain, 25629 scanned (96.23% of total)
+	tuples: 149609 removed, 580029 remain, 248 are dead but not yet removable
+	removable cutoff: 98353010, which was 2539 XIDs old when operation ended
+	frozen: 428 pages from table (1.61% of total) had 10928 tuples frozen
+	index scan needed: 25625 pages from table (96.22% of total) had 337526 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 406 newly deleted, 1088 currently deleted, 849 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 70 newly deleted, 1139 currently deleted, 1069 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 51 newly deleted, 399 currently deleted, 348 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 9 newly deleted, 413 currently deleted, 404 reusable
+	index "jobs_idempotency": pages: 12374 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 424 newly deleted, 1123 currently deleted, 962 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 554.286 MB/s, avg write rate: 494.097 MB/s
+	buffer usage: 60235 hits, 47703 misses, 42523 dirtied
+	WAL usage: 91454 records, 2951 full page images, 21969206 bytes
+	system usage: CPU: user: 0.27 s, system: 0.34 s, elapsed: 0.67 s
+2026-11-01 01:25:06.162 PDT [32360] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 276.122 MB/s, avg write rate: 0.136 MB/s
+	buffer usage: 8901 hits, 18308 misses, 9 dirtied
+	system usage: CPU: user: 0.39 s, system: 0.07 s, elapsed: 0.51 s
+2026-11-01 01:25:58.185 PDT [56140] LOG:  checkpoint complete: wrote 585 buffers (3.6%); 0 WAL file(s) added, 0 removed, 33 recycled; write=68.167 s, sync=0.122 s, total=68.468 s; sync files=20, longest=0.075 s, average=0.007 s; distance=540672 kB, estimate=540672 kB; lsn=30/66BDCE18, redo lsn=30/490007C0
+2026-11-01 01:26:05.879 PDT [32569] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26633 remain, 26571 scanned (99.77% of total)
+	tuples: 159365 removed, 571122 remain, 208 are dead but not yet removable
+	removable cutoff: 98630132, which was 3361 XIDs old when operation ended
+	new relfrozenxid: 97243213, which is 1396199 XIDs ahead of previous value
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	index scan needed: 26541 pages from table (99.65% of total) had 343973 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 406 newly deleted, 1091 currently deleted, 889 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 95 newly deleted, 1139 currently deleted, 1044 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 73 newly deleted, 399 currently deleted, 326 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 26 newly deleted, 413 currently deleted, 387 reusable
+	index "jobs_idempotency": pages: 12388 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 450 newly deleted, 1134 currently deleted, 1100 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 460.750 MB/s, avg write rate: 406.250 MB/s
+	buffer usage: 63248 hits, 47698 misses, 42056 dirtied
+	WAL usage: 94468 records, 856 full page images, 13112239 bytes
+	system usage: CPU: user: 0.28 s, system: 0.34 s, elapsed: 0.80 s
+2026-11-01 01:26:06.309 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:26:06.392 PDT [32569] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 256.838 MB/s, avg write rate: 0.152 MB/s
+	buffer usage: 10344 hits, 16865 misses, 10 dirtied
+	system usage: CPU: user: 0.39 s, system: 0.06 s, elapsed: 0.51 s
+2026-11-01 01:27:05.764 PDT [32794] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26633 remain, 26278 scanned (98.67% of total)
+	tuples: 155213 removed, 583896 remain, 366 are dead but not yet removable
+	removable cutoff: 98904350, which was 2961 XIDs old when operation ended
+	new relfrozenxid: 97508798, which is 265585 XIDs ahead of previous value
+	frozen: 40 pages from table (0.15% of total) had 572 tuples frozen
+	index scan needed: 26135 pages from table (98.13% of total) had 334832 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 361 newly deleted, 1057 currently deleted, 1044 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 55 newly deleted, 1139 currently deleted, 1084 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 43 newly deleted, 399 currently deleted, 356 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 9 newly deleted, 413 currently deleted, 404 reusable
+	index "jobs_idempotency": pages: 12403 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 415 newly deleted, 1114 currently deleted, 1098 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 553.145 MB/s, avg write rate: 466.319 MB/s
+	buffer usage: 61663 hits, 48927 misses, 41247 dirtied
+	WAL usage: 91252 records, 861 full page images, 12678683 bytes
+	system usage: CPU: user: 0.27 s, system: 0.35 s, elapsed: 0.69 s
+2026-11-01 01:27:06.329 PDT [32794] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 254.329 MB/s, avg write rate: 0.125 MB/s
+	buffer usage: 8881 hits, 18328 misses, 9 dirtied
+	system usage: CPU: user: 0.39 s, system: 0.06 s, elapsed: 0.56 s
+2026-11-01 01:27:27.261 PDT [56140] LOG:  checkpoint complete: wrote 1412 buffers (8.6%); 0 WAL file(s) added, 0 removed, 33 recycled; write=80.703 s, sync=0.131 s, total=80.952 s; sync files=21, longest=0.082 s, average=0.007 s; distance=540678 kB, estimate=540678 kB; lsn=30/87BC2610, redo lsn=30/6A002060
+2026-11-01 01:27:42.285 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:28:05.763 PDT [33004] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26633 remain, 25949 scanned (97.43% of total)
+	tuples: 157838 removed, 586531 remain, 401 are dead but not yet removable
+	removable cutoff: 99183029, which was 2796 XIDs old when operation ended
+	new relfrozenxid: 97794136, which is 285338 XIDs ahead of previous value
+	frozen: 64 pages from table (0.24% of total) had 982 tuples frozen
+	index scan needed: 25893 pages from table (97.22% of total) had 344720 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 417 newly deleted, 1089 currently deleted, 1042 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 84 newly deleted, 1139 currently deleted, 1055 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 66 newly deleted, 399 currently deleted, 333 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 21 newly deleted, 413 currently deleted, 392 reusable
+	index "jobs_idempotency": pages: 12416 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 455 newly deleted, 1132 currently deleted, 1132 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 531.157 MB/s, avg write rate: 453.918 MB/s
+	buffer usage: 62248 hits, 46941 misses, 40115 dirtied
+	WAL usage: 91306 records, 1641 full page images, 16137725 bytes
+	system usage: CPU: user: 0.28 s, system: 0.33 s, elapsed: 0.69 s
+2026-11-01 01:28:06.274 PDT [33004] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 259.988 MB/s, avg write rate: 0.138 MB/s
+	buffer usage: 10237 hits, 16972 misses, 9 dirtied
+	system usage: CPU: user: 0.39 s, system: 0.06 s, elapsed: 0.50 s
+2026-11-01 01:28:52.034 PDT [56140] LOG:  checkpoint complete: wrote 768 buffers (4.7%); 0 WAL file(s) added, 0 removed, 33 recycled; write=69.552 s, sync=0.101 s, total=69.749 s; sync files=20, longest=0.067 s, average=0.006 s; distance=540665 kB, estimate=540676 kB; lsn=30/A8BD0978, redo lsn=30/8B000500
+2026-11-01 01:29:03.508 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:29:05.859 PDT [33224] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26633 remain, 25626 scanned (96.22% of total)
+	tuples: 154618 removed, 585929 remain, 308 are dead but not yet removable
+	removable cutoff: 99462083, which was 3057 XIDs old when operation ended
+	frozen: 23980 pages from table (90.04% of total) had 517508 tuples frozen
+	index scan needed: 25521 pages from table (95.82% of total) had 340439 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 401 newly deleted, 1098 currently deleted, 1062 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 83 newly deleted, 1139 currently deleted, 1056 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 70 newly deleted, 399 currently deleted, 329 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 23 newly deleted, 413 currently deleted, 390 reusable
+	index "jobs_idempotency": pages: 12425 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 436 newly deleted, 1132 currently deleted, 1132 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 460.920 MB/s, avg write rate: 434.639 MB/s
+	buffer usage: 62192 hits, 46318 misses, 43677 dirtied
+	WAL usage: 90983 records, 35062 full page images, 172790426 bytes
+	system usage: CPU: user: 0.35 s, system: 0.35 s, elapsed: 0.78 s
+2026-11-01 01:29:06.473 PDT [33224] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 213.164 MB/s, avg write rate: 0.115 MB/s
+	buffer usage: 10456 hits, 16753 misses, 9 dirtied
+	system usage: CPU: user: 0.42 s, system: 0.06 s, elapsed: 0.61 s
+2026-11-01 01:30:05.747 PDT [33434] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26633 remain, 25295 scanned (94.98% of total)
+	tuples: 149585 removed, 587777 remain, 285 are dead but not yet removable
+	tuples missed: 2 dead from 1 pages not removed due to cleanup lock contention
+	removable cutoff: 99743401, which was 2842 XIDs old when operation ended
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	index scan needed: 25074 pages from table (94.15% of total) had 336149 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 374 newly deleted, 1094 currently deleted, 1081 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 63 newly deleted, 1139 currently deleted, 1076 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 50 newly deleted, 399 currently deleted, 349 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 14 newly deleted, 413 currently deleted, 399 reusable
+	index "jobs_idempotency": pages: 12437 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 417 newly deleted, 1112 currently deleted, 1112 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 542.690 MB/s, avg write rate: 477.323 MB/s
+	buffer usage: 61128 hits, 46783 misses, 41148 dirtied
+	WAL usage: 89593 records, 798 full page images, 12313981 bytes
+	system usage: CPU: user: 0.27 s, system: 0.34 s, elapsed: 0.67 s
+2026-11-01 01:30:06.259 PDT [33434] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 278.473 MB/s, avg write rate: 0.137 MB/s
+	buffer usage: 8959 hits, 18250 misses, 9 dirtied
+	system usage: CPU: user: 0.39 s, system: 0.06 s, elapsed: 0.51 s
+2026-11-01 01:30:19.305 PDT [56140] LOG:  checkpoint complete: wrote 4171 buffers (25.5%); 0 WAL file(s) added, 0 removed, 33 recycled; write=75.518 s, sync=0.141 s, total=75.797 s; sync files=20, longest=0.085 s, average=0.008 s; distance=540670 kB, estimate=540676 kB; lsn=30/C9BE5618, redo lsn=30/AC000048
+2026-11-01 01:30:34.270 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:31:05.856 PDT [33635] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26633 remain, 25878 scanned (97.17% of total)
+	tuples: 153752 removed, 584854 remain, 210 are dead but not yet removable
+	removable cutoff: 100022741, which was 2885 XIDs old when operation ended
+	frozen: 11 pages from table (0.04% of total) had 142 tuples frozen
+	index scan needed: 25682 pages from table (96.43% of total) had 346118 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 429 newly deleted, 1130 currently deleted, 912 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 95 newly deleted, 1139 currently deleted, 1044 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 81 newly deleted, 399 currently deleted, 318 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 22 newly deleted, 413 currently deleted, 391 reusable
+	index "jobs_idempotency": pages: 12448 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 461 newly deleted, 1137 currently deleted, 1008 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 527.920 MB/s, avg write rate: 466.111 MB/s
+	buffer usage: 63423 hits, 46105 misses, 40707 dirtied
+	WAL usage: 92332 records, 1236 full page images, 14780116 bytes
+	system usage: CPU: user: 0.27 s, system: 0.33 s, elapsed: 0.68 s
+2026-11-01 01:31:06.362 PDT [33635] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 247.669 MB/s, avg write rate: 0.139 MB/s
+	buffer usage: 11168 hits, 16041 misses, 9 dirtied
+	system usage: CPU: user: 0.39 s, system: 0.06 s, elapsed: 0.50 s
+2026-11-01 01:31:46.373 PDT [56140] LOG:  checkpoint complete: wrote 295 buffers (1.8%); 0 WAL file(s) added, 0 removed, 33 recycled; write=71.907 s, sync=0.097 s, total=72.104 s; sync files=21, longest=0.070 s, average=0.005 s; distance=540672 kB, estimate=540675 kB; lsn=30/EABB03A8, redo lsn=30/CD0003E8
+2026-11-01 01:32:00.365 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:32:05.976 PDT [33856] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26633 remain, 25821 scanned (96.95% of total)
+	tuples: 154977 removed, 583070 remain, 294 are dead but not yet removable
+	removable cutoff: 100300725, which was 3353 XIDs old when operation ended
+	frozen: 5814 pages from table (21.83% of total) had 72912 tuples frozen
+	index scan needed: 25762 pages from table (96.73% of total) had 340460 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 395 newly deleted, 1125 currently deleted, 1125 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 105 newly deleted, 1139 currently deleted, 1139 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 81 newly deleted, 399 currently deleted, 318 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 24 newly deleted, 413 currently deleted, 389 reusable
+	index "jobs_idempotency": pages: 12458 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 438 newly deleted, 1137 currently deleted, 704 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 449.462 MB/s, avg write rate: 402.914 MB/s
+	buffer usage: 64035 hits, 46020 misses, 41254 dirtied
+	WAL usage: 92629 records, 12757 full page images, 65234130 bytes
+	system usage: CPU: user: 0.29 s, system: 0.34 s, elapsed: 0.79 s
+2026-11-01 01:32:06.489 PDT [33856] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 250.258 MB/s, avg write rate: 0.137 MB/s
+	buffer usage: 10744 hits, 16465 misses, 9 dirtied
+	system usage: CPU: user: 0.40 s, system: 0.06 s, elapsed: 0.51 s
+2026-11-01 01:33:05.874 PDT [56140] LOG:  checkpoint complete: wrote 1080 buffers (6.6%); 0 WAL file(s) added, 0 removed, 33 recycled; write=65.280 s, sync=0.119 s, total=65.509 s; sync files=20, longest=0.069 s, average=0.006 s; distance=540671 kB, estimate=540675 kB; lsn=31/BFC8860, redo lsn=30/EE000308
+2026-11-01 01:33:05.875 PDT [34066] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26633 remain, 25842 scanned (97.03% of total)
+	tuples: 156975 removed, 582701 remain, 279 are dead but not yet removable
+	tuples missed: 5 dead from 1 pages not removed due to cleanup lock contention
+	removable cutoff: 100579529, which was 2756 XIDs old when operation ended
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	index scan needed: 25838 pages from table (97.01% of total) had 341201 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 387 newly deleted, 1118 currently deleted, 1076 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 110 newly deleted, 1139 currently deleted, 1029 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 87 newly deleted, 399 currently deleted, 312 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 25 newly deleted, 413 currently deleted, 388 reusable
+	index "jobs_idempotency": pages: 12464 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 439 newly deleted, 1139 currently deleted, 1095 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 500.301 MB/s, avg write rate: 438.670 MB/s
+	buffer usage: 65781 hits, 44818 misses, 39297 dirtied
+	WAL usage: 92969 records, 830 full page images, 12865163 bytes
+	system usage: CPU: user: 0.27 s, system: 0.32 s, elapsed: 0.69 s
+2026-11-01 01:33:06.391 PDT [34066] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 230.696 MB/s, avg write rate: 0.136 MB/s
+	buffer usage: 11972 hits, 15237 misses, 9 dirtied
+	system usage: CPU: user: 0.40 s, system: 0.06 s, elapsed: 0.51 s
+2026-11-01 01:33:19.314 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:34:05.964 PDT [34283] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26633 remain, 25946 scanned (97.42% of total)
+	tuples: 155893 removed, 584759 remain, 255 are dead but not yet removable
+	removable cutoff: 100856508, which was 2805 XIDs old when operation ended
+	frozen: 29 pages from table (0.11% of total) had 581 tuples frozen
+	index scan needed: 25927 pages from table (97.35% of total) had 339435 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 390 newly deleted, 1116 currently deleted, 1099 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 101 newly deleted, 1139 currently deleted, 1038 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 79 newly deleted, 399 currently deleted, 320 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 30 newly deleted, 413 currently deleted, 383 reusable
+	index "jobs_idempotency": pages: 12475 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 433 newly deleted, 1136 currently deleted, 1136 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 523.864 MB/s, avg write rate: 457.276 MB/s
+	buffer usage: 64498 hits, 46157 misses, 40290 dirtied
+	WAL usage: 92852 records, 989 full page images, 13635928 bytes
+	system usage: CPU: user: 0.28 s, system: 0.34 s, elapsed: 0.68 s
+2026-11-01 01:34:06.511 PDT [34283] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 230.211 MB/s, avg write rate: 0.129 MB/s
+	buffer usage: 11120 hits, 16089 misses, 9 dirtied
+	system usage: CPU: user: 0.39 s, system: 0.05 s, elapsed: 0.54 s
+2026-11-01 01:34:36.301 PDT [56140] LOG:  checkpoint complete: wrote 2967 buffers (18.1%); 0 WAL file(s) added, 0 removed, 33 recycled; write=76.885 s, sync=0.072 s, total=76.988 s; sync files=20, longest=0.062 s, average=0.004 s; distance=540672 kB, estimate=540675 kB; lsn=31/2CB91000, redo lsn=31/F000408
+2026-11-01 01:34:51.393 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:35:06.118 PDT [34499] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26633 remain, 25854 scanned (97.08% of total)
+	tuples: 151874 removed, 590391 remain, 285 are dead but not yet removable
+	removable cutoff: 101136688, which was 3148 XIDs old when operation ended
+	frozen: 75 pages from table (0.28% of total) had 1057 tuples frozen
+	index scan needed: 25830 pages from table (96.98% of total) had 336603 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 367 newly deleted, 1104 currently deleted, 1091 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 68 newly deleted, 1139 currently deleted, 1071 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 56 newly deleted, 399 currently deleted, 343 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 14 newly deleted, 413 currently deleted, 399 reusable
+	index "jobs_idempotency": pages: 12483 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 421 newly deleted, 1119 currently deleted, 1119 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 506.786 MB/s, avg write rate: 446.686 MB/s
+	buffer usage: 60862 hits, 48191 misses, 42476 dirtied
+	WAL usage: 91532 records, 2605 full page images, 19236794 bytes
+	system usage: CPU: user: 0.27 s, system: 0.34 s, elapsed: 0.74 s
+2026-11-01 01:35:06.621 PDT [34499] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 284.238 MB/s, avg write rate: 0.140 MB/s
+	buffer usage: 8945 hits, 18264 misses, 9 dirtied
+	system usage: CPU: user: 0.39 s, system: 0.06 s, elapsed: 0.50 s
+2026-11-01 01:35:59.149 PDT [56140] LOG:  checkpoint complete: wrote 452 buffers (2.8%); 0 WAL file(s) added, 0 removed, 33 recycled; write=67.551 s, sync=0.124 s, total=67.756 s; sync files=21, longest=0.077 s, average=0.006 s; distance=540672 kB, estimate=540674 kB; lsn=31/4DBD3EE8, redo lsn=31/30000688
+2026-11-01 01:36:06.064 PDT [34715] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26633 remain, 25808 scanned (96.90% of total)
+	tuples: 154196 removed, 588399 remain, 290 are dead but not yet removable
+	removable cutoff: 101415733, which was 2764 XIDs old when operation ended
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	index scan needed: 25725 pages from table (96.59% of total) had 342553 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 394 newly deleted, 1109 currently deleted, 1085 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 83 newly deleted, 1139 currently deleted, 1056 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 61 newly deleted, 399 currently deleted, 338 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 15 newly deleted, 413 currently deleted, 398 reusable
+	index "jobs_idempotency": pages: 12489 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 445 newly deleted, 1129 currently deleted, 1129 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 532.085 MB/s, avg write rate: 471.654 MB/s
+	buffer usage: 62728 hits, 46780 misses, 41467 dirtied
+	WAL usage: 92023 records, 839 full page images, 12860652 bytes
+	system usage: CPU: user: 0.28 s, system: 0.34 s, elapsed: 0.68 s
+2026-11-01 01:36:06.611 PDT [34715] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 244.387 MB/s, avg write rate: 0.129 MB/s
+	buffer usage: 10098 hits, 17111 misses, 9 dirtied
+	system usage: CPU: user: 0.39 s, system: 0.06 s, elapsed: 0.54 s
+2026-11-01 01:36:07.775 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:37:06.084 PDT [34946] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26633 remain, 25980 scanned (97.55% of total)
+	tuples: 152582 removed, 587332 remain, 340 are dead but not yet removable
+	removable cutoff: 101693246, which was 2931 XIDs old when operation ended
+	new relfrozenxid: 100289161, which is 2495025 XIDs ahead of previous value
+	frozen: 13 pages from table (0.05% of total) had 282 tuples frozen
+	index scan needed: 25788 pages from table (96.83% of total) had 339347 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 392 newly deleted, 1119 currently deleted, 1073 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 81 newly deleted, 1139 currently deleted, 1139 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 66 newly deleted, 399 currently deleted, 333 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 21 newly deleted, 413 currently deleted, 392 reusable
+	index "jobs_idempotency": pages: 12500 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 433 newly deleted, 1125 currently deleted, 958 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 528.134 MB/s, avg write rate: 468.702 MB/s
+	buffer usage: 62030 hits, 47738 misses, 42366 dirtied
+	WAL usage: 91888 records, 891 full page images, 12997382 bytes
+	system usage: CPU: user: 0.27 s, system: 0.36 s, elapsed: 0.70 s
+2026-11-01 01:37:06.544 PDT [34946] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 297.605 MB/s, avg write rate: 0.170 MB/s
+	buffer usage: 9693 hits, 17523 misses, 10 dirtied
+	system usage: CPU: user: 0.34 s, system: 0.06 s, elapsed: 0.45 s
+2026-11-01 01:37:28.113 PDT [56140] LOG:  checkpoint complete: wrote 1336 buffers (8.2%); 0 WAL file(s) added, 0 removed, 33 recycled; write=80.164 s, sync=0.139 s, total=80.339 s; sync files=20, longest=0.086 s, average=0.007 s; distance=540671 kB, estimate=540674 kB; lsn=31/6EBA13E0, redo lsn=31/51000360
+2026-11-01 01:37:43.161 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:38:06.231 PDT [35153] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26633 remain, 26027 scanned (97.72% of total)
+	tuples: 158821 removed, 582377 remain, 420 are dead but not yet removable
+	removable cutoff: 101971707, which was 3471 XIDs old when operation ended
+	new relfrozenxid: 100577592, which is 288431 XIDs ahead of previous value
+	frozen: 101 pages from table (0.38% of total) had 2652 tuples frozen
+	index scan needed: 26001 pages from table (97.63% of total) had 344742 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 417 newly deleted, 1133 currently deleted, 1133 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 110 newly deleted, 1139 currently deleted, 1139 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 90 newly deleted, 399 currently deleted, 387 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 28 newly deleted, 413 currently deleted, 413 reusable
+	index "jobs_idempotency": pages: 12509 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 453 newly deleted, 1141 currently deleted, 1141 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 421.992 MB/s, avg write rate: 376.299 MB/s
+	buffer usage: 65188 hits, 45973 misses, 40995 dirtied
+	WAL usage: 93670 records, 1711 full page images, 16865687 bytes
+	system usage: CPU: user: 0.28 s, system: 0.36 s, elapsed: 0.85 s
+2026-11-01 01:38:06.783 PDT [35153] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 225.232 MB/s, avg write rate: 0.113 MB/s
+	buffer usage: 11295 hits, 15914 misses, 8 dirtied
+	system usage: CPU: user: 0.39 s, system: 0.05 s, elapsed: 0.55 s
+2026-11-01 01:38:52.869 PDT [56140] LOG:  checkpoint complete: wrote 2096 buffers (12.8%); 0 WAL file(s) added, 0 removed, 33 recycled; write=69.515 s, sync=0.102 s, total=69.709 s; sync files=22, longest=0.062 s, average=0.005 s; distance=540673 kB, estimate=540674 kB; lsn=31/8FBA5060, redo lsn=31/720008B8
+2026-11-01 01:39:04.578 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:39:06.385 PDT [35362] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26633 remain, 25919 scanned (97.32% of total)
+	tuples: 153810 removed, 585377 remain, 290 are dead but not yet removable
+	removable cutoff: 102252169, which was 4130 XIDs old when operation ended
+	frozen: 25013 pages from table (93.92% of total) had 549439 tuples frozen
+	index scan needed: 25625 pages from table (96.22% of total) had 336061 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 373 newly deleted, 1121 currently deleted, 1121 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 86 newly deleted, 1139 currently deleted, 1139 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 65 newly deleted, 399 currently deleted, 334 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 18 newly deleted, 413 currently deleted, 395 reusable
+	index "jobs_idempotency": pages: 12516 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 421 newly deleted, 1124 currently deleted, 1096 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 366.938 MB/s, avg write rate: 357.012 MB/s
+	buffer usage: 62922 hits, 47207 misses, 45930 dirtied
+	WAL usage: 91973 records, 36597 full page images, 180783632 bytes
+	system usage: CPU: user: 0.34 s, system: 0.37 s, elapsed: 1.00 s
+2026-11-01 01:39:06.975 PDT [35362] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 233.567 MB/s, avg write rate: 0.106 MB/s
+	buffer usage: 9570 hits, 17639 misses, 8 dirtied
+	system usage: CPU: user: 0.38 s, system: 0.06 s, elapsed: 0.58 s
+2026-11-01 01:40:06.166 PDT [35578] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26633 remain, 25854 scanned (97.08% of total)
+	tuples: 156268 removed, 583275 remain, 255 are dead but not yet removable
+	removable cutoff: 102531658, which was 2822 XIDs old when operation ended
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	index scan needed: 25850 pages from table (97.06% of total) had 343494 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 393 newly deleted, 1116 currently deleted, 1089 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 103 newly deleted, 1139 currently deleted, 1036 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 85 newly deleted, 399 currently deleted, 314 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 26 newly deleted, 413 currently deleted, 387 reusable
+	index "jobs_idempotency": pages: 12520 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 448 newly deleted, 1138 currently deleted, 1138 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 522.665 MB/s, avg write rate: 460.541 MB/s
+	buffer usage: 64617 hits, 45903 misses, 40447 dirtied
+	WAL usage: 92977 records, 841 full page images, 12989639 bytes
+	system usage: CPU: user: 0.27 s, system: 0.34 s, elapsed: 0.68 s
+2026-11-01 01:40:06.667 PDT [35578] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 248.534 MB/s, avg write rate: 0.125 MB/s
+	buffer usage: 11271 hits, 15938 misses, 8 dirtied
+	system usage: CPU: user: 0.39 s, system: 0.05 s, elapsed: 0.50 s
+2026-11-01 01:40:20.009 PDT [56140] LOG:  checkpoint complete: wrote 5718 buffers (34.9%); 0 WAL file(s) added, 0 removed, 33 recycled; write=75.198 s, sync=0.137 s, total=75.431 s; sync files=22, longest=0.087 s, average=0.007 s; distance=540671 kB, estimate=540674 kB; lsn=31/B0BFC8D8, redo lsn=31/93000728
+2026-11-01 01:40:34.950 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:41:06.179 PDT [35779] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26633 remain, 25883 scanned (97.18% of total)
+	tuples: 153444 removed, 586501 remain, 263 are dead but not yet removable
+	removable cutoff: 102811863, which was 2898 XIDs old when operation ended
+	frozen: 163 pages from table (0.61% of total) had 3392 tuples frozen
+	index scan needed: 25824 pages from table (96.96% of total) had 336512 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 374 newly deleted, 1109 currently deleted, 1093 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 75 newly deleted, 1139 currently deleted, 1064 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 60 newly deleted, 399 currently deleted, 339 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 14 newly deleted, 413 currently deleted, 399 reusable
+	index "jobs_idempotency": pages: 12527 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 422 newly deleted, 1123 currently deleted, 1123 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 533.861 MB/s, avg write rate: 473.316 MB/s
+	buffer usage: 62280 hits, 47659 misses, 42254 dirtied
+	WAL usage: 92160 records, 1313 full page images, 15050123 bytes
+	system usage: CPU: user: 0.27 s, system: 0.34 s, elapsed: 0.69 s
+2026-11-01 01:41:06.730 PDT [35779] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 253.814 MB/s, avg write rate: 0.170 MB/s
+	buffer usage: 9314 hits, 17901 misses, 12 dirtied
+	system usage: CPU: user: 0.38 s, system: 0.07 s, elapsed: 0.55 s
+2026-11-01 01:41:47.850 PDT [56140] LOG:  checkpoint complete: wrote 739 buffers (4.5%); 0 WAL file(s) added, 0 removed, 33 recycled; write=72.773 s, sync=0.098 s, total=72.901 s; sync files=22, longest=0.071 s, average=0.005 s; distance=540670 kB, estimate=540673 kB; lsn=31/D1BA0B30, redo lsn=31/B40002C8
+2026-11-01 01:42:01.380 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:42:06.223 PDT [35988] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26633 remain, 25893 scanned (97.22% of total)
+	tuples: 155356 removed, 584292 remain, 323 are dead but not yet removable
+	removable cutoff: 103091583, which was 3014 XIDs old when operation ended
+	frozen: 9472 pages from table (35.56% of total) had 130410 tuples frozen
+	index scan needed: 25867 pages from table (97.12% of total) had 342681 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 394 newly deleted, 1107 currently deleted, 1080 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 91 newly deleted, 1139 currently deleted, 1048 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 74 newly deleted, 399 currently deleted, 325 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 24 newly deleted, 413 currently deleted, 389 reusable
+	index "jobs_idempotency": pages: 12530 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 446 newly deleted, 1133 currently deleted, 1117 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 493.183 MB/s, avg write rate: 435.870 MB/s
+	buffer usage: 63709 hits, 46777 misses, 41341 dirtied
+	WAL usage: 92703 records, 17292 full page images, 87119406 bytes
+	system usage: CPU: user: 0.32 s, system: 0.35 s, elapsed: 0.74 s
+2026-11-01 01:42:06.734 PDT [35988] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 257.339 MB/s, avg write rate: 0.168 MB/s
+	buffer usage: 10349 hits, 16865 misses, 11 dirtied
+	system usage: CPU: user: 0.39 s, system: 0.06 s, elapsed: 0.51 s
+2026-11-01 01:43:06.241 PDT [36204] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26633 remain, 25710 scanned (96.53% of total)
+	tuples: 153049 removed, 586252 remain, 357 are dead but not yet removable
+	removable cutoff: 103371189, which was 3128 XIDs old when operation ended
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	index scan needed: 25666 pages from table (96.37% of total) had 339532 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 388 newly deleted, 1101 currently deleted, 929 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 91 newly deleted, 1139 currently deleted, 1048 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 67 newly deleted, 399 currently deleted, 332 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 16 newly deleted, 413 currently deleted, 397 reusable
+	index "jobs_idempotency": pages: 12533 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 434 newly deleted, 1130 currently deleted, 1130 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 480.738 MB/s, avg write rate: 425.328 MB/s
+	buffer usage: 62379 hits, 46590 misses, 41220 dirtied
+	WAL usage: 91761 records, 822 full page images, 12683736 bytes
+	system usage: CPU: user: 0.28 s, system: 0.34 s, elapsed: 0.75 s
+2026-11-01 01:43:06.816 PDT [36204] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 231.966 MB/s, avg write rate: 0.109 MB/s
+	buffer usage: 10168 hits, 17043 misses, 8 dirtied
+	system usage: CPU: user: 0.39 s, system: 0.06 s, elapsed: 0.57 s
+2026-11-01 01:43:07.361 PDT [56140] LOG:  checkpoint complete: wrote 66 buffers (0.4%); 0 WAL file(s) added, 0 removed, 33 recycled; write=65.775 s, sync=0.125 s, total=65.981 s; sync files=22, longest=0.073 s, average=0.006 s; distance=540701 kB, estimate=540701 kB; lsn=31/F2BBA638, redo lsn=31/D50077D0
+2026-11-01 01:43:22.401 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:44:06.133 PDT [36412] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26633 remain, 26074 scanned (97.90% of total)
+	tuples: 113957 removed, 625276 remain, 7285 are dead but not yet removable
+	removable cutoff: 103636596, which was 2020 XIDs old when operation ended
+	new relfrozenxid: 102144891, which is 1567299 XIDs ahead of previous value
+	frozen: 87 pages from table (0.33% of total) had 2063 tuples frozen
+	index scan needed: 25969 pages from table (97.51% of total) had 298167 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 224 newly deleted, 898 currently deleted, 676 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 137 newly deleted, 1139 currently deleted, 1002 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 112 newly deleted, 399 currently deleted, 287 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 40 newly deleted, 413 currently deleted, 373 reusable
+	index "jobs_idempotency": pages: 12551 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 277 newly deleted, 972 currently deleted, 702 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 528.902 MB/s, avg write rate: 523.804 MB/s
+	buffer usage: 63998 hits, 43886 misses, 43463 dirtied
+	WAL usage: 82450 records, 779 full page images, 11402605 bytes
+	system usage: CPU: user: 0.27 s, system: 0.29 s, elapsed: 0.64 s
+2026-11-01 01:44:06.645 PDT [36412] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 208.237 MB/s, avg write rate: 0.122 MB/s
+	buffer usage: 13564 hits, 13647 misses, 8 dirtied
+	system usage: CPU: user: 0.40 s, system: 0.05 s, elapsed: 0.51 s
+2026-11-01 01:44:39.096 PDT [56140] LOG:  checkpoint complete: wrote 961 buffers (5.9%); 0 WAL file(s) added, 0 removed, 33 recycled; write=76.405 s, sync=0.088 s, total=76.696 s; sync files=20, longest=0.073 s, average=0.005 s; distance=540643 kB, estimate=540695 kB; lsn=32/13BBD050, redo lsn=31/F60005F8
+2026-11-01 01:44:53.963 PDT [56140] LOG:  checkpoint starting: wal
+2026-11-01 01:45:06.607 PDT [36630] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 26633 remain, 26526 scanned (99.60% of total)
+	tuples: 88629 removed, 647321 remain, 1398 are dead but not yet removable
+	tuples missed: 69 dead from 12 pages not removed due to cleanup lock contention
+	removable cutoff: 103901531, which was 3219 XIDs old when operation ended
+	new relfrozenxid: 102343925, which is 199034 XIDs ahead of previous value
+	frozen: 9735 pages from table (36.55% of total) had 233409 tuples frozen
+	index scan needed: 26499 pages from table (99.50% of total) had 304450 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 286 newly deleted, 777 currently deleted, 594 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 135 newly deleted, 1125 currently deleted, 990 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 114 newly deleted, 387 currently deleted, 273 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 49 newly deleted, 405 currently deleted, 356 reusable
+	index "jobs_idempotency": pages: 12574 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 303 newly deleted, 843 currently deleted, 540 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 356.653 MB/s, avg write rate: 308.752 MB/s
+	buffer usage: 63301 hits, 46528 misses, 40279 dirtied
+	WAL usage: 86434 records, 17646 full page images, 107135860 bytes
+	system usage: CPU: user: 0.30 s, system: 0.33 s, elapsed: 1.01 s
+2026-11-01 01:45:07.104 PDT [36630] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 227.331 MB/s, avg write rate: 0.126 MB/s
+	buffer usage: 12720 hits, 14491 misses, 8 dirtied
+	system usage: CPU: user: 0.39 s, system: 0.05 s, elapsed: 0.49 s
+2026-11-01 01:46:02.460 PDT [56140] LOG:  checkpoint complete: wrote 4028 buffers (24.6%); 0 WAL file(s) added, 0 removed, 33 recycled; write=66.309 s, sync=1.999 s, total=68.498 s; sync files=21, longest=1.965 s, average=0.096 s; distance=540670 kB, estimate=540693 kB; lsn=32/356D3DD8, redo lsn=32/17000178
+2026-11-01 01:46:06.430 PDT [36833] LOG:  automatic vacuum of table "jobqueue_bench.jobqueue.jobs": index scans: 1
+	pages: 0 removed, 27053 remain, 27053 scanned (100.00% of total)
+	tuples: 173215 removed, 575346 remain, 87 are dead but not yet removable
+	removable cutoff: 104179156, which was 3019 XIDs old when operation ended
+	new relfrozenxid: 102793087, which is 449162 XIDs ahead of previous value
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	index scan needed: 27052 pages from table (100.00% of total) had 414764 dead item identifiers removed
+	index "jobs_pkey": pages: 3086 in total, 652 newly deleted, 1018 currently deleted, 965 reusable
+	index "jobs_ready_tenant": pages: 1143 in total, 94 newly deleted, 1139 currently deleted, 1139 reusable
+	index "jobs_ready_fifo": pages: 403 in total, 76 newly deleted, 399 currently deleted, 323 reusable
+	index "jobs_leased_expiry": pages: 416 in total, 23 newly deleted, 413 currently deleted, 391 reusable
+	index "jobs_idempotency": pages: 12662 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	index "jobs_finished": pages: 3335 in total, 715 newly deleted, 1115 currently deleted, 1065 reusable
+	index "jobs_dead": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 548.942 MB/s, avg write rate: 486.147 MB/s
+	buffer usage: 65842 hits, 52459 misses, 46458 dirtied
+	WAL usage: 97287 records, 1352 full page images, 17100547 bytes
+	system usage: CPU: user: 0.29 s, system: 0.37 s, elapsed: 0.74 s
+2026-11-01 01:46:06.916 PDT [36833] LOG:  automatic analyze of table "jobqueue_bench.jobqueue.jobs"
+	avg read rate: 319.268 MB/s, avg write rate: 0.129 MB/s
+	buffer usage: 7846 hits, 19861 misses, 8 dirtied
+	system usage: CPU: user: 0.37 s, system: 0.06 s, elapsed: 0.48 s
+2026-11-01 01:46:09.350 PDT [56140] LOG:  checkpoint starting: wal

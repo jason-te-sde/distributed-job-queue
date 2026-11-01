@@ -131,7 +131,15 @@ func randomSeed() (s1, s2 uint64) {
 }
 
 // Enqueue creates a job. It retries retryable failures, which is safe because
-// the job carries an idempotency key, the caller's or a generated one.
+// the job carries an idempotency key, the caller's or a generated one. A
+// generated key is made once per call and reused by its retries, so they cannot
+// duplicate the job for as long as the first one is kept.
+//
+// If ctx is cancelled or its deadline passes while Enqueue is in flight, the
+// outcome is unknown: the job may or may not have been committed. A new call
+// generates a new key, so retrying after ctx ended can make a second job. To
+// make that retry safe, set EnqueueParams.IdempotencyKey and send the same key
+// again.
 func (p *Producer) Enqueue(ctx context.Context, e EnqueueParams) (EnqueueResult, error) {
 	res, err := p.enqueue(ctx, []EnqueueParams{e})
 	if err != nil {

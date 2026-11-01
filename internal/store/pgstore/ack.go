@@ -327,7 +327,8 @@ func (s *Store) Heartbeat(ctx context.Context, refs []store.Ref, ttl time.Durati
 
 // completeSQL records the leased jobs whose lease epoch is the caller's token
 // as succeeded. It does not look at the lease's expiry: finished work is kept
-// as long as nobody else has leased the job since. A result of no bytes
+// until the reaper takes the job back, after which the job is ready and the
+// guard no longer admits it. A result of no bytes
 // arrives as NULL. Flaw F1PG drops the token comparison.
 //
 //	$1 ids, $2 queues, $3 tokens, $4 results
