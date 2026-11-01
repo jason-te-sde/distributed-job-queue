@@ -213,3 +213,33 @@ run_check "$repo"
 expect_status unreadable-history-is-error 2
 expect_output unreadable-history-is-error "git log failed"
 pass unreadable-history-is-error
+
+# (o) A tracked file carrying an email address fails and is named.
+repo="$(new_repo)"
+address="jane.doe""@""example.org"
+printf '// Contact %s.\npackage a\n' "$address" >"$repo/contact.go"
+commit_all "$repo" "feat: add contact"
+run_check "$repo"
+expect_status email-in-file-fails 1
+expect_output email-in-file-fails "contact.go:1: email-address"
+pass email-in-file-fails
+
+# (p) A commit message carrying an email address fails.
+repo="$(new_repo)"
+printf 'package a\n' >"$repo/a.go"
+commit_all "$repo" "feat: add a" "Reported by ${address}."
+run_check "$repo"
+expect_status email-in-commit-message-fails 1
+expect_output email-in-commit-message-fails "email-address"
+expect_output email-in-commit-message-fails "commit "
+pass email-in-commit-message-fails
+
+# (q) A mention of a GitHub handle, a scoped package or an address with no
+# domain is not an email address. The author's address in the commit metadata
+# is not scanned (new_repo sets one).
+repo="$(new_repo)"
+printf '// Thanks to @octocat; see @types/node and user%shost.\npackage a\n' "@" >"$repo/a.go"
+commit_all "$repo" "feat: add a"
+run_check "$repo"
+expect_status handles-are-not-email 0
+pass handles-are-not-email
