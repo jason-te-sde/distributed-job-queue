@@ -19,7 +19,7 @@ Contents: [Running it](#running-it), [The symptoms](#the-symptoms), [Reference](
 jobqueuectl migrate --database-url "$JOBQUEUE_DATABASE_URL"     # prints: applied=2 version=2
 ```
 
-Migrations are forward-only and take an advisory lock, so running them from several places at once is safe. A broker checks the schema version when it starts and exits if it differs, with `database schema version X, this binary needs Y: run jobqueuectl migrate`. The Helm chart runs the migration as a pre-install and pre-upgrade hook.
+Migrations are forward-only and take an advisory lock, so running them from several places at once is safe. A broker checks the schema version when it starts and exits if it differs, with `database schema version X, this binary needs Y: run jobqueuectl migrate`. That advice fits a database that is behind the binary; for one that is ahead of it, see *Upgrading*. The Helm chart runs the migration as a pre-install and pre-upgrade hook.
 
 ### Tokens
 
@@ -98,7 +98,7 @@ A broker restart is safe at any time. On SIGTERM a broker fails `/readyz`, refus
 ### Sizing
 
 - **Database connections.** Each broker holds a pool of `--max-db-conns` (default 20) plus one connection for `LISTEN`. Brokers times 21 must fit in `max_connections` with room for everyone else.
-- **The listener needs a real session.** Point `--database-url` at PostgreSQL itself or at a pooler in session mode. Behind a pooler in transaction mode `LISTEN` does not work: notifications never arrive and the fallback poll (1 s) carries all the work, which still functions and adds up to a second of latency.
+- **Use a session, not a transaction pooler.** Point `--database-url` at PostgreSQL itself or at a pooler in session mode. A pooler in transaction mode is not supported, and none was tested. `LISTEN` does not work behind one, so notifications never arrive. The pool also relies on the prepared statements that pgx caches on each connection, and `jobqueuectl migrate` holds a session advisory lock across several statements; a transaction-mode pooler may keep neither.
 - **Retention.** Succeeded and cancelled jobs are kept 24 h (`--retention-done`) and dead jobs 14 days (`--retention-dead`). The table's size follows the retention times the finish rate, and an idempotency key is honoured for as long as its row exists.
 - **Throughput** is bounded by the one PostgreSQL. [docs/benchmarks.md](benchmarks.md) has the measured figures and the machine.
 
@@ -129,7 +129,7 @@ FROM jobqueue.jobs WHERE queue = 'Q' GROUP BY state;
 1. *The jobs are not due.* `jobqueuectl stats` counts `scheduled` apart from `ready`: a delayed job, or one waiting out a retry backoff (up to an hour for late attempts), is `scheduled` and not stuck.
 2. *Nobody is asking.* Metric `jobqueue_waiters{queue="Q"}` is 0 on every broker: no worker is long-polling this queue. Check that workers run, that their queue name is spelled as the jobs' queue, and that their token lists the queue (a worker refused with `PermissionDenied` stops with an error; look at its logs: `the broker refuses this worker's lease requests, stopping`).
 3. *The workers are busy.* All their slots hold handlers: `leased` is about workers times concurrency, and `ready` grows. Add workers, or check the next item.
-4. *A handler is stuck and its lease is kept alive.* The SDK heartbeats for as long as a handler runs, and nothing ends a handler that never returns. `leased` stays high and flat for long. Find the worker (`SELECT leased_by, count(*) FROM jobqueue.jobs WHERE state = 'leased' AND queue = 'Q' GROUP BY 1`), restart it (a graceful stop gives its jobs back, a kill lets them expire after the TTL), or cancel the job with `jobqueuectl cancel ID`: its worker learns at the next heartbeat and cancels the handler.
+4. *A handler is stuck and its lease is kept alive.* The SDK heartbeats for as long as a handler runs, and nothing ends a handler that never returns. `leased` stays high and flat for long. Find the worker (`SELECT leased_by, count(*) FROM jobqueue.jobs WHERE state = 'leased' AND queue = 'Q' GROUP BY 1`), restart it (a graceful stop gives its jobs back, a kill lets them expire after the TTL), or cancel the job with `jobqueuectl cancel ID`. That is final: the job becomes `cancelled` and never runs again, and its worker learns at the next heartbeat and cancels the handler's context. A handler that ignores its context keeps its concurrency slot after that, so the cancel does not unstick the worker; restart the worker for the slot.
 5. *The brokers cannot fetch.* `jobqueue_dispatch_fetches_total{result="error"}` rises, and the logs say `lease fetch failed`. That is the database: connection limit, slow statements (`jobqueue_store_call_seconds{op="lease"}`), a long lock, a failover.
 6. *Leases are not being reaped.* `leased` jobs whose `first_expiry` in the query above is in the past: the reaper is not running or cannot reach the database. `jobqueue_jobs_reaped_total` is flat and the logs show `reap failed`. If brokers are up and the database is fine, look for a lock held by another session on `jobqueue.jobs`.
 
@@ -159,7 +159,7 @@ How to read `last_error`:
 
 ### The table is bloating
 
-**What it means.** `jobqueue.jobs` churns: every job leaves dead row versions when it is leased, heartbeated and finished, and finished rows stay for their retention. The table has `fillfactor = 85`, tighter autovacuum settings and no autovacuum cost delay, so its size should level off at about the retention times the finish rate. A size that keeps climbing past that means vacuum is not keeping up, or something holds it back, or pruning is not running.
+**What it means.** `jobqueue.jobs` churns: every job leaves dead row versions when it is leased, heartbeated and finished, and finished rows stay for their retention. The table has `fillfactor = 85`, tighter autovacuum settings and, since migration 0002, no autovacuum cost delay on the heap. Its TOAST table, where payloads of about 2 KB and more are stored, keeps the default delay of 2 ms. The heap and most of the indexes should level off at about the retention times the finish rate. One index does not: the keys of `jobs_idempotency` are random, so deleting rows leaves its pages part empty and vacuum frees none of them, and the total creeps up slowly (in the 60-minute soak the index went from 95.0 MiB at minute 30 to 98.9 MiB at minute 60). A size that climbs faster than that means vacuum is not keeping up, or something holds it back, or pruning is not running.
 
 **Confirm.**
 
@@ -168,11 +168,13 @@ SELECT pg_size_pretty(pg_total_relation_size('jobqueue.jobs')) AS total,
        pg_size_pretty(pg_relation_size('jobqueue.jobs')) AS heap;
 SELECT n_live_tup, n_dead_tup, last_autovacuum, last_autoanalyze
 FROM pg_stat_user_tables WHERE schemaname = 'jobqueue' AND relname = 'jobs';
+SELECT indexrelid::regclass AS index, pg_size_pretty(pg_relation_size(indexrelid)) AS size
+FROM pg_index WHERE indrelid = 'jobqueue.jobs'::regclass ORDER BY pg_relation_size(indexrelid) DESC;
 ```
 
 Then, in this order:
 
-1. *Is pruning running?* `jobqueue_jobs_pruned_total` should rise as jobs finish, and the logs show `deleted finished jobs`. If it does not, see whether brokers are up and `prune failed` appears in their logs.
+1. *Is pruning running?* `jobqueue_jobs_pruned_total` should rise once the first finished jobs pass their retention (24 h by default; until then it stays flat), and the logs show `deleted finished jobs`. If it does not, see whether brokers are up and `prune failed` appears in their logs.
 2. *Is the retention the cause?* The table holds `finish rate x retention` rows by design. A dead-letter queue that fills (see above) keeps its rows for 14 days.
 3. *Is something holding vacuum back?* `n_dead_tup` high with a recent `last_autovacuum` means vacuum runs and cannot remove the rows: an old snapshot is holding them.
 
@@ -181,9 +183,17 @@ Then, in this order:
    WHERE xact_start IS NOT NULL ORDER BY xact_start LIMIT 5;          -- long transactions
    SELECT slot_name, active, xmin FROM pg_replication_slots;           -- stuck replication slots
    ```
-4. *Is autovacuum starved?* `last_autovacuum` is old or null while `n_dead_tup` grows: check `autovacuum_max_workers`, `autovacuum_vacuum_cost_limit` and whether other large tables occupy the workers.
+4. *Is autovacuum starved?* `last_autovacuum` is old or null while `n_dead_tup` grows: check `autovacuum_max_workers` and whether other large tables occupy the workers. The jobs heap has no cost delay, so `autovacuum_vacuum_cost_limit` does not matter for it. Its TOAST table does have one; with large payloads, `total` minus `heap` grows when it falls behind, and this shows it:
 
-**What to do.** End or fix the long transaction or the slot. Give autovacuum more room (more workers, a higher cost limit). Shorten `--retention-done` if you do not need a day of history. Do not `VACUUM FULL` a live queue: it takes an exclusive lock on the table. If you must reclaim space, `pg_repack` or a maintenance window are the options. The settings of the table and the reasons for them are in `internal/store/pgstore/migrate/sql/0001_init.sql` and `0002_jobs_autovacuum_cost_delay.sql`, and the soak experiment in [docs/benchmarks.md](benchmarks.md) measures whether the size plateaus.
+   ```sql
+   SELECT t.relname, s.n_dead_tup, s.last_autovacuum
+   FROM pg_class c JOIN pg_class t ON t.oid = c.reltoastrelid
+   JOIN pg_stat_sys_tables s ON s.relid = t.oid
+   WHERE c.oid = 'jobqueue.jobs'::regclass;
+   ```
+5. *Is it the idempotency index?* The heap is level and one index in the per-index query keeps growing, `jobs_idempotency`: see the remedy below.
+
+**What to do.** End or fix the long transaction or the slot. Give autovacuum more room (more workers; a higher cost limit helps other tables and the TOAST table, and no longer applies to the jobs heap, which has no delay to shorten). If the TOAST table is what falls behind, `ALTER TABLE jobqueue.jobs SET (toast.autovacuum_vacuum_cost_delay = 0)` does for it what 0002 did for the heap; that has not been tried. Shorten `--retention-done` if you do not need a day of history, but note that it also shortens the idempotency window, because a key lives as long as its row: a producer that retries a call later than the new retention can create a duplicate. If `jobs_idempotency` has grown large, rebuild it online with `REINDEX INDEX CONCURRENTLY jobqueue.jobs_idempotency`; this project has not tested the rebuild under load. Do not `VACUUM FULL` a live queue: it takes an exclusive lock on the table. If you must reclaim more space, `pg_repack` or a maintenance window are the options. The settings of the table and the reasons for them are in `internal/store/pgstore/migrate/sql/0001_init.sql` and `0002_jobs_autovacuum_cost_delay.sql`, and the soak experiment in [docs/benchmarks.md](benchmarks.md) measures whether the size plateaus.
 
 ### A broker is not ready
 
@@ -193,14 +203,14 @@ Then, in this order:
 | --- | --- |
 | `draining` | The broker got SIGTERM and is shutting down. Normal during a rollout |
 | `database not checked` | It just started and has not pinged the database yet. Wait a few seconds; if it persists the pinger is not running |
-| `database check is stale` | No successful or failed check in the last 5 s: the database call hangs. Look at network and the database's load |
+| `database check is stale` | No check has finished in the last 5 s. Each check is cut off after 2 s and a new one starts every 2 s, so a hung database call shows as `database unavailable` first; a stale report means the broker's own checking loop did not run. Look at the broker process: CPU throttling or starvation, or a stopped container |
 | `database unavailable` | The last check failed. Check the database, the credentials in the URL and the pool limit. The logs say `the database does not answer` with the error |
 
 If the pod exits at start instead, read its last log line:
 
 | Message | Cause |
 | --- | --- |
-| `database schema version X, this binary needs Y: run jobqueuectl migrate` | The migration did not run, or an older broker meets a newer schema. Run `jobqueuectl migrate` (the chart's hook does it on install and upgrade) |
+| `database schema version X, this binary needs Y: run jobqueuectl migrate` | The message says to run `jobqueuectl migrate` in both cases below. If X is lower than Y, the migration did not run: run `jobqueuectl migrate` (the chart's hook does it on install and upgrade). If X is higher than Y, an older broker meets a newer schema, and `jobqueuectl migrate` of the older binary refuses (`use a newer jobqueuectl`): roll the brokers forward to the newer image, or restore a backup taken before the migration (see *Upgrading*) |
 | `refusing to serve ... without TLS and tokens; pass --insecure to override` | Not both `tls.secretName` and `tokens.secretName` are set. Set both, or `insecure=true` on a trusted network |
 | `tokens file line N: ...` | A malformed token line, or a duplicate hash. The message never contains a hash |
 | `no database URL` | The Secret or `--database-url` is missing |
@@ -222,7 +232,7 @@ sum by (op) (rate(jobqueue_acks_total{result="fenced"}[5m]))
 
 **Likely causes.** Workers starved of CPU (a container limit throttles the process, so heartbeats go late), long garbage collections or paused containers, a network that drops or delays traffic between workers and brokers, a TTL too short for the handlers' stalls, a clock step on the database host (a forward step expires every lease at once), or a rise in cancellations by producers.
 
-**What to do.** Look for the cause on the worker side first (CPU throttling, memory pressure, node pressure, network). Raise `LeaseTTL` if the stalls are real and tolerable (the margin and the heartbeat rhythm follow it; the TTL must exceed four margins). The queue's own state is safe: fenced reports change nothing. What is at risk is your side effects: if the handlers write to a system that does not keep the fencing token (`Job.Token()`) or is not idempotent, a zombie's write has landed. See the zombie-worker example in the README, and fix the sink.
+**What to do.** Look for the cause on the worker side first (CPU throttling, memory pressure, node pressure, network). Raise `LeaseTTL` if the stalls are real and tolerable (the heartbeat period follows it, at a quarter of the TTL; the margin does not, it is its own option, 3 s by default; the TTL must exceed four margins). The price is that the jobs of a worker that dies wait out the longer TTL before they run again. The queue's own state is safe: fenced reports change nothing. What is at risk is your side effects: if the handlers write to a system that does not keep the fencing token (`Job.Token()`) or is not idempotent, a zombie's write has landed. See the zombie-worker example in the README, and fix the sink.
 
 ### The NOTIFY listener keeps reconnecting
 
@@ -237,7 +247,7 @@ WHERE application_name = 'jobqueue-listener';
 
 A `backend_start` that keeps getting newer is the reconnect loop.
 
-**Likely causes.** A pooler in transaction mode between the broker and PostgreSQL (the connection is recycled or `LISTEN` is not honoured), a load balancer or firewall that closes idle connections (the listener pings every 30 s of silence, so a timeout below that will cut it), a database restart or failover, `idle_session_timeout`, or `max_connections` exhausted so that the connection cannot be made.
+**Likely causes.** A pooler in transaction mode between the broker and PostgreSQL, which is not supported (see *Sizing*; the connection is recycled or `LISTEN` is not honoured), a load balancer or firewall that closes idle connections (the listener pings every 30 s of silence, so a timeout below that will cut it), a database restart or failover, `idle_session_timeout`, or `max_connections` exhausted so that the connection cannot be made.
 
 **What to do.** Give the listener a direct or session-mode connection (`--database-url`), raise idle timeouts above 30 s, and check `max_connections`. Also watch `jobqueue_notify_malformed_total`: it counts notifications on the channel `jobqueue_ready` that are not a valid queue and tenant, which only something other than the queue can send.
 
@@ -315,7 +325,7 @@ global flags (before or after the command):
   --timeout d        limit for the whole command (default 10s)
 ```
 
-There is no default transport: use `--insecure` or `--tls-ca`.
+The default transport is TLS against the system roots. Use `--tls-ca` for a private CA, and `--insecure` for plaintext.
 
 ### Metrics
 
