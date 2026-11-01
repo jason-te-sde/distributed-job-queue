@@ -382,7 +382,7 @@ expect_render_error "shutdownGraceSeconds=0, which the broker refuses" \
 
 if render "migration Job" --show-only templates/migrate-job.yaml; then
   expect_text "the migration Job to run jobqueuectl" 'command: ["/jobqueuectl"]'
-  expect_text "the migration Job to run the migrate subcommand with a timeout of 10m" 'args: ["migrate", "--timeout=10m"]'
+  expect_text "the migration Job to run the migrate subcommand with a timeout of 4m" 'args: ["migrate", "--timeout=4m"]'
   expect_text "the migration Job to fail rather than restart in place" "restartPolicy: Never"
 fi
 
