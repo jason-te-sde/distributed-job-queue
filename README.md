@@ -158,6 +158,7 @@ Each guarantee, the mechanism behind it and the tests that prove it. Tests named
 What is not guaranteed:
 
 - **Exactly-once execution.** See above: a job can run more than once.
+- **Knowing the outcome of an Enqueue whose context ended.** If the caller's context is cancelled or its deadline passes while `Enqueue` is in flight, the job may or may not have been committed. The key that the SDK generates lasts for one call, so a new call after that can make a second job: pass your own `IdempotencyKey` to retry safely. A client that calls the gRPC API directly and sends no key can duplicate a job in the same way.
 - **Execution order.** Within a tenant, jobs are dispatched in `(run_at, id)` order as a best effort. With several brokers and workers that order is not guaranteed, and the order in which concurrent workers finish is not either.
 - **Global fairness across brokers.** Every broker shares its own fetches by weight; the shares add up across brokers, which is only approximately fair.
 - **Results over 64 KiB, payloads over 256 KiB.** Keep large data elsewhere and put a reference in the job.
