@@ -310,8 +310,11 @@ type pendingFail struct {
 // call and one Fail call, and the per-item statuses come back in request
 // order. A failure waits retry_after when that is set, and otherwise an
 // exponential backoff with full jitter, taken for the attempt number the
-// client reports: the broker keeps no count of its own that it could trust
-// after a restart.
+// client reports. The row's attempts column holds a count of the broker's own,
+// and it decides whether the job retries or is dead, but the delay does not read
+// it: a worker is trusted to report the outcome of a job, and its attempt number
+// goes with the outcome under the same trust. One that reports it wrongly
+// changes only the backoff of its own job.
 //
 // The two store calls are not one transaction. If the Fail call fails after
 // the Complete call succeeded, the caller gets the error and repeats the whole
