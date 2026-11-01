@@ -10,12 +10,12 @@ Two rules hold everywhere. A test that needs a database or a cluster **fails lou
 | --- | --- | --- | --- |
 | Unit and property tests of the pure cores | `internal/core/{job,fair,dispatch,lease}` | Every cell of the transition table, the backoff bound, the fair-share bound and batch independence, the dispatch core's wakeup and liveness rules, the lease tracker's safety rule (it never reports holding a lease past its local deadline). Property tests use `rapid` | `go test -race ./...` |
 | Conformance suite | `internal/store/storetest`, run by `memstore` and by `pgstore` | What the store contract says: validation, ordering, boundaries (`run_at == now`, `expires == now`, retention), idempotency scope, size limits, hostile names, batch alignment | `go test` (memory store); `-tags pg` (PostgreSQL) |
-| Architecture test | `internal/archtest` | A core that imports `os` or `net`, calls `time.Now`, starts a goroutine or uses a channel; a layering violation; an import outside the dependency list. It needs no linter | `go test ./...` |
+| Architecture test | `internal/archtest` | A core that imports `os` or `net`, calls `time.Now`, starts a goroutine or uses a channel; a layering violation; an import outside the dependency list in non-test code. It needs no linter | `go test ./...` |
 | Broker and SDK tests | `internal/broker`, root package | Handlers over an in-process gRPC connection and the memory store: validation before authorization, role and tenant scope, error mapping, the dispatcher shell, the reaper and pruner, the metrics, the SDK producer and worker, the zombie handler, graceful drain. Race builds also check that the cores are entered from one goroutine | `go test -race ./...` |
 | Deterministic simulator | `internal/sim` | Whole-system safety and liveness under crashes, stalls, partitions, loss, duplication, reordering, clock drift and lost notifications; see below | `go test -race ./...` (500 seeds) |
 | Planted flaws | build tag `jobqueue_flaws`, `scripts/check-flaws.sh`, `scripts/flaws.tsv` | That the suite goes red when the code is wrong, and that the build that carries the flaws is inert otherwise; see below | `make flaws`, and the `flaws` CI job |
 | Differential test | `internal/store/pgstore` (`TestPGDifferential`) | Any divergence between PostgreSQL and the reference store over random operation sequences, with the clock moving, reaping and pruning; shrinks to a minimal sequence | `-tags pg` |
-| PostgreSQL concurrency tests | `internal/store/pgstore` (`TestPGConcurrent...`) | Double leases, a duplicate idempotency key under concurrent enqueues, an acknowledgement racing the reaper, lost or invented jobs under load, deadlocks between opposite-order acknowledgements | `-tags pg`, always with `-race` |
+| PostgreSQL concurrency tests | `internal/store/pgstore` (`TestPGConcurrent...` and, in `retry_pg_test.go`, `TestPGOppositeOrder...`) | Double leases, a duplicate idempotency key under concurrent enqueues, an acknowledgement racing the reaper, lost or invented jobs under load, deadlocks between opposite-order acknowledgements | `-tags pg`, always with `-race` |
 | PostgreSQL integration tests | `internal/broker`, `internal/store/pgstore/migrate`, `cmd/jobqueue-server` | The real broker over a real database: schema mismatch refused, tokens enforced, graceful shutdown, the NOTIFY listener reconnecting and resyncing, migrations applied once under concurrency, the schema's constraints and indexes | `-tags pg` |
 | End-to-end on PostgreSQL | `e2e_pg_test.go` | The whole stack on real time, with no test doubles: 1000 jobs of three tenants through three brokers (`TestPGEndToEnd`); a zombie worker fenced (`TestPGZombieWorkerIsFenced`); every broker replaced one after the other (`TestPGRollingBrokerRestart`); delayed jobs neither early nor late (`TestPGDelayedJobsRunOnTime`); a noisy neighbour under `drr` and under `fifo` (`TestPGNoisyNeighbor`) | `-tags pg` |
 | Chaos | `test/chaos` (`TestChaos`) | The real processes: 3 `jobqueue-server` and 4 workers over a real PostgreSQL, with a Toxiproxy between them, while a seeded generator kills and restarts brokers and workers, freezes workers for twice the TTL, partitions brokers and the database, adds latency and restarts PostgreSQL. Every process records a history, and `internal/history` checks S1, S4, S7 and L1 against the final state. It asserts that every kind of fault fired and that some job was delivered twice | `-tags chaos`, Linux CI |
@@ -47,7 +47,7 @@ and, after the faults stop and the system has had time to heal:
 
 A sweep of at least 100 seeds must also be *rough enough to mean something*: it asserts that duplicate deliveries, fenced acknowledgements, sink rejections, reaps, prunes, worker crashes and stalls, broker crashes, store outages, partitions and dropped notifications all happened. A system that is left alone passes every safety check. The checker itself has tests: hand-built bad histories must raise the right alarm and good ones must not.
 
-CI runs 500 seeds on every run, which took 62 s under `-race` on an Apple M2. The nightly job runs 20,000 seeds without `-race`; a run of 20,000 seeds found no violation.
+CI runs 500 seeds on every run, which took 51 s under `-race` on an Apple M2. The nightly job runs 20,000 seeds without `-race`; a run of 20,000 seeds found no violation.
 
 ## How to run each layer
 
@@ -58,7 +58,7 @@ make test                                 # the same
 export JOBQUEUE_TEST_DSN='postgres://localhost:5432/postgres?sslmode=disable'
 make test-pg                              # everything behind the pg tag, with -race, and a count of the tests that ran
 go test -race -count=1 -tags pg -run '^TestPGDifferential$' ./internal/store/pgstore/
-go test -race -count=1 -tags pg -run '^TestPGConcurrent' ./internal/store/pgstore/
+go test -race -count=1 -tags pg -run '^TestPG(Concurrent|OppositeOrder)' ./internal/store/pgstore/
 
 make sim                                  # the simulator alone, 500 seeds under -race
 JOBQUEUE_SIM_SEEDS=20000 go test -count=1 -timeout 60m -run TestSimSeeds ./internal/sim/    # what the nightly job runs
