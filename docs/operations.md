@@ -93,7 +93,7 @@ The values that matter:
 
 ### Rolling updates and restarts
 
-A broker restart is safe at any time. On SIGTERM a broker fails `/readyz`, refuses new Lease calls (workers move to another broker), answers waiting long polls empty, serves heartbeats and acknowledgements for up to `--shutdown-grace` (25 s) and exits. With two or more brokers and the PodDisruptionBudget, a rolling update drops no call. Workers are safe to stop with SIGTERM too: they stop leasing, wait up to the drain timeout (25 s) for running handlers, and give back the rest with their attempts refunded. Keep `terminationGracePeriodSeconds` for workers above their drain timeout.
+A broker restart is safe at any time. On SIGTERM a broker fails `/readyz`, refuses new Lease calls (workers move to another broker), answers waiting long polls empty, stops accepting connections and calls, waits up to `--shutdown-grace` (25 s) for the running ones and exits. With two or more brokers and the PodDisruptionBudget, a rolling update loses no work: a worker sends its calls to the brokers that still accept them and repeats a call that failed, a lease request with backoff, a heartbeat every period and an acknowledgement for as long as it holds the lease. A worker learns of new brokers when gRPC resolves the Service's name again, which it does at most once every 30 s, so a worker that started less than 30 s before a rolling restart can reach no broker for a few seconds, and its jobs wait meanwhile. Workers are safe to stop with SIGTERM too: they stop leasing, wait up to the drain timeout (25 s) for running handlers, and give back the rest with their attempts refunded. Keep `terminationGracePeriodSeconds` for workers above their drain timeout.
 
 ### Sizing
 

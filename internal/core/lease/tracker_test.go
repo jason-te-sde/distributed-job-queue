@@ -566,14 +566,18 @@ func TestAckingLeaseKeepsHeartbeating(t *testing.T) {
 	}
 }
 
-func TestAckFailureRetriesWithBackoffThenDrops(t *testing.T) {
+func TestAckFailureForALeaseNoLongerHeldRetriesWithBackoffThenDrops(t *testing.T) {
 	tr := newTracker(t)
 	startAndGrant(t, tr, 100*ms, 1)
-	if _, err := tr.HandlerDone(sec, ref(1), Outcome{Kind: OutcomeRetry, Error: "boom", RetryAfter: sec}); err != nil {
+	hb := only[SendHeartbeat](t, tr.Tick(7500*ms))
+	if _, err := tr.HeartbeatDone(7600*ms, hb.Seq, 7500*ms, []HeartbeatStatus{{Held: false}}); err != nil {
+		t.Fatalf("HeartbeatDone: %v", err)
+	}
+	if _, err := tr.HandlerDone(8*sec, ref(1), Outcome{Kind: OutcomeRetry, Error: "boom", RetryAfter: sec}); err != nil {
 		t.Fatalf("HandlerDone: %v", err)
 	}
-	sent := only[SendAcks](t, tr.Tick(sec+2*ms))
-	now := sec + 2*ms
+	sent := only[SendAcks](t, tr.Tick(8*sec+2*ms))
+	now := 8*sec + 2*ms
 	for k, delay := range []time.Duration{100 * ms, 200 * ms, 400 * ms, 800 * ms, 1600 * ms} {
 		effs := tr.AcksFailed(now, sent.Seq)
 		none[SendAcks](t, effs)
@@ -588,7 +592,8 @@ func TestAckFailureRetriesWithBackoffThenDrops(t *testing.T) {
 		}
 		sent = resend
 	}
-	// The sixth failure exceeds AckRetries = 5: the lease is forgotten.
+	// The sixth failure exceeds AckRetries = 5, and the broker denied the
+	// lease: it is forgotten.
 	effs := tr.AcksFailed(now, sent.Seq)
 	none[SendAcks](t, effs)
 	none[SendAcks](t, tr.Tick(now+10*sec))
@@ -596,6 +601,74 @@ func TestAckFailureRetriesWithBackoffThenDrops(t *testing.T) {
 		t.Fatalf("Held = %+v, want the abandoned lease gone", got)
 	}
 	none[SendHeartbeat](t, tr.Tick(now+20*sec))
+}
+
+// An ack whose lease the tracker still holds is worth sending for as long as
+// it holds it: given up, the job would run again once the lease expired. The
+// lease of job 1 is held until its deadline at 27s (30s granted at 0, less the
+// 3s margin), so the batch is sent again past AckRetries, every 2s once the
+// doubled wait reaches AckRetryCap, and forgotten at the first failure after
+// 27s, even one that arrives before the tick at the deadline.
+func TestAckFailureKeepsResendingWhileTheLeaseIsHeld(t *testing.T) {
+	tr := newTracker(t)
+	startAndGrant(t, tr, 100*ms, 1)
+	if _, err := tr.HandlerDone(sec, ref(1), Outcome{Kind: OutcomeSuccess}); err != nil {
+		t.Fatalf("HandlerDone: %v", err)
+	}
+	sent := only[SendAcks](t, tr.Tick(sec+2*ms))
+	now := sec + 2*ms
+	waits := []time.Duration{100 * ms, 200 * ms, 400 * ms, 800 * ms, 1600 * ms}
+	for range 11 { // the resends at 6.102s, 8.102s, ..., 26.102s
+		waits = append(waits, 2*sec)
+	}
+	for k, wait := range waits {
+		none[SendAcks](t, tr.AcksFailed(now, sent.Seq))
+		none[SendAcks](t, tr.Tick(now+wait-time.Nanosecond))
+		now += wait
+		resend := only[SendAcks](t, tr.Tick(now))
+		if resend.Seq == sent.Seq || fmt.Sprint(resend.Acks) != fmt.Sprint(sent.Acks) {
+			t.Fatalf("resend %d at %v = %+v, want the acks of %+v under a new seq", k+1, now, resend, sent)
+		}
+		sent = resend
+	}
+	if now != 26*sec+102*ms {
+		t.Fatalf("the last resend went out at %v, want 26.102s", now)
+	}
+	// The resend at 26.102s fails at 27.5s, after the lease's deadline and
+	// before any tick: it is forgotten.
+	none[SendAcks](t, tr.AcksFailed(27*sec+500*ms, sent.Seq))
+	none[SendAcks](t, tr.Tick(40*sec))
+	if got := tr.Held(27*sec + 500*ms); len(got) != 0 {
+		t.Fatalf("Held = %+v, want the abandoned lease gone", got)
+	}
+}
+
+// After a drain's deadline the count alone decides, so that the drain ends on
+// time although the lease is held until 27s. The drain starts at 1s with a 5s
+// timeout: the sixth failure, at 5.102s, is before its deadline and sends the
+// batch again; the seventh, at 7.102s, is after it and ends the drain.
+func TestAckFailureAfterTheDrainDeadlineDropsAtTheRetryCount(t *testing.T) {
+	tr := newTracker(t, func(c *Config) { c.DrainTimeout = 5 * sec })
+	startAndGrant(t, tr, 100*ms, 1)
+	tr.Drain(sec)
+	if _, err := tr.HandlerDone(2*sec, ref(1), Outcome{Kind: OutcomeSuccess}); err != nil {
+		t.Fatalf("HandlerDone: %v", err)
+	}
+	sent := only[SendAcks](t, tr.Tick(2*sec+2*ms))
+	now := 2*sec + 2*ms
+	for k, wait := range []time.Duration{100 * ms, 200 * ms, 400 * ms, 800 * ms, 1600 * ms, 2 * sec} {
+		none[Stopped](t, tr.AcksFailed(now, sent.Seq))
+		now += wait
+		resend := only[SendAcks](t, tr.Tick(now))
+		if resend.Seq == sent.Seq {
+			t.Fatalf("resend %d at %v reused seq %d", k+1, now, sent.Seq)
+		}
+		sent = resend
+	}
+	if now != 7*sec+102*ms {
+		t.Fatalf("the last resend went out at %v, want 7.102s", now)
+	}
+	wantEffects(t, tr.AcksFailed(now, sent.Seq), Stopped{})
 }
 
 func TestRequestsMoreWhenSlotsFree(t *testing.T) {
@@ -1365,6 +1438,7 @@ func TestConfigWithDefaults(t *testing.T) {
 		DrainTimeout:   25 * sec,
 		AckRetries:     5,
 		AckRetryBase:   100 * ms,
+		AckRetryCap:    2 * sec,
 		LeaseRetryBase: 100 * ms,
 		LeaseRetryCap:  5 * sec,
 	}
@@ -1410,6 +1484,7 @@ func TestConfigValidate(t *testing.T) {
 		{"negative drain timeout", func(c *Config) { c.DrainTimeout = -sec }, "drain_timeout"},
 		{"negative ack retries", func(c *Config) { c.AckRetries = -1 }, "ack_retries"},
 		{"negative ack retry base", func(c *Config) { c.AckRetryBase = -ms }, "ack_retry_base"},
+		{"negative ack retry cap", func(c *Config) { c.AckRetryCap = -ms }, "ack_retry_cap"},
 		{"negative lease retry base", func(c *Config) { c.LeaseRetryBase = -ms }, "lease_retry_base"},
 		{"negative lease retry cap", func(c *Config) { c.LeaseRetryCap = -ms }, "lease_retry_cap"},
 	} {

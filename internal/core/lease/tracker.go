@@ -19,8 +19,8 @@ const (
 	// maxLeaseFailures stops the failure count where the backoff ceiling has
 	// long reached its cap, so that the count cannot overflow.
 	maxLeaseFailures = 64
-	// maxAckRetryDelay caps one wait between ack resends, so that a
-	// configuration with very many retries cannot overflow a duration.
+	// maxAckRetryDelay caps one wait between ack resends whatever
+	// AckRetryCap says, so that doubling a wait cannot overflow a duration.
 	maxAckRetryDelay = 24 * time.Hour
 )
 
@@ -412,9 +412,12 @@ func (t *Tracker) AcksDone(now Mono, seq uint64, statuses []AckStatus) ([]Effect
 }
 
 // AcksFailed handles the failure of the ack call seq. The same acks go out
-// again under a new seq after AckRetryBase doubled for each earlier failure.
-// After AckRetries resends have failed too, the leases are forgotten, which
-// lets them expire and be delivered again. A seq that is not in flight is
+// again under a new seq after AckRetryBase doubled for each earlier failure,
+// at most AckRetryCap. The leases are forgotten, which lets them expire and be
+// delivered again, once AckRetries resends have failed too and the tracker
+// holds none of them: an ack is worth sending while its lease holds, because a
+// job whose ack is given up runs again. Past a drain's deadline the count alone
+// decides, so that the drain ends on time. A seq that is not in flight is
 // ignored.
 func (t *Tracker) AcksFailed(now Mono, seq uint64) []Effect {
 	if t.stopped {
@@ -425,22 +428,38 @@ func (t *Tracker) AcksFailed(now Mono, seq uint64) []Effect {
 		return nil
 	}
 	b.failures++
-	if b.failures > t.cfg.AckRetries {
+	if b.failures > t.cfg.AckRetries && !t.holdsAny(now, b.acks) {
 		t.finishBatch()
 		return t.advance(now, t.flushAcks(now, true, nil))
 	}
 	b.inFlight = false
-	b.retryAt = now + ackRetryDelay(t.cfg.AckRetryBase, b.failures)
+	b.retryAt = now + ackRetryDelay(t.cfg.AckRetryBase, t.cfg.AckRetryCap, b.failures)
 	return t.advance(now, nil)
 }
 
-// ackRetryDelay is base doubled k-1 times, at most maxAckRetryDelay.
-func ackRetryDelay(base time.Duration, k int) time.Duration {
+// holdsAny reports whether the tracker holds the lease of one of acks at now,
+// which keeps their batch worth resending, unless a drain's deadline has
+// passed.
+func (t *Tracker) holdsAny(now Mono, acks []Ack) bool {
+	if t.draining && now >= t.drainDeadline {
+		return false
+	}
+	for _, a := range acks {
+		if l := t.leases[a.Ref]; l != nil && l.live() && l.deadline > now {
+			return true
+		}
+	}
+	return false
+}
+
+// ackRetryDelay is base doubled k-1 times, at most limit and maxAckRetryDelay.
+func ackRetryDelay(base, limit time.Duration, k int) time.Duration {
+	limit = min(limit, maxAckRetryDelay)
 	d := base
-	for i := 1; i < k && d < maxAckRetryDelay; i++ {
+	for i := 1; i < k && d < limit; i++ {
 		d *= 2
 	}
-	return min(d, maxAckRetryDelay)
+	return min(d, limit)
 }
 
 // finishBatch forgets the leases of the current ack batch and clears it.

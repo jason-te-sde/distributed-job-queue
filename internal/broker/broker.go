@@ -236,9 +236,10 @@ func (b *Broker) ScalerAddr() net.Addr {
 // The shutdown goes in this order: /readyz starts to fail, so that the
 // endpoint is taken out of rotation; Lease calls are refused, long polls end
 // empty and the streams of the autoscaler end; the gRPC server and the
-// autoscaler server stop accepting calls and wait for the running ones,
-// workers still being able to heartbeat and acknowledge, for at most
-// ShutdownGrace between them, after which they cut the rest off; the
+// autoscaler server stop accepting connections and calls of every kind, so
+// that workers heartbeat and acknowledge through other brokers, and wait for
+// the running ones for at most ShutdownGrace between them, after which they
+// cut the rest off; the
 // background loops stop; the health endpoint closes; and the database pool is
 // released.
 func (b *Broker) Run(ctx context.Context) error {
