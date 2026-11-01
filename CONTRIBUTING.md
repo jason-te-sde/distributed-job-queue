@@ -33,7 +33,7 @@ A `pg`-tagged test that cannot reach a database fails; it never skips. [docs/tes
 - **Errors are wrapped with `%w`** and inspected with `errors.Is` and `errors.As`. A caller's mistake is `job.ErrInvalid`, which is a different thing from a broken internal invariant (`*store.InternalError`). Library code never panics on input.
 - **Every exported identifier has a doc comment,** and every package has a package comment.
 - **Randomness** comes from `math/rand/v2` generators with explicit seeds. `crypto/rand` is used only where unpredictability matters.
-- **Everything in the repository is English:** code, comments, documentation, commit messages, test names, logs. `make hygiene` checks that no tracked file or commit message contains CJK text or an attribution line of an AI tool, and CI runs it over the whole history. The licence names its holder, and **no file and no commit message contains an email address**; the script does not check that, so review does.
+- **Everything in the repository is English:** code, comments, documentation, commit messages, test names, logs. The licence names its holder, and **no file and no commit message contains an email address.** `make hygiene` checks that no tracked file or commit message contains CJK text, an email address or an attribution line of an AI tool, and CI runs it over the whole history.
 
 ## Making a change
 
