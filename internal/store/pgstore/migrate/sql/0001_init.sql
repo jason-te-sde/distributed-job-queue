@@ -53,8 +53,9 @@ CREATE TABLE jobqueue.jobs (
     -- 5 rounds of lease, 2 heartbeats, complete and delete over 5000 live rows,
     -- the heap settled at 3191 pages with fillfactor 100, 2704 with 85 and 1851
     -- with 70. 85 rather than 70, because finished rows stay for hours or days and
-    -- every page holding them keeps the headroom unused. The soak (E5) compares 70,
-    -- 85 and 100 under the real mix.
+    -- every page holding them keeps the headroom unused. The soak (E5) ran with 85
+    -- only and measures whether the table's size stays level, not which fillfactor
+    -- is best; 70 and 100 were not run under the real mix.
     fillfactor = 85,
 
     -- Autovacuum: every job leaves at least two dead row versions (one when it
