@@ -1,0 +1,18 @@
+# Rows of the jobs table every 4 s during a fixed-rate probe at 10,050 jobs per second (throughput --brokers 1 --rate 10050 --duration 30s), as sampled by psql, on a fresh database.
+# Columns: time, rows, rows with attempts > 1, leased, ready, rows minus distinct payloads (extra jobs for one send), highest attempts.
+22:00:38 29735 0 6 4 0 1
+22:00:42 50951 0 7 4 0 1
+22:00:47 69673 0 14 2 0 1
+22:00:51 89365 0 17 5 0 1
+22:00:55 109022 0 7 3 0 1
+22:00:59 129185 0 12 4 0 1
+22:01:03 148641 0 11 3 0 1
+22:01:07 168638 0 1 6 0 1
+22:01:11 189068 0 15 3 0 1
+22:01:15 208898 0 12 3 0 1
+22:01:19 228758 0 5 2 0 1
+22:01:23 245349 0 12 3 0 1
+22:01:27 261302 0 4 3 0 1
+22:01:31 275828 0 0 0 0 1
+22:01:35 290284 0 2 1 0 1
+22:01:39 301500 0 0 0 0 1

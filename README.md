@@ -164,7 +164,18 @@ What is not guaranteed:
 
 ## Performance
 
-Throughput, enqueue-to-start latency, the noisy-neighbour wait with and without fair scheduling, recovery time after a worker or broker is killed, and the behaviour of the table over a long run are measured with `jobqueue-bench` on one laptop. [docs/benchmarks.md](docs/benchmarks.md) holds the method, the exact commands and the raw output, and this README quotes no figure that it does not hold.
+Throughput, enqueue-to-start latency, the noisy-neighbour wait with and without fair scheduling, recovery time after a worker or broker is killed, and the behaviour of the table over a long run are measured with `jobqueue-bench` on one laptop: an Apple M2 with 16 GB of memory, with PostgreSQL 17 on the same machine. The figures below are medians of three runs (the soak ran once), and every one of them comes from [docs/benchmarks.md](docs/benchmarks.md), which holds the method, the exact commands, the spread of the runs and the raw output.
+
+- **Throughput.** One broker sustained 3,781 jobs per second (2,844 to 4,250 over three runs), and at half of that rate the enqueue-to-start latency was 0.97 ms at p50 and 19 ms at p99. Three brokers on the same machine did not triple it: 4,250 jobs per second (4,250 to 6,125).
+- **What the optimisations buy.** Batched leases raise the sustained rate by a factor of 1.6 and coalesced acknowledgements by 1.4. With `NOTIFY`, a job on an idle queue starts after 5.4 ms at p50, against 498 ms with polling alone.
+- **A noisy neighbour.** While another tenant floods the queue with 100,000 jobs, a small tenant's p99 wait is 18 ms under deficit round robin and 28.5 s under first-come-first-served (p50: 2.6 ms and 15.4 s).
+- **Recovery.** The 100 jobs of a killed worker all ran again about 32 s after the kill, inside the bound of 33 s for a lease TTL of 30 s. Cutting one of three brokers off under load cost one to three failed calls and no job.
+- **A half-hour soak.** At 1,890 jobs per second throughput did not drift (+0.17%), but the size of the jobs table did not plateau: it was level at 433 to 442 MiB from minute 15 to 27 and then grew to 569 MiB by minute 30. The autovacuum and fillfactor settings of the table are not validated by this run yet.
+- **River as a reference.** River, run as a library with no network hop, sustained 10,250 jobs per second (10,250 to 11,469), 2.7 times one broker.
+
+![Empirical distribution of tenant B's wait behind a flood of 100,000 jobs, under FIFO and under deficit round robin](docs/benchmarks/noisy-neighbor.svg)
+
+These are the numbers of one laptop with PostgreSQL beside the benchmark, and the maxima move by up to a factor of 1.5 between runs; the file lists what they do and do not say, including the profile of the notify lock that PostgreSQL takes for every committing `NOTIFY`.
 
 ## What is not covered
 
