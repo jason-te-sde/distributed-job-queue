@@ -688,6 +688,55 @@ func TestWorkerHeartbeatKeepsALongHandlerAlive(t *testing.T) {
 	c.await("the job to succeed", within, func() bool { return c.get(id).State == job.StateSucceeded })
 }
 
+func TestWorkerSurvivesTwoHungHeartbeatsAtTheSmallestLegalTTL(t *testing.T) {
+	c := newCluster(t, clusterOpts{})
+	id := c.add("q", 1)[0]
+
+	// The first two heartbeats reach a broker that never answers them. A
+	// worker that waits out a long timeout for each loses the lease at once,
+	// because no later heartbeat goes out while one is in flight; one that
+	// gives up after a period sends the third in time. The TTL is the
+	// shortest the broker accepts, 1s, and the margin leaves room for it.
+	var calls atomic.Int32
+	hang := jobqueue.WithGRPCOptions(grpc.WithChainUnaryInterceptor(
+		func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+			if strings.HasSuffix(method, "/Heartbeat") && calls.Add(1) <= 2 {
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			return invoker(ctx, method, req, reply, cc, opts...)
+		}))
+	started := make(chan struct{})
+	finish := make(chan struct{})
+	cancelled := make(chan error, 1)
+	c.startWorker(jobqueue.WorkerOptions{Margin: 100 * time.Millisecond}, func(ctx context.Context, _ *jobqueue.Job) error {
+		close(started)
+		select {
+		case <-finish:
+			return nil
+		case <-ctx.Done():
+			cancelled <- context.Cause(ctx)
+			return ctx.Err()
+		}
+	}, hang)
+	<-started
+
+	// Well past the first lease's TTL, and past the third heartbeat.
+	select {
+	case cause := <-cancelled:
+		t.Fatalf("the handler was cancelled (%v) although only two heartbeats were lost", cause)
+	case <-time.After(1500 * time.Millisecond):
+	}
+	if j := c.get(id); j.State != job.StateLeased || j.Attempts != 1 {
+		t.Fatalf("job = state %v after %d attempts, want it still leased after the first lease's TTL", j.State, j.Attempts)
+	}
+	if got := calls.Load(); got < 3 {
+		t.Errorf("Heartbeat calls = %d, want at least 3: two hung ones and the one that kept the lease", got)
+	}
+	close(finish)
+	c.await("the job to succeed", within, func() bool { return c.get(id).State == job.StateSucceeded })
+}
+
 func TestWorkerSetResultAndTheResultLimit(t *testing.T) {
 	c := newCluster(t, clusterOpts{})
 	ok := c.addSpec(job.Spec{})

@@ -236,6 +236,12 @@ type SendHeartbeat struct {
 	Refs []Ref
 	// TTL is the lease length to ask for.
 	TTL time.Duration
+	// Timeout is the longest the shell may wait for the answer before it
+	// reports the call as failed: a heartbeat period. No other heartbeat goes
+	// out while this one is in flight, so a call that hangs for longer costs
+	// the leases more than the heartbeat it stands for, and at the shortest
+	// TTLs the leases run out before it ends. The shell may use less.
+	Timeout time.Duration
 }
 
 // SendAcks reports finished handlers. The shell reports the answer with

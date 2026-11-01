@@ -1243,6 +1243,31 @@ func TestSmallestLegalTTLSurvivesTwoLostHeartbeats(t *testing.T) {
 	}
 }
 
+func TestHeartbeatCallsAreBoundedByOnePeriod(t *testing.T) {
+	// A heartbeat in flight suppresses every later one, so a call that the
+	// shell lets hang for longer than a period costs the lease more than the
+	// one heartbeat it replaces. Each call, the retry of a failed one
+	// included, carries the period as the longest the shell may wait.
+	for name, ttl := range map[string]time.Duration{"the smallest legal TTL": 12001 * ms, "the default TTL": 30 * sec} {
+		t.Run(name, func(t *testing.T) {
+			tr := newTracker(t, func(c *Config) { c.TTL = ttl })
+			first := only[RequestLeases](t, tr.Start(0))
+			if _, err := tr.LeasesGranted(0, first.Seq, 0, 0, []Grant{{Ref: ref(1), Attempt: 1, Remaining: ttl}}); err != nil {
+				t.Fatalf("LeasesGranted: %v", err)
+			}
+			period := ttl / 4
+			hb := only[SendHeartbeat](t, tr.Tick(period))
+			if hb.Timeout != period {
+				t.Errorf("heartbeat Timeout = %v, want the period %v", hb.Timeout, period)
+			}
+			retry := only[SendHeartbeat](t, tr.HeartbeatFailed(period+ms, hb.Seq))
+			if retry.Timeout != period {
+				t.Errorf("retried heartbeat Timeout = %v, want the period %v", retry.Timeout, period)
+			}
+		})
+	}
+}
+
 func TestInvariantErrors(t *testing.T) {
 	tr := newTracker(t)
 	first := only[RequestLeases](t, tr.Start(0))

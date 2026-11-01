@@ -333,7 +333,7 @@ func (wk *WorkerNode) sendHeartbeat(e lease.SendHeartbeat) {
 		reply: func(r heartbeatResp) { wk.deliver(gen, "heartbeat-resp", func() { wk.onHeartbeatResp(r) }) },
 	}
 	wk.net.Send(from, to, true, "heartbeat-req", func() { wk.net.broker(to).handleHeartbeat(req) })
-	wk.after(gen, rpcTimeout, "heartbeat-timeout", func() {
+	wk.after(gen, min(rpcTimeout, e.Timeout), "heartbeat-timeout", func() {
 		if _, pending := wk.inflight[e.Seq]; pending {
 			delete(wk.inflight, e.Seq)
 			wk.apply(wk.tr.HeartbeatFailed(wk.mono(), e.Seq))

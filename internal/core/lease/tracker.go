@@ -352,7 +352,7 @@ func (t *Tracker) sendHeartbeat(refs []Ref, out []Effect) []Effect {
 	}
 	seq := t.seq()
 	t.hbInflight[seq] = refs
-	return append(out, SendHeartbeat{Seq: seq, Refs: slices.Clone(refs), TTL: t.cfg.TTL})
+	return append(out, SendHeartbeat{Seq: seq, Refs: slices.Clone(refs), TTL: t.cfg.TTL, Timeout: t.period})
 }
 
 // HandlerDone handles the return of the handler of ref. Its slot is free

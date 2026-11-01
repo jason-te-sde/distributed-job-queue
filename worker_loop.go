@@ -20,7 +20,8 @@ import (
 const (
 	// callTimeout bounds a heartbeat, an ack and a release. The tracker has
 	// no timeout of its own and waits for every call to be answered, so
-	// every call needs one.
+	// every call needs one. A heartbeat's is shorter when the tracker asks
+	// for less; see sendHeartbeat.
 	callTimeout = 5 * time.Second
 	// leaseSlack is added to the long poll to bound a Lease call: the broker
 	// answers within the poll, and the slack covers the network and the
@@ -409,8 +410,11 @@ func (e handlerReturned) apply(l *workerLoop, now lease.Mono) ([]lease.Effect, e
 // sendHeartbeat starts a Heartbeat call on a goroutine.
 func (l *workerLoop) sendHeartbeat(h lease.SendHeartbeat) {
 	req := &jobqueuev1.HeartbeatRequest{Leases: leaseRefs(h.Refs), Ttl: durationpb.New(h.TTL)}
+	// The tracker asks for no more than a heartbeat period, which is shorter
+	// than callTimeout at every TTL below 20s.
+	timeout := min(callTimeout, h.Timeout)
 	go func() {
-		ctx, cancel := context.WithTimeout(l.rpc, callTimeout)
+		ctx, cancel := context.WithTimeout(l.rpc, timeout)
 		defer cancel()
 		sentAt := l.now()
 		resp, err := l.client.Heartbeat(ctx, req)
