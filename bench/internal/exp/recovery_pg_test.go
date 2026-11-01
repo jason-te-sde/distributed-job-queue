@@ -89,6 +89,9 @@ func TestPGRecoveryKillBrokerLosesNoJob(t *testing.T) {
 	if r.Metrics["sent"] != 600 || r.Metrics["started"] != 600 {
 		t.Errorf("sent %v, started %v; want all 600 jobs to start despite the dead broker", r.Metrics["sent"], r.Metrics["started"])
 	}
+	if _, ok := r.Metrics["duplicate_starts"]; !ok {
+		t.Errorf("the result does not report duplicate_starts: %v", r.Metrics)
+	}
 	if errs := r.Metrics["errors_after_kill"]; errs > 0 && r.Metrics["error_window_s"] < 0 {
 		t.Errorf("errors_after_kill %v with a window of %v", errs, r.Metrics["error_window_s"])
 	}

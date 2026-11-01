@@ -38,11 +38,18 @@ type ProbeConfig struct {
 type Outcome struct {
 	// Offered is the rate asked for. Sent is the number of jobs whose send
 	// returned without error, Late how many sends began more than 1ms behind
-	// schedule, and Started how many jobs had started when the probe ended.
+	// schedule, and Started how many distinct jobs had started when the probe
+	// ended.
 	Offered float64
 	Sent    int
 	Late    int
 	Started int64
+	// Duplicates is the number of starts of a job that had started already. They
+	// are not in Started, and the latency of a job is recorded at its first start
+	// only. It is read when Await returns, so a duplicate that has not started by
+	// then, such as the second job of a retry that commits late, is not in it: it
+	// is a lower bound.
+	Duplicates int64
 	// SendErr is the first error of a send, which stopped the schedule.
 	SendErr error
 	// Complete is true if every sent job started within the drain wait.
@@ -55,7 +62,8 @@ type Outcome struct {
 	// ThroughputPerSec is the number of jobs started per second between the
 	// start of the schedule and the last start.
 	ThroughputPerSec float64
-	// Hist holds the enqueue-to-start latency of every job that started.
+	// Hist holds the enqueue-to-start latency of every job that started, at its
+	// first start.
 	Hist *hist.Hist
 }
 
@@ -78,6 +86,7 @@ func (o *Outcome) Metrics() map[string]float64 {
 		"achieved_rate":    achieved,
 		"sent":             float64(o.Sent),
 		"started":          float64(o.Started),
+		"duplicate_starts": float64(o.Duplicates),
 		"late_sends":       float64(o.Late),
 		"drain_seconds":    o.DrainSeconds,
 		"throughput_per_s": o.ThroughputPerSec,
@@ -126,6 +135,7 @@ func probeFrom(ctx context.Context, cfg ProbeConfig, start time.Time, m *Meter, 
 		}
 	}
 	o.Started = m.StartedTotal()
+	o.Duplicates = m.DuplicatesTotal()
 	if last := m.LastStart(); !last.IsZero() {
 		if span := last.Sub(start).Seconds(); span > 0 {
 			o.ThroughputPerSec = float64(o.Started) / span

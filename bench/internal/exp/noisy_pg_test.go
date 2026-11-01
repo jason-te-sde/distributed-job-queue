@@ -33,6 +33,9 @@ func TestPGNoisyNeighborFIFOStarvesBAndDRRDoesNot(t *testing.T) {
 		if r.Metrics["a_jobs"] != 3000 || r.Metrics["b_jobs"] != 60 {
 			t.Errorf("%s: a_jobs %v, b_jobs %v; want 3000 and 60", scheduler, r.Metrics["a_jobs"], r.Metrics["b_jobs"])
 		}
+		if _, ok := r.Metrics["duplicate_starts"]; !ok {
+			t.Errorf("%s: the result does not report duplicate_starts: %v", scheduler, r.Metrics)
+		}
 		if len(r.CDF) < 50 {
 			t.Errorf("%s: the result carries %d CDF points, want a curve to plot", scheduler, len(r.CDF))
 		}

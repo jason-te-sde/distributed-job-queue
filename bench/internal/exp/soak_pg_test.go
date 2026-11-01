@@ -36,13 +36,26 @@ func TestPGSoakSamplesEveryIntervalAndPrunes(t *testing.T) {
 		if s.Metrics["table_bytes"] <= 0 || s.Metrics["throughput_per_s"] <= 0 {
 			t.Errorf("sample %d lacks the table size or throughput: %v", i, s.Metrics)
 		}
+		if _, ok := s.Metrics["duplicate_starts"]; !ok {
+			t.Errorf("sample %d does not report duplicate_starts: %v", i, s.Metrics)
+		}
 		if s.Params["retention"] != "1s" {
 			t.Errorf("sample %d states retention %q, want 1s: the run must say its pruning is shortened", i, s.Params["retention"])
 		}
 	}
 	sum := summaries[0]
+	// started counts distinct jobs, so a duplicate start cannot stand in for a job
+	// that never ran. The test does not ask for zero duplicates: the store dedups
+	// an enqueue by its key only for as long as the job is kept, and this run keeps
+	// finished jobs for 1s. An attempt that hits its 30s per-call deadline can
+	// still commit, and the SDK retries it under the same key, so the retry comes
+	// at least 30s after that attempt began, finds the first job pruned, and makes
+	// a second one from the same payload.
 	if sum.Metrics["sent"] != 1200 || sum.Metrics["started"] != 1200 {
 		t.Errorf("summary sent %v, started %v; want 1200 each", sum.Metrics["sent"], sum.Metrics["started"])
+	}
+	if _, ok := sum.Metrics["duplicate_starts"]; !ok {
+		t.Errorf("summary does not report duplicate_starts: %v", sum.Metrics)
 	}
 	// With a retention of a second and a pruner that runs every second, a job is
 	// deleted at most about two seconds after it finished, so at 200 jobs a

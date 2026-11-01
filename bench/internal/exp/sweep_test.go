@@ -201,10 +201,10 @@ func TestSweepRejectsBadConfigurations(t *testing.T) {
 func TestOutcomeMetrics(t *testing.T) {
 	h := hist.New()
 	h.Record(10 * time.Millisecond)
-	o := &Outcome{Offered: 200, Sent: 100, Late: 3, Started: 99, Complete: false, Hist: h, LoadSeconds: 0.5, DrainSeconds: 2, ThroughputPerSec: 190}
+	o := &Outcome{Offered: 200, Sent: 100, Late: 3, Started: 99, Duplicates: 2, Complete: false, Hist: h, LoadSeconds: 0.5, DrainSeconds: 2, ThroughputPerSec: 190}
 	m := o.Metrics()
 	for key, want := range map[string]float64{
-		"offered_rate": 200, "achieved_rate": 200, "sent": 100, "started": 99, "late_sends": 3,
+		"offered_rate": 200, "achieved_rate": 200, "sent": 100, "started": 99, "duplicate_starts": 2, "late_sends": 3,
 		"drain_seconds": 2, "throughput_per_s": 190, "sustained": 0, "complete": 0,
 	} {
 		if got, ok := m[key]; !ok || got != want {

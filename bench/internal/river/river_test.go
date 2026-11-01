@@ -32,6 +32,18 @@ func TestRunRefusesBadOptions(t *testing.T) {
 	}
 }
 
+func TestPayloadFloorIsTheStamp(t *testing.T) {
+	validate := func(n int) error {
+		return Options{DatabaseURL: "postgres://127.0.0.1:1/none", Rate: 100, Duration: time.Second, PayloadBytes: n}.withDefaults().validate()
+	}
+	if err := validate(exp.StampBytes - 1); err == nil || !strings.Contains(err.Error(), "payload") {
+		t.Errorf("%d bytes, one under the stamp: error = %v, want it refused for the payload", exp.StampBytes-1, err)
+	}
+	if err := validate(exp.StampBytes); err != nil {
+		t.Errorf("%d bytes, the size of the stamp, was refused: %v", exp.StampBytes, err)
+	}
+}
+
 func TestParamsLabelTheRunAsLibraryMode(t *testing.T) {
 	p := Options{Duration: time.Second, FetchCooldown: time.Millisecond}.withDefaults().params()
 	if !strings.Contains(p["mode"], "no network hop") || !strings.Contains(p["mode"], "not a like-for-like") {

@@ -36,6 +36,9 @@ func TestPGRiverRunsAtAFixedRateAndRemovesItsSchema(t *testing.T) {
 	if r.Metrics["sent"] != 400 || r.Metrics["started"] != 400 {
 		t.Errorf("sent %v, started %v; want all 400 jobs of 200/s for 2s to start", r.Metrics["sent"], r.Metrics["started"])
 	}
+	if _, ok := r.Metrics["duplicate_starts"]; !ok {
+		t.Errorf("the result does not report duplicate_starts: %v", r.Metrics)
+	}
 	if r.Quantiles["p50"] <= 0 {
 		t.Errorf("no latency quantiles: %v", r.Quantiles)
 	}

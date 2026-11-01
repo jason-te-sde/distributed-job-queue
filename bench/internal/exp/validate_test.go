@@ -52,6 +52,28 @@ func TestThroughputRefusesBadOptions(t *testing.T) {
 	}
 }
 
+func TestPayloadFloorIsTheStamp(t *testing.T) {
+	db := Setup{DatabaseURL: "postgres://127.0.0.1:1/none"}
+	for name, validate := range map[string]func(payloadBytes int) error{
+		"throughput": func(n int) error {
+			return ThroughputOptions{Setup: db, Rate: 100, PayloadBytes: n}.withDefaults().validate()
+		},
+		"noisy": func(n int) error {
+			return NoisyOptions{Setup: db, Scheduler: "drr", Flood: 1, BRate: 1, PayloadBytes: n}.withDefaults().validate()
+		},
+		"soak": func(n int) error {
+			return SoakOptions{Setup: db, Rate: 100, PayloadBytes: n}.withDefaults().validate()
+		},
+	} {
+		if err := validate(StampBytes - 1); err == nil || !strings.Contains(err.Error(), "payload") {
+			t.Errorf("%s: %d bytes, one under the stamp: error = %v, want it refused for the payload", name, StampBytes-1, err)
+		}
+		if err := validate(StampBytes); err != nil {
+			t.Errorf("%s: %d bytes, the size of the stamp, was refused: %v", name, StampBytes, err)
+		}
+	}
+}
+
 func TestAblateRefusesBadOptions(t *testing.T) {
 	base := ThroughputOptions{Setup: Setup{DatabaseURL: "postgres://127.0.0.1:1/none"}, Rate: 100, Duration: time.Second}
 	refuses(t, "unknown ablation", "--what", func() error {

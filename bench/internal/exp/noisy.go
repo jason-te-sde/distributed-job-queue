@@ -46,7 +46,7 @@ type NoisyOptions struct {
 	// there are.
 	ServiceTime          time.Duration
 	Workers, Concurrency int
-	// PayloadBytes is the size of every payload, at least 8.
+	// PayloadBytes is the size of every payload, at least StampBytes.
 	PayloadBytes int
 }
 
@@ -94,8 +94,8 @@ func (o NoisyOptions) validate() error {
 		return fmt.Errorf("--workers must be at least 1, got %d", o.Workers)
 	case o.Concurrency < 1 || o.Concurrency > maxConcurrency:
 		return fmt.Errorf("--concurrency must be between 1 and %d, got %d", maxConcurrency, o.Concurrency)
-	case o.PayloadBytes < stampBytes || o.PayloadBytes > maxPayload:
-		return fmt.Errorf("--payload-bytes must be between %d and %d, got %d", stampBytes, maxPayload, o.PayloadBytes)
+	case o.PayloadBytes < StampBytes || o.PayloadBytes > maxPayload:
+		return fmt.Errorf("--payload-bytes must be between %d and %d, got %d", StampBytes, maxPayload, o.PayloadBytes)
 	}
 	return nil
 }
@@ -268,6 +268,7 @@ func (r *rig) noisy(ctx context.Context, o NoisyOptions) (Result, error) {
 		"b_late_sends":      float64(bLate),
 		"a_enqueue_seconds": time.Duration(aEnqueuedAt.Load()).Seconds(),
 		"capacity_per_s":    capacity,
+		"duplicate_starts":  float64(m.DuplicatesTotal()),
 	}
 	if last := m.LastStartOf(tenantA); !last.IsZero() {
 		metrics["a_drain_seconds"] = last.Sub(start).Seconds()

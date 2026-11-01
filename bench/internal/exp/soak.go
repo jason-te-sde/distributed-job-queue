@@ -40,7 +40,7 @@ type SoakOptions struct {
 	// every result states the value.
 	Retention     time.Duration
 	PruneInterval time.Duration
-	// PayloadBytes is the size of each payload, at least 8; Workers and
+	// PayloadBytes is the size of each payload, at least StampBytes; Workers and
 	// Concurrency are as in E1.
 	PayloadBytes         int
 	Workers, Concurrency int
@@ -90,8 +90,8 @@ func (o SoakOptions) validate() error {
 		return fmt.Errorf("--retention must be a positive whole number of microseconds, got %v", o.Retention)
 	case o.PruneInterval <= 0:
 		return fmt.Errorf("--prune-interval must be positive, got %v", o.PruneInterval)
-	case o.PayloadBytes < stampBytes || o.PayloadBytes > maxPayload:
-		return fmt.Errorf("--payload-bytes must be between %d and %d, got %d", stampBytes, maxPayload, o.PayloadBytes)
+	case o.PayloadBytes < StampBytes || o.PayloadBytes > maxPayload:
+		return fmt.Errorf("--payload-bytes must be between %d and %d, got %d", StampBytes, maxPayload, o.PayloadBytes)
 	case o.Workers < 1:
 		return fmt.Errorf("--workers must be at least 1, got %d", o.Workers)
 	case o.Concurrency < 1 || o.Concurrency > maxConcurrency:
@@ -139,6 +139,12 @@ func (r *rig) tableStats(ctx context.Context) (tableStats, error) {
 // the end one of phase "summary". Finished jobs are kept for Retention, not the
 // production 24h, so that the table reaches its steady size during the run; the
 // value is in the params of every result.
+//
+// A job counts once, at its first start. started_total is a running total of
+// those, and duplicate_starts one of the later starts of jobs that had started.
+// The short retention makes duplicates possible: a producer call that commits
+// after its deadline is retried, and a retry that finds its first job pruned
+// makes a second job of the same send.
 func Soak(ctx context.Context, o SoakOptions, emit Emit) error {
 	o = o.withDefaults()
 	if err := o.validate(); err != nil {
@@ -217,7 +223,7 @@ sampling:
 		case <-tick.C:
 		}
 		now := time.Now()
-		started := m.Started(benchTenant)
+		started, duplicates := m.Started(benchTenant), m.Duplicates(benchTenant)
 		perSecond := float64(started-lastCount) / now.Sub(lastAt).Seconds()
 		lastCount, lastAt = started, now
 
@@ -239,7 +245,7 @@ sampling:
 		emit(Result{
 			Experiment: "soak", Params: params,
 			Metrics: map[string]float64{
-				"throughput_per_s": perSecond, "started_total": float64(started),
+				"throughput_per_s": perSecond, "started_total": float64(started), "duplicate_starts": float64(duplicates),
 				"table_bytes": float64(stats.total), "heap_bytes": float64(stats.heap), "index_bytes": float64(stats.indexes),
 				"rows": float64(stats.rows), "dead_tuples": float64(stats.dead),
 			},
@@ -274,6 +280,7 @@ sampling:
 		Experiment: "soak", Params: params,
 		Metrics: map[string]float64{
 			"sent": float64(end.out.Sent), "started": float64(end.out.Started), "late_sends": float64(end.out.Late),
+			"duplicate_starts":            float64(end.out.Duplicates),
 			"samples":                     float64(len(sizes)),
 			"throughput_first_mean_per_s": first, "throughput_last_mean_per_s": last, "throughput_drift_pct": drift,
 			"table_bytes_first": float64(sizes[0]), "table_bytes_final": float64(sizes[len(sizes)-1]),

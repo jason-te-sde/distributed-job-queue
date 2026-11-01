@@ -28,6 +28,9 @@ func TestPGThroughputAtAFixedRateOverThreeBrokers(t *testing.T) {
 	if r.Metrics["sent"] != 400 || r.Metrics["started"] != 400 {
 		t.Errorf("sent %v, started %v; want 400 jobs of 200/s for 2s all started", r.Metrics["sent"], r.Metrics["started"])
 	}
+	if _, ok := r.Metrics["duplicate_starts"]; !ok {
+		t.Errorf("the result does not report duplicate_starts: %v", r.Metrics)
+	}
 	// Whether the rate was sustained, and the latencies, depend on the machine;
 	// this test runs on CI's small runners, so it asserts only that every job that
 	// was sent started and that the latency was recorded.

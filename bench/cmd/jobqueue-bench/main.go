@@ -39,6 +39,10 @@ import (
 
 const databaseURLEnv = "JOBQUEUE_DATABASE_URL"
 
+// payloadBytesUsage is the help of --payload-bytes, whose floor is the stamp
+// that every payload starts with.
+var payloadBytesUsage = fmt.Sprintf("payload size in bytes, at least %d", exp.StampBytes)
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr, os.Getenv)
@@ -191,7 +195,7 @@ func (l *load) register(fs *flag.FlagSet, duration time.Duration) {
 	fs.Float64Var(&l.hi, "hi", exp.DefaultHi, "highest rate of the --find-max search, jobs per second")
 	fs.IntVar(&l.steps, "steps", exp.DefaultSteps, "bisection steps of the --find-max search")
 	fs.DurationVar(&l.duration, "duration", duration, "how long each probe offers load")
-	fs.IntVar(&l.payloadBytes, "payload-bytes", exp.DefaultPayloadBytes, "payload size in bytes, at least 8")
+	fs.IntVar(&l.payloadBytes, "payload-bytes", exp.DefaultPayloadBytes, payloadBytesUsage)
 }
 
 // workers holds the flags that size the workers.
@@ -257,7 +261,7 @@ func cmdNoisy(inv *invocation) error {
 	fs.Float64Var(&o.BRate, "b-rate", exp.DefaultBRate, "jobs per second that tenant B sends")
 	fs.DurationVar(&o.Duration, "duration", exp.DefaultDuration, "how long tenant B sends")
 	fs.DurationVar(&o.ServiceTime, "service-time", exp.DefaultServiceTime, "how long each handler takes, which sets the capacity the flood exceeds")
-	fs.IntVar(&o.PayloadBytes, "payload-bytes", exp.DefaultPayloadBytes, "payload size in bytes, at least 8")
+	fs.IntVar(&o.PayloadBytes, "payload-bytes", exp.DefaultPayloadBytes, payloadBytesUsage)
 	if err := inv.parse(fs); err != nil {
 		return err
 	}
@@ -305,7 +309,7 @@ func cmdSoak(inv *invocation) error {
 	fs.DurationVar(&o.Interval, "interval", exp.DefaultSoakInterval, "how often the run is sampled")
 	fs.DurationVar(&o.Retention, "retention", exp.DefaultSoakRetention, "how long finished jobs are kept; shorter than the 24h of production, and stated in every result")
 	fs.DurationVar(&o.PruneInterval, "prune-interval", exp.DefaultPruneInterval, "how often finished jobs are deleted")
-	fs.IntVar(&o.PayloadBytes, "payload-bytes", exp.DefaultPayloadBytes, "payload size in bytes, at least 8")
+	fs.IntVar(&o.PayloadBytes, "payload-bytes", exp.DefaultPayloadBytes, payloadBytesUsage)
 	if err := inv.parse(fs); err != nil {
 		return err
 	}

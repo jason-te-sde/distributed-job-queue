@@ -157,7 +157,7 @@ func enqueueN(ctx context.Context, p *jobqueue.Producer, queue string, n int) er
 	for n > 0 {
 		batch := make([]jobqueue.EnqueueParams, min(n, job.MaxBatch))
 		for i := range batch {
-			batch[i] = jobqueue.EnqueueParams{Queue: queue, Tenant: benchTenant, Payload: make([]byte, stampBytes)}
+			batch[i] = jobqueue.EnqueueParams{Queue: queue, Tenant: benchTenant, Payload: make([]byte, StampBytes)}
 		}
 		if _, err := p.EnqueueBatch(ctx, batch); err != nil {
 			return err
@@ -469,6 +469,7 @@ func (r *rig) killBroker(ctx context.Context, o RecoveryOptions) (Result, error)
 		"errors_after_kill":  float64(len(after)),
 		"sent":               float64(out.Sent),
 		"started":            float64(out.Started),
+		"duplicate_starts":   float64(out.Duplicates),
 		"late_sends":         float64(out.Late),
 	}
 	for _, op := range []string{"Lease", "Heartbeat", "Ack", "Release"} {

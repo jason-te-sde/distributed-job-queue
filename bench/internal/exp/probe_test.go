@@ -139,3 +139,34 @@ func TestProbeStopsWithItsContext(t *testing.T) {
 		t.Errorf("Probe error = %v, want context.Canceled: the user's interrupt is not a verdict on the rate", err)
 	}
 }
+
+func TestProbeDuplicateStartDoesNotStandInForAJobThatNeverStarted(t *testing.T) {
+	m := NewMeter("bench")
+	// Job 0 is lost, and job 1 starts twice: the starts add up to the 50 jobs
+	// sent, though only 49 of them ran.
+	out, err := Probe(t.Context(), ProbeConfig{Rate: 500, Duration: 100 * time.Millisecond, DrainWait: 200 * time.Millisecond}, m, "bench",
+		func(_ context.Context, k int, intended time.Time) error {
+			if k == 0 {
+				return nil
+			}
+			payload := m.Payload(intended, 16)
+			start := func() { _ = m.ObservePayload("bench", payload) }
+			time.AfterFunc(time.Millisecond, start)
+			if k == 1 {
+				time.AfterFunc(2*time.Millisecond, start)
+			}
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	if out.Sent != 50 || out.Started != 49 || out.Duplicates != 1 || out.Complete {
+		t.Errorf("outcome = sent %d, started %d, duplicates %d, complete %v; want 50, 49, 1, false", out.Sent, out.Started, out.Duplicates, out.Complete)
+	}
+	if out.Hist.Count() != 49 {
+		t.Errorf("histogram holds %d samples, want 49: one per job that started", out.Hist.Count())
+	}
+	if got := out.Metrics()["duplicate_starts"]; got != 1 {
+		t.Errorf("Metrics()[duplicate_starts] = %v, want 1", got)
+	}
+}

@@ -63,7 +63,7 @@ type Options struct {
 	Lo, Hi   float64
 	Steps    int
 	Duration time.Duration
-	// PayloadBytes is the size of each job's arguments, at least 8.
+	// PayloadBytes is the size of each job's arguments, at least exp.StampBytes.
 	PayloadBytes int
 	// Concurrency is River's MaxWorkers for the queue, and DBConns the size of
 	// its database pool.
@@ -116,8 +116,8 @@ func (o Options) validate() error {
 	switch {
 	case o.DatabaseURL == "":
 		return exp.ErrNoDatabase
-	case o.PayloadBytes < 8:
-		return fmt.Errorf("--payload-bytes must be at least 8, got %d", o.PayloadBytes)
+	case o.PayloadBytes < exp.StampBytes:
+		return fmt.Errorf("--payload-bytes must be at least %d, got %d", exp.StampBytes, o.PayloadBytes)
 	case o.Concurrency < 1:
 		return fmt.Errorf("--concurrency must be at least 1, got %d", o.Concurrency)
 	case o.DBConns < 1:
@@ -158,10 +158,11 @@ func riverVersion() string {
 	return "unknown"
 }
 
-// benchArgs are the arguments of a job: the stamp of its intended time, and
-// padding to the size asked for.
+// benchArgs are the arguments of a job: its stamp, which is the intended time and
+// the sequence number the meter gave it, and padding to the size asked for.
 type benchArgs struct {
 	Stamp int64  `json:"stamp"`
+	Seq   uint64 `json:"seq"`
 	Pad   string `json:"pad,omitempty"`
 }
 
@@ -177,7 +178,7 @@ type benchWorker struct {
 
 // Work records the start of the job.
 func (w *benchWorker) Work(_ context.Context, job *river.Job[benchArgs]) error {
-	return w.m.Observe(tenant, job.Args.Stamp)
+	return w.m.Observe(tenant, exp.Stamp{Intended: job.Args.Stamp, Seq: job.Args.Seq})
 }
 
 // Run is E6. It creates a schema of its own for River's tables, migrates it,
@@ -267,10 +268,11 @@ func (r *runner) probe(ctx context.Context, rate float64, duration, drainWait ti
 	if err := client.Start(runCtx); err != nil {
 		return nil, fmt.Errorf("start the river client: %w", err)
 	}
-	pad := strings.Repeat("x", max(0, r.o.PayloadBytes-8))
+	pad := strings.Repeat("x", max(0, r.o.PayloadBytes-exp.StampBytes))
 	out, err := exp.Probe(ctx, exp.ProbeConfig{Rate: rate, Duration: duration, DrainWait: drainWait, StartDelay: startDelay}, m, tenant,
 		func(ctx context.Context, _ int, intended time.Time) error {
-			_, err := client.Insert(ctx, benchArgs{Stamp: m.Stamp(intended), Pad: pad}, &river.InsertOpts{Queue: queue})
+			s := m.NewStamp(intended)
+			_, err := client.Insert(ctx, benchArgs{Stamp: s.Intended, Seq: s.Seq, Pad: pad}, &river.InsertOpts{Queue: queue})
 			return err
 		})
 	stopCtx, cancel := context.WithTimeout(context.Background(), stopTimeout)

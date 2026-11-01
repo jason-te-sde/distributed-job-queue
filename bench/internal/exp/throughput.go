@@ -21,7 +21,7 @@ type ThroughputOptions struct {
 	Steps   int
 	// Duration is how long each probe offers load.
 	Duration time.Duration
-	// PayloadBytes is the size of each job's payload, at least 8.
+	// PayloadBytes is the size of each job's payload, at least StampBytes.
 	PayloadBytes int
 	// Workers is the number of workers and Concurrency the handlers each runs.
 	Workers, Concurrency int
@@ -59,8 +59,8 @@ func (o ThroughputOptions) validate() error {
 		return err
 	}
 	switch {
-	case o.PayloadBytes < stampBytes || o.PayloadBytes > maxPayload:
-		return fmt.Errorf("--payload-bytes must be between %d and %d, got %d", stampBytes, maxPayload, o.PayloadBytes)
+	case o.PayloadBytes < StampBytes || o.PayloadBytes > maxPayload:
+		return fmt.Errorf("--payload-bytes must be between %d and %d, got %d", StampBytes, maxPayload, o.PayloadBytes)
 	case o.Workers < 1:
 		return fmt.Errorf("--workers must be at least 1, got %d", o.Workers)
 	case o.Concurrency < 1 || o.Concurrency > maxConcurrency:
