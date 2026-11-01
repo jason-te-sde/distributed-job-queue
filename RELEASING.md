@@ -40,6 +40,14 @@ The steps that only build come before the first one that publishes, so a failure
 
 ## After the release
 
+**After the first release only: make the image public.** A container package that is first pushed to `ghcr.io` under a personal account is private by default. Until it is public, `helm install` with the chart's default image fails with `ImagePullBackOff` (a 401 from the registry) for everyone but the owner. On GitHub, open the package `ghcr.io/jason-te-sde/distributed-job-queue`, go to Package settings and set its visibility to Public. The visibility belongs to the package, so later tags need nothing. Then check it with a pull that uses no login, by giving Docker an empty configuration directory:
+
+```sh
+DOCKER_CONFIG="$(mktemp -d)" docker pull ghcr.io/jason-te-sde/distributed-job-queue:X.Y.Z
+```
+
+The chart needs no such step: it is a `.tgz` attached to the GitHub release, not a package in a registry.
+
 Check that the release page lists the four archives, the chart and `SHA256SUMS`; that `sha256sum -c SHA256SUMS` passes in a directory with the downloads; that a downloaded `jobqueue-server --version` and `jobqueuectl version` print the tag; and that `docker pull ghcr.io/jason-te-sde/distributed-job-queue:X.Y.Z` works and `docker run --rm --entrypoint /jobqueuectl ghcr.io/jason-te-sde/distributed-job-queue:X.Y.Z version` prints the tag. Install the chart on a test cluster once.
 
 ## If a release is wrong
