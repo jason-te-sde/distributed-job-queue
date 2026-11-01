@@ -16,7 +16,7 @@ import (
 
 // Version is the highest embedded migration. It equals the number of files in
 // the sql directory, which TestMigrationsAreContiguous enforces.
-const Version = 1
+const Version = 2
 
 // LockKey is the pg_advisory_lock key that serializes Up across processes. It
 // is the ASCII bytes of "jobqueue".

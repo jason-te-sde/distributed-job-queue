@@ -142,8 +142,8 @@ const (
 	lineCheckAdmin = "jobqueue-server: migrate: read the schema version: FATAL: terminating connection due to administrator command (SQLSTATE 57P01)"                                                                  // composed
 	lineCheckDown  = "jobqueue-server: migrate: read the schema version: failed to connect to `user=postgres database=exp_ok`: 127.0.0.1:1 (127.0.0.1): dial error: dial tcp 127.0.0.1:1: connect: connection refused" // composed
 
-	lineSchema      = "jobqueue-server: database schema version 0, this binary needs 1: run jobqueuectl migrate"
-	lineSchemaAhead = "jobqueue-server: database schema version 2, this binary needs 1: run jobqueuectl migrate" // composed
+	lineSchema      = "jobqueue-server: database schema version 0, this binary needs 2: run jobqueuectl migrate"
+	lineSchemaAhead = "jobqueue-server: database schema version 3, this binary needs 2: run jobqueuectl migrate" // composed
 	linePassword    = "jobqueue-server: open the database: pgstore open: store unavailable: failed to connect to `user=postgres database=exp_ok`: 127.0.0.1:55432 (127.0.0.1): failed SASL auth: FATAL: password authentication failed for user \"postgres\" (SQLSTATE 28P01)"
 	lineNoDB        = "jobqueue-server: open the database: pgstore open: store unavailable: failed to connect to `user=postgres database=nope`: 127.0.0.1:55432 (127.0.0.1): server error: FATAL: database \"nope\" does not exist (SQLSTATE 3D000)"
 	lineNoRights    = "jobqueue-server: migrate: read the schema version: ERROR: permission denied for schema jobqueue (SQLSTATE 42501)"

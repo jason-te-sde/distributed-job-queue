@@ -379,6 +379,48 @@ func lockHolders(t *testing.T, pool *pgxpool.Pool) int {
 	return n
 }
 
+// TestPGJobsTableStorageOptions pins the storage parameters of the jobs table
+// and of its TOAST table as they are after every migration, because the soak in
+// docs/benchmarks.md depends on them: with autovacuum's cost throttle left on, a
+// vacuum of the table took 47 s of the 60 s that autovacuum_naptime allows, and
+// the table's size stopped being level.
+func TestPGJobsTableStorageOptions(t *testing.T) {
+	pool := pgtest.NewEmptyDB(t)
+	ctx := t.Context()
+	if _, err := migrate.Up(ctx, pool); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	options := func(query string) []string {
+		t.Helper()
+		var got []string
+		if err := pool.QueryRow(ctx, query).Scan(&got); err != nil {
+			t.Fatalf("read the storage parameters: %v", err)
+		}
+		slices.Sort(got)
+		return got
+	}
+	check := func(what string, got, want []string) {
+		t.Helper()
+		slices.Sort(want)
+		if !slices.Equal(got, want) {
+			t.Errorf("%s has the storage parameters %v, want %v", what, got, want)
+		}
+	}
+
+	check("jobqueue.jobs",
+		options(`SELECT coalesce(reloptions, '{}') FROM pg_class WHERE oid = 'jobqueue.jobs'::regclass`),
+		[]string{
+			"fillfactor=85",
+			"autovacuum_vacuum_scale_factor=0.02",
+			"autovacuum_vacuum_threshold=1000",
+			"autovacuum_analyze_scale_factor=0.02",
+			"autovacuum_vacuum_cost_delay=0",
+		})
+	check("the TOAST table of jobqueue.jobs",
+		options(`SELECT coalesce(t.reloptions, '{}') FROM pg_class c JOIN pg_class t ON t.oid = c.reltoastrelid WHERE c.oid = 'jobqueue.jobs'::regclass`),
+		[]string{"autovacuum_vacuum_scale_factor=0.05"})
+}
+
 func TestPGUpRollsBackAFailedMigrationAndReleasesTheLock(t *testing.T) {
 	pool := pgtest.NewEmptyDB(t)
 	ctx := t.Context()

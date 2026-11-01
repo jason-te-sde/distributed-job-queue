@@ -1,0 +1,50 @@
+-- 0002_jobs_autovacuum_cost_delay: let autovacuum run on the jobs table without
+-- its cost-based sleeps.
+--
+-- Why. Autovacuum is throttled: it counts a cost for every page it reads or
+-- dirties and sleeps autovacuum_vacuum_cost_delay (2 ms by default) each time the
+-- count reaches the cost limit (200). On a busy jobs table that throttle is what a
+-- vacuum spends its time on. The soak of docs/benchmarks.md (E5: 1,890 jobs a
+-- second for 30 minutes, 0001's settings, log_autovacuum_min_duration = 0, the
+-- worker sampled every 5 s) measured, for the vacuums of jobqueue.jobs:
+--
+--   * 29 vacuums in 30 minutes. A vacuum took 20.6 s at about minute 4, 47 s at
+--     the median and 42 to 60 s from minute 12 on, the last one 60.4 s. A worker
+--     can start in a database once per autovacuum_naptime, 60 s on the server, so
+--     a vacuum that takes as long as that has no time to spare: the worker was
+--     busy in 63% of the samples (226 of 361).
+--   * In 219 of those 226 samples the worker was waiting in the cost delay
+--     (Timeout/VacuumDelay). A vacuum used about 1 s of CPU (0.4 s user, 0.6 s
+--     system) in its 50 s, and the cost count alone allows 10 to 12 s of sleeping.
+--   * The table stopped being level when the vacuums reached the naptime. The
+--     first soak, which had no sampler, went from 442 MiB at minute 27 to 569 MiB
+--     at minute 30, and the repeat grew by 11 MiB in its last minute, when its
+--     vacuum took 60.4 s.
+--
+-- The same soak with autovacuum_vacuum_cost_delay = 0 on this table only: 31
+-- vacuums, a median of 0.69 s and a longest of 6.0 s, the worker busy in 4 of 361
+-- samples, and 367 MiB at minute 30 against 438 MiB. A cost limit raised from 200
+-- was not tried. It would shorten a vacuum by making it sleep less often, but each
+-- sleep would still wait for the scheduler on a busy machine (that is where the
+-- time above beyond the cost count went), and the value that is high enough
+-- depends on the machine. Without the delay a vacuum takes what its reads and
+-- writes take.
+--
+-- What it costs. An unthrottled vacuum dirties up to about 50,000 pages and writes
+-- up to about 180 MB of WAL in about a second. The load felt it in one of the two
+-- runs with the setting. In the 30-minute run above the p99 of the load was 1.8 to
+-- 6.3 s in six of the eight minutes from minute 13 to 20, against a median of
+-- 134 ms and a worst of 1.0 s over the minutes of the throttled run, and the p99
+-- of the whole run was 2.3 s against 0.5 s. In the 60-minute run that applied this
+-- migration the p99 of the whole run was 0.37 s, 3 of its 60 minutes had a p99
+-- above 1 s (the worst 3.2 s), and the table was 367.6 MiB at minute 30 and
+-- 376.6 MiB at minute 60. The cause of the bad minutes was not found.
+--
+-- What it leaves alone. The TOAST table keeps the default delay: the soak's
+-- payloads are 64 bytes and stay in the row, so the throttle of a TOAST table that
+-- holds large payloads was not measured. The jobs_idempotency index also keeps
+-- growing, slowly (0.4 MiB a minute over the last ten minutes with the delay
+-- removed, 1.0 with it): its keys are random, so deleting finished rows leaves its
+-- pages part empty and vacuum never frees one, which is a property of the index
+-- and not of the pace of the vacuum.
+ALTER TABLE jobqueue.jobs SET (autovacuum_vacuum_cost_delay = 0);
