@@ -349,6 +349,7 @@ port: http" readinessProbe: httpGet:
   expect_block "the liveness probe to request /healthz on the http port" "path: /healthz
 port: http" livenessProbe: httpGet:
   expect_block "the preStop hook to run the jobqueuectl sleep subcommand" 'command: ["/jobqueuectl", "sleep", "5s"]' lifecycle: preStop: exec:
+  expect_block_has "the broker to be told to drain for 25 seconds" '- "--shutdown-grace=25s"' args:
 fi
 
 if render "preStopSleepSeconds=7" --set preStopSleepSeconds=7 --show-only templates/deployment.yaml; then
@@ -356,13 +357,28 @@ if render "preStopSleepSeconds=7" --set preStopSleepSeconds=7 --show-only templa
 fi
 
 # The pod is killed when terminationGracePeriodSeconds runs out, so the preStop
-# sleep plus the broker's 25 second drain must be strictly smaller. 14 + 25 is
-# 39, which fits in 40; 15 + 25 is 40, which does not.
+# sleep plus the broker's drain (25 seconds by default) must be strictly
+# smaller. 14 + 25 is 39, which fits in 40; 15 + 25 is 40, which does not.
 render "preStopSleepSeconds=14, the largest value that fits" --set preStopSleepSeconds=14 >/dev/null || true
 expect_render_error "preStopSleepSeconds=15, no room left to drain" \
   "must be less than terminationGracePeriodSeconds" --set preStopSleepSeconds=15
 expect_render_error "terminationGracePeriodSeconds=30" \
   "must be less than terminationGracePeriodSeconds" --set terminationGracePeriodSeconds=30
+
+# The drain is the broker's --shutdown-grace, and the chart passes the same
+# value that the guard above counts, so a change to one cannot leave the other
+# behind. With the preStop sleep at 5 and the termination grace at 40, a drain
+# of 34 seconds fits and is passed on as 34s, and 35 does not fit.
+if render "shutdownGraceSeconds=10" --set shutdownGraceSeconds=10 --show-only templates/deployment.yaml; then
+  expect_block_has "the broker to be told to drain for shutdownGraceSeconds" '- "--shutdown-grace=10s"' args:
+fi
+if render "shutdownGraceSeconds=34, the largest value that fits" --set shutdownGraceSeconds=34 --show-only templates/deployment.yaml; then
+  expect_block_has "the broker to be told to drain for shutdownGraceSeconds" '- "--shutdown-grace=34s"' args:
+fi
+expect_render_error "shutdownGraceSeconds=35, no room left to drain" \
+  "must be less than terminationGracePeriodSeconds" --set shutdownGraceSeconds=35
+expect_render_error "shutdownGraceSeconds=0, which the broker refuses" \
+  "shutdownGraceSeconds must be at least 1" --set shutdownGraceSeconds=0
 
 if render "migration Job" --show-only templates/migrate-job.yaml; then
   expect_text "the migration Job to run jobqueuectl" 'command: ["/jobqueuectl"]'

@@ -237,3 +237,19 @@ broken_case example-renders-replicas-under-keda-fails "the example worker Deploy
   sub templates/example-worker.yaml 's/{{- if not .Values.example.keda.enabled }}/{{- if true }}/'
 broken_case example-drops-replicas-without-keda-fails "one example worker replica" \
   sub templates/example-worker.yaml 's/{{- if not .Values.example.keda.enabled }}/{{- if false }}/'
+
+# (z) The broker is told how long to drain, from the value that the guard on
+# terminationGracePeriodSeconds counts. Each case breaks one link: the flag
+# missing, the flag not following the value, the guard not following the value,
+# the default drifting from the one the guard and the docs state, and a value
+# that the broker would refuse at startup.
+broken_case shutdown-grace-flag-never-passed-fails "the broker to be told to drain for 25 seconds" \
+  sub templates/deployment.yaml 's/--shutdown-grace=/--shutdown-wait=/'
+broken_case shutdown-grace-flag-ignores-value-fails "the broker to be told to drain for shutdownGraceSeconds" \
+  sub templates/deployment.yaml 's/printf "--shutdown-grace=%ss" (include "jobqueue.shutdownGraceSeconds" .)/printf "--shutdown-grace=%ss" "25"/'
+broken_case shutdown-guard-ignores-value-fails "shutdownGraceSeconds=35, no room left to drain" \
+  sub templates/deployment.yaml 's/(int (include "jobqueue.shutdownGraceSeconds" .))/25/'
+broken_case shutdown-grace-default-drifts-fails "the broker to be told to drain for 25 seconds" \
+  sub values.yaml 's/^shutdownGraceSeconds: 25$/shutdownGraceSeconds: 20/'
+broken_case shutdown-grace-zero-allowed-fails "shutdownGraceSeconds must be at least 1" \
+  sub templates/deployment.yaml 's/{{- if lt (int .Values.shutdownGraceSeconds) 1 }}/{{- if false }}/'

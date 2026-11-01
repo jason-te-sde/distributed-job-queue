@@ -50,8 +50,12 @@ scaler:
 pdb:
   minAvailable: 1
 
-# The preStop sleep plus the broker shutdown grace (25s) must be less than the
-# termination grace period; the chart refuses to render otherwise.
+# How long the broker drains after SIGTERM, waiting for running calls before it
+# cuts them off. The chart passes it to the broker as --shutdown-grace.
+shutdownGraceSeconds: 25
+# The preStop sleep plus shutdownGraceSeconds must be less than the termination
+# grace period, or the kubelet kills the pod in the middle of the drain; the
+# chart refuses to render otherwise.
 terminationGracePeriodSeconds: 40
 preStopSleepSeconds: 5
 
