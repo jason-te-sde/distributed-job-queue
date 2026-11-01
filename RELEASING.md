@@ -40,11 +40,13 @@ The steps that only build come before the first one that publishes, so a failure
 
 ## After the release
 
-**After the first release only: make the image public.** A container package that is first pushed to `ghcr.io` under a personal account is private by default. Until it is public, `helm install` with the chart's default image fails with `ImagePullBackOff` (a 401 from the registry) for everyone but the owner. On GitHub, open the package `ghcr.io/jason-te-sde/distributed-job-queue`, go to Package settings and set its visibility to Public. The visibility belongs to the package, so later tags need nothing. A package that is public cannot be made private again. Then check it with a pull that uses no login, by giving Docker an empty configuration directory:
+**Check that the image can be pulled without a login.** The workflow pushes the image with `GITHUB_TOKEN` from this public repository, and the image's `org.opencontainers.image.source` label names it, so the package takes the repository's visibility: v0.1.0 was public from its first publish. Check it with a pull that uses no login, by giving Docker an empty configuration directory:
 
 ```sh
 DOCKER_CONFIG="$(mktemp -d)" docker pull ghcr.io/jason-te-sde/distributed-job-queue:X.Y.Z
 ```
+
+If that fails with a 401, the package is private, for example because its visibility was changed in its settings, and `helm install` with the chart's default image fails with `ImagePullBackOff` for everyone but the owner. On GitHub, open the package `ghcr.io/jason-te-sde/distributed-job-queue`, go to Package settings and set its visibility to Public. A package that is public cannot be made private again.
 
 The chart needs no such step: it is a `.tgz` attached to the GitHub release, not a package in a registry.
 
