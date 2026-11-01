@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A worker no longer gives up a finished job's acknowledgement while it holds the lease.** It gave up after five failed resends, about 3 s, although the lease held for up to 27 s more, so an outage of a few seconds made the job wait for its lease to expire and run again. In the Kubernetes end-to-end test, a rolling restart that replaced every broker a worker knew left it without a broker for about 10 s, and the jobs it had finished took 31 s from enqueue to finish. A failed acknowledgement is now sent again, at most 2 s apart, for as long as the worker holds the lease, and at least five times; past a shutdown's drain timeout only the five tries count ([#78](https://github.com/jason-te-sde/distributed-job-queue/issues/78)).
+- **The documentation of a broker's shutdown.** It said that a draining broker keeps serving heartbeats and acknowledgements. A draining broker finishes the calls that are running and refuses new calls of every kind, which workers send to other brokers.
+
 ## [0.1.0] - 2026-11-01
 
 The first release.
@@ -30,4 +37,5 @@ The first release.
 - The schema is at version 2.
 - Known limitations, tracked as issues: every broker computes the KEDA scaler's backlog with an aggregate over all the ready, leased and dead rows of the queue about once a second, so its cost grows with the backlog and with the dead letters, which are kept for 336 hours, and it was not measured at a large backlog ([#58](https://github.com/jason-te-sde/distributed-job-queue/issues/58)); the broker bounds neither its heap nor the bytes of the requests in flight, so with messages of up to 20 MiB and the chart's 512Mi memory limit, enough concurrent maximum-size Enqueue batches can get a broker killed for running out of memory, which loses no job but leaves its leases to expire ([#59](https://github.com/jason-te-sde/distributed-job-queue/issues/59)).
 
+[Unreleased]: https://github.com/jason-te-sde/distributed-job-queue/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/jason-te-sde/distributed-job-queue/releases/tag/v0.1.0
