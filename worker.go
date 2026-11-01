@@ -46,6 +46,15 @@ type WorkerOptions struct {
 	// DrainTimeout is how long a shutdown waits for running handlers before
 	// it cancels them and gives their jobs back. Zero means 25s.
 	DrainTimeout time.Duration
+	// AckWindow is how long the first finished job waits for others before
+	// its report goes out, so that jobs that finish close together share one
+	// call to the broker. Zero means 2ms.
+	AckWindow time.Duration
+	// AckBatch is the most items in one acknowledgement, heartbeat or release
+	// call: 1 to 128. A report goes out as soon as this many are waiting,
+	// without waiting for the window to end, and 1 sends every report by
+	// itself, which turns the coalescing off. Zero means 128.
+	AckBatch int
 	// WorkerID names the worker to the broker, for its logs: 1 to 128
 	// printable ASCII characters. Empty means "<hostname>-<pid>-<8 hex
 	// digits>", which is different for every Worker.
@@ -219,6 +228,8 @@ func (w *Worker) config() (lease.Config, error) {
 		TTL:          w.opts.LeaseTTL,
 		Margin:       w.opts.Margin,
 		LongPoll:     w.opts.LongPoll,
+		AckWindow:    w.opts.AckWindow,
+		AckBatch:     w.opts.AckBatch,
 		DrainTimeout: w.opts.DrainTimeout,
 	}.WithDefaults()
 	if err := cfg.Validate(); err != nil {

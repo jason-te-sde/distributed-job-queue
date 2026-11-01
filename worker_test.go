@@ -537,6 +537,9 @@ func TestWorkerOptionsValidation(t *testing.T) {
 		"long poll over 30s":             func(o *jobqueue.WorkerOptions) { o.LongPoll = 31 * time.Second },
 		"negative long poll":             func(o *jobqueue.WorkerOptions) { o.LongPoll = -time.Second },
 		"negative drain timeout":         func(o *jobqueue.WorkerOptions) { o.DrainTimeout = -time.Second },
+		"negative ack window":            func(o *jobqueue.WorkerOptions) { o.AckWindow = -time.Millisecond },
+		"negative ack batch":             func(o *jobqueue.WorkerOptions) { o.AckBatch = -1 },
+		"ack batch over 128":             func(o *jobqueue.WorkerOptions) { o.AckBatch = 129 },
 		"worker id with a newline":       func(o *jobqueue.WorkerOptions) { o.WorkerID = "bad\nid" },
 		"worker id of 129 bytes":         func(o *jobqueue.WorkerOptions) { o.WorkerID = strings.Repeat("w", 129) },
 	} {
@@ -1041,5 +1044,112 @@ func TestWorkerKeepsBackingOffOnRetryableLeaseErrors(t *testing.T) {
 			default:
 			}
 		})
+	}
+}
+
+// ackSizes records the number of items in every Ack call that reaches the
+// broker, and passes the call on.
+type ackSizes struct {
+	mu    sync.Mutex
+	sizes []int
+}
+
+func (a *ackSizes) record(method string, req any) (any, bool) {
+	if r, ok := req.(*jobqueuev1.AckRequest); ok && method == "Ack" {
+		a.mu.Lock()
+		a.sizes = append(a.sizes, len(r.GetItems()))
+		a.mu.Unlock()
+	}
+	return nil, false
+}
+
+func (a *ackSizes) snapshot() []int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]int(nil), a.sizes...)
+}
+
+// finishTogether runs n jobs on a worker with the options, whose handlers all
+// wait until every one of them has started and then return together, so that
+// n acks become due at the same instant. It returns the size of every Ack call
+// the broker received.
+func finishTogether(t *testing.T, n int, opts jobqueue.WorkerOptions) []int {
+	t.Helper()
+	c := newCluster(t, clusterOpts{})
+	sizes := &ackSizes{}
+	c.brokers[0].setOverride(sizes.record)
+	c.add("q", n)
+
+	var started atomic.Int64
+	allStarted := make(chan struct{})
+	opts.Concurrency = n
+	c.startWorker(opts, func(ctx context.Context, _ *jobqueue.Job) error {
+		if started.Add(1) == int64(n) {
+			close(allStarted)
+		}
+		select {
+		case <-allStarted:
+		case <-ctx.Done():
+		}
+		return nil
+	})
+	c.await("every job to succeed", within, func() bool { return c.count("q", job.StateSucceeded) == n })
+	return sizes.snapshot()
+}
+
+func TestWorkerAckBatchOneSendsEachAck(t *testing.T) {
+	const n = 20
+	sizes := finishTogether(t, n, jobqueue.WorkerOptions{AckBatch: 1})
+	if len(sizes) != n {
+		t.Errorf("Ack calls = %d (sizes %v), want %d: AckBatch 1 sends every ack by itself", len(sizes), sizes, n)
+	}
+	for _, s := range sizes {
+		if s != 1 {
+			t.Fatalf("an Ack call carried %d items (sizes %v), want 1 with AckBatch 1", s, sizes)
+		}
+	}
+}
+
+func TestWorkerDefaultAckBatchCoalescesAcks(t *testing.T) {
+	// The control of the test above: with the defaults the same 20 acks share
+	// calls, so a worker that ignored AckBatch could not pass both.
+	const n = 20
+	sizes := finishTogether(t, n, jobqueue.WorkerOptions{})
+	total, most := 0, 0
+	for _, s := range sizes {
+		total += s
+		most = max(most, s)
+	}
+	if total != n {
+		t.Errorf("Ack calls carried %d items in all (sizes %v), want %d", total, sizes, n)
+	}
+	if most < 2 {
+		t.Errorf("no Ack call carried more than one item (sizes %v): the default window and batch did not coalesce", sizes)
+	}
+}
+
+func TestWorkerAckWindowDelaysTheFirstAck(t *testing.T) {
+	const window = 400 * time.Millisecond
+	c := newCluster(t, clusterOpts{})
+	c.add("q", 1)
+
+	var returned, acked atomic.Int64 // nanoseconds on the monotonic clock of base
+	base := time.Now()
+	c.brokers[0].setOverride(func(method string, _ any) (any, bool) {
+		if method == "Ack" {
+			acked.CompareAndSwap(0, int64(time.Since(base)))
+		}
+		return nil, false
+	})
+	c.startWorker(jobqueue.WorkerOptions{AckWindow: window}, func(context.Context, *jobqueue.Job) error {
+		returned.Store(int64(time.Since(base)))
+		return nil
+	})
+	c.await("the job to succeed", within, func() bool { return c.count("q", job.StateSucceeded) == 1 })
+
+	// The window starts when the loop learns that the handler returned, which
+	// is after the handler read its clock, so the wait can only be longer.
+	if got := time.Duration(acked.Load() - returned.Load()); got < window {
+		t.Errorf("the first ack reached the broker %v after the handler returned, want at least the window of %v", got, window)
 	}
 }
