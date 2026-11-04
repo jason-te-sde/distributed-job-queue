@@ -4,7 +4,9 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.1] - 2026-11-04
+
+A patch release for a defect of 0.1.0: a worker that reached no broker for a few seconds could run the jobs it had finished a second time. The fix is in the Go SDK, so workers get it by depending on `v0.1.1` of the module. `jobqueue-server`, `jobqueuectl`, the image and the chart behave as in 0.1.0, the protocol is unchanged and the schema is still at version 2, so brokers and workers of either version can run together.
 
 ### Fixed
 
@@ -37,5 +39,5 @@ The first release.
 - The schema is at version 2.
 - Known limitations, tracked as issues: every broker computes the KEDA scaler's backlog with an aggregate over all the ready, leased and dead rows of the queue about once a second, so its cost grows with the backlog and with the dead letters, which are kept for 336 hours, and it was not measured at a large backlog ([#58](https://github.com/jason-te-sde/distributed-job-queue/issues/58)); the broker bounds neither its heap nor the bytes of the requests in flight, so with messages of up to 20 MiB and the chart's 512Mi memory limit, enough concurrent maximum-size Enqueue batches can get a broker killed for running out of memory, which loses no job but leaves its leases to expire ([#59](https://github.com/jason-te-sde/distributed-job-queue/issues/59)).
 
-[Unreleased]: https://github.com/jason-te-sde/distributed-job-queue/compare/v0.1.0...HEAD
+[0.1.1]: https://github.com/jason-te-sde/distributed-job-queue/releases/tag/v0.1.1
 [0.1.0]: https://github.com/jason-te-sde/distributed-job-queue/releases/tag/v0.1.0
