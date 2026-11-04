@@ -41,12 +41,18 @@ type Config struct {
 	// DrainTimeout is how long Drain waits for running handlers before it
 	// cancels them. The default is 25s.
 	DrainTimeout time.Duration
-	// AckRetries is how many times a failed ack batch is sent again before
-	// its leases are given up. The default is 5.
+	// AckRetries is how many times, at least, a failed ack batch is sent
+	// again before its leases are given up. A batch is also sent again for as
+	// long as the tracker holds one of its leases. The default is 5.
 	AckRetries int
 	// AckRetryBase is the wait before the first resend of an ack batch. It
-	// doubles with each further resend. The default is 100ms.
+	// doubles with each further resend, up to AckRetryCap. The default is
+	// 100ms.
 	AckRetryBase time.Duration
+	// AckRetryCap is the longest wait between two resends of an ack batch, so
+	// that acks held back by a broker outage go out soon after a broker
+	// answers again. The default is 2s.
+	AckRetryCap time.Duration
 	// LeaseRetryBase is the ceiling of the jittered wait after the first
 	// failed Lease request. It doubles with each consecutive failure. The
 	// default is 100ms.
@@ -84,6 +90,9 @@ func (c Config) WithDefaults() Config {
 	}
 	if c.AckRetryBase == 0 {
 		c.AckRetryBase = 100 * time.Millisecond
+	}
+	if c.AckRetryCap == 0 {
+		c.AckRetryCap = 2 * time.Second
 	}
 	if c.LeaseRetryBase == 0 {
 		c.LeaseRetryBase = 100 * time.Millisecond
@@ -124,6 +133,7 @@ func (c Config) Validate() error {
 		{"ack_window", c.AckWindow},
 		{"drain_timeout", c.DrainTimeout},
 		{"ack_retry_base", c.AckRetryBase},
+		{"ack_retry_cap", c.AckRetryCap},
 		{"lease_retry_base", c.LeaseRetryBase},
 		{"lease_retry_cap", c.LeaseRetryCap},
 	} {
