@@ -205,6 +205,7 @@ Workers are scaled with [KEDA](https://keda.sh): the broker serves KEDA's extern
 - [docs/operations.md](docs/operations.md): running it, and what to do at 3 a.m.
 - [docs/testing.md](docs/testing.md): the test layers, the planted flaws and how to reproduce a failing seed.
 - [docs/benchmarks.md](docs/benchmarks.md): the measurements.
+- [docs/comparison.md](docs/comparison.md): how it differs from River and Asynq, with sources, and when to use which.
 - [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [CHANGELOG.md](CHANGELOG.md) and [RELEASING.md](RELEASING.md).
 
 ## License
