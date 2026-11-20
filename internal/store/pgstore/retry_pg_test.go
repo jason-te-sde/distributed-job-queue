@@ -222,18 +222,6 @@ func raceBehindAGate(t *testing.T, pool *pgxpool.Pool, refs []store.Ref, callers
 	}, call)
 }
 
-// raceBehindATableLock is raceBehindAGate for calls that insert rows, which have
-// no rows to wait for yet: the transaction that stops them holds a lock on the
-// table of jobs that every insert needs, so each caller waits at its first
-// insert and they all go on in the same instant.
-func raceBehindATableLock(t *testing.T, pool *pgxpool.Pool, callers int, call func(c int)) {
-	t.Helper()
-	raceBehind(t, pool, callers, func(tx pgx.Tx) error {
-		_, err := tx.Exec(t.Context(), "LOCK TABLE jobqueue.jobs IN SHARE ROW EXCLUSIVE MODE")
-		return err
-	}, call)
-}
-
 // raceBehind runs call(0) to call(callers-1) in goroutines of their own, once
 // hold has taken in a transaction the locks that stop them, and releases the
 // locks when PostgreSQL reports a backend waiting for a lock for each caller.
