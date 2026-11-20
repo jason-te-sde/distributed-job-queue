@@ -222,18 +222,6 @@ func raceBehindAGate(t *testing.T, pool *pgxpool.Pool, refs []store.Ref, callers
 	}, call)
 }
 
-// raceBehindATableLock is raceBehindAGate for calls that insert rows, which have
-// no rows to wait for yet: the transaction that stops them holds a lock on the
-// table of jobs that every insert needs, so each caller waits at its first
-// insert and they all go on in the same instant.
-func raceBehindATableLock(t *testing.T, pool *pgxpool.Pool, callers int, call func(c int)) {
-	t.Helper()
-	raceBehind(t, pool, callers, func(tx pgx.Tx) error {
-		_, err := tx.Exec(t.Context(), "LOCK TABLE jobqueue.jobs IN SHARE ROW EXCLUSIVE MODE")
-		return err
-	}, call)
-}
-
 // raceBehind runs call(0) to call(callers-1) in goroutines of their own, once
 // hold has taken in a transaction the locks that stop them, and releases the
 // locks when PostgreSQL reports a backend waiting for a lock for each caller.
@@ -406,15 +394,20 @@ func TestPGOppositeOrderReleasesDoNotDeadlock(t *testing.T) {
 // it may try again: the abort is a store.ErrUnavailable, and after the retries
 // the table holds one job for each key.
 //
-// The callers are held at the same moment, as raceBehindATableLock describes,
-// and the test fails unless an abort was seen: a run in which the calls happened
-// not to overlap, or in which the abort was no longer reported, would otherwise
-// pass.
+// The collision is forced, not hoped for. In every round a transaction of the
+// test holds the middle key, uncommitted. One caller names the keys in
+// ascending order and the other in descending order, so each inserts its own
+// half and stops at the middle key, holding the keys that the other needs next.
+// When both are waiting, the test commits the middle key: both go on, find it
+// taken, and each asks for a key the other holds. That is a deadlock whatever
+// the timing, so an abort is seen in every round, and the test fails if one
+// round passes without it: the abort was then no longer reported.
 func TestPGOppositeOrderEnqueuesDeadlockAsRetryable(t *testing.T) {
 	const (
 		callers = 2
 		rounds  = 8
 		keys    = 10
+		middle  = keys / 2
 	)
 	// A connection for each caller, one for the gate and one to watch.
 	pool, pg := newConcurrentStore(t, callers+2, quickDeadlockDetection)
@@ -424,14 +417,21 @@ func TestPGOppositeOrderEnqueuesDeadlockAsRetryable(t *testing.T) {
 		deadlocks int
 	)
 	for round := range rounds {
-		raceBehindATableLock(t, pool, callers, func(c int) {
+		key := func(k int) string { return fmt.Sprintf("r%d-k%d", round, k) }
+		before := deadlocks
+		raceBehind(t, pool, callers, func(tx pgx.Tx) error {
+			_, err := tx.Exec(t.Context(), `
+INSERT INTO jobqueue.jobs (queue, tenant, state, payload, run_at, attempts, max_attempts, idempotency_key, created_at)
+VALUES ('q', 't', 'ready', ''::bytea, jobqueue.now(), 0, 3, $1, jobqueue.now())`, key(middle))
+			return err
+		}, func(c int) {
 			specs := make([]job.Spec, keys)
 			for k := range keys {
 				at := k
 				if c%2 == 1 {
 					at = keys - 1 - k
 				}
-				specs[at] = job.Spec{Queue: "q", Tenant: "t", IdempotencyKey: fmt.Sprintf("r%d-k%d", round, k)}
+				specs[at] = job.Spec{Queue: "q", Tenant: "t", IdempotencyKey: key(k)}
 			}
 			for attempt := 0; ; attempt++ {
 				_, err := pg.Enqueue(t.Context(), specs)
@@ -454,6 +454,9 @@ func TestPGOppositeOrderEnqueuesDeadlockAsRetryable(t *testing.T) {
 		if t.Failed() {
 			return
 		}
+		if deadlocks == before {
+			t.Fatalf("round %d: no Enqueue was aborted, though the callers hold each other's keys", round)
+		}
 	}
 
 	var n int
@@ -462,9 +465,6 @@ func TestPGOppositeOrderEnqueuesDeadlockAsRetryable(t *testing.T) {
 	}
 	if want := rounds * keys; n != want {
 		t.Errorf("the table holds %d jobs, want %d: one for each key, however many tries it took", n, want)
-	}
-	if deadlocks == 0 {
-		t.Errorf("no Enqueue was aborted in %d rounds of %d callers: the batches did not collide, so nothing was checked", rounds, callers)
 	}
 	t.Logf("%d enqueues were aborted and retried", deadlocks)
 }
