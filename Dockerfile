@@ -20,7 +20,7 @@
 # digest is that of the multi-platform index, so the same line serves amd64 and
 # arm64. A tag can be moved to other contents; a digest cannot. Dependabot's
 # docker entry proposes a new digest, and a new tag, when either changes.
-FROM --platform=$BUILDPLATFORM golang:1.27-bookworm@sha256:d9b6a1beb9474adc2a1ce842573639b44b2a0dd49b6669f51d3821baf9ec37c9 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS build
 
 ARG TARGETOS
 ARG TARGETARCH
