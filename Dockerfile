@@ -58,7 +58,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # exist, and the distroless README lists debian13 as the current one). The
 # image has CA certificates, tzdata and a nonroot user, and nothing else: no
 # shell and no package manager.
-FROM gcr.io/distroless/static-debian13:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931
 
 COPY --from=build /out/jobqueue-server /jobqueue-server
 COPY --from=build /out/jobqueuectl /jobqueuectl
