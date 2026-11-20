@@ -243,3 +243,36 @@ commit_all "$repo" "feat: add a"
 run_check "$repo"
 expect_status handles-are-not-email 0
 pass handles-are-not-email
+
+# (r) The trailer Dependabot appends to its commits is not reported as an
+# email address.
+repo="$(new_repo)"
+printf 'package a\n' >"$repo/a.go"
+bot_trailer="Signed-off-by: dependabot[bot] <support@git""hub.com>"
+commit_all "$repo" "build(deps): bump x" "$bot_trailer"
+run_check "$repo"
+expect_status dependabot-trailer-is-allowed 0
+expect_output dependabot-trailer-is-allowed "hygiene: ok"
+pass dependabot-trailer-is-allowed
+
+# (s) The exemption is that one exact line: a different address on the bot
+# trailer, a different name on the same address, the trailer with extra text,
+# and a real address next to the bot trailer are all still reported.
+for variant in \
+  "Signed-off-by: dependabot[bot] <other@git""hub.com>" \
+  "Signed-off-by: someone <support@git""hub.com>" \
+  "${bot_trailer} and more"; do
+  repo="$(new_repo)"
+  printf 'package a\n' >"$repo/a.go"
+  commit_all "$repo" "build(deps): bump x" "$variant"
+  run_check "$repo"
+  expect_status exemption-is-exact-line 1
+  expect_output exemption-is-exact-line "email-address"
+done
+repo="$(new_repo)"
+printf 'package a\n' >"$repo/a.go"
+commit_all "$repo" "build(deps): bump x" "Reported by ${address}." "$bot_trailer"
+run_check "$repo"
+expect_status exemption-is-exact-line 1
+expect_output exemption-is-exact-line "email-address"
+pass exemption-is-exact-line

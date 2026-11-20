@@ -6,7 +6,9 @@
 # Fails when a tracked file or a commit message on the current branch
 # contains CJK text or an email address, or matches an attribution pattern.
 # The author and committer addresses of a commit are metadata, not message,
-# and are not scanned.
+# and are not scanned. One message line is exempt from the email rule: the
+# exact trailer that Dependabot appends to its commits (see dependabot_trailer
+# below). Any other line, including a variation of that one, is still scanned.
 #
 # The patterns live in attribution-patterns.txt next to this script: one
 # extended regular expression per line, matched case-insensitively. The
@@ -89,6 +91,11 @@ cjk_regex=$'\xe4[\xb8-\xbf][\x80-\xbf]|[\xe5-\xe8][\x80-\xbf][\x80-\xbf]|\xe9[\x
 # GitHub handle (@name), a scoped package (@scope/name) and user@host are not.
 email_regex='[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}'
 
+# The only line Dependabot adds to a commit message that holds an address. It is
+# a fixed string from GitHub's own bot, so it is matched whole-line and exact.
+# It is written in two pieces so that this file passes its own email rule.
+dependabot_trailer='Signed-off-by: dependabot[bot] <support@''github.com>'
+
 root_abs="$(cd "$root" && pwd -P)"
 patterns_abs="$(cd "$(dirname "$patterns_file")" && pwd -P)/$(basename "$patterns_file")"
 
@@ -133,7 +140,10 @@ while IFS= read -r sha; do
   git -C "$root" show -s --format=%B "$sha" >"$tmp/message" || die "git show failed for $sha in $root"
   run_grep -nE -e "$cjk_regex" -- "$tmp/message"
   report_hits "commit $sha" cjk-text
-  run_grep -nE -e "$email_regex" -- "$tmp/message"
+  # Blank the exempt trailer, keeping line numbers, before the email scan only.
+  awk -v t="$dependabot_trailer" '$0 == t { print ""; next } { print }' "$tmp/message" >"$tmp/message-email" ||
+    die "awk failed for $sha in $root"
+  run_grep -nE -e "$email_regex" -- "$tmp/message-email"
   report_hits "commit $sha" email-address
   run_grep -nEi -f "$expanded" -- "$tmp/message"
   report_hits "commit $sha" attribution
