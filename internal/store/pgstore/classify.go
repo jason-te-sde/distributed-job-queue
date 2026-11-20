@@ -54,6 +54,12 @@ func unavailable(err error) bool {
 	switch {
 	case errors.As(err, &connectErr), errors.As(err, &netErr), pgconn.SafeToRetry(err), closedPool(err):
 		return true
+	case errors.Is(err, pgconn.ErrConnClosed):
+		// A connection that the driver had already closed. Before pgx v5.13 the
+		// error was also reported as safe to retry; it no longer is when the
+		// closure is met while a response is read, since the request may have
+		// reached the server. The call is unavailable all the same.
+		return true
 	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
 		// A pooled connection that the other end closed cleanly, which a
 		// proxy or a firewall does to an idle one: the request is written

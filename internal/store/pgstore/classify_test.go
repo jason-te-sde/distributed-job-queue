@@ -44,6 +44,7 @@ func TestClassifyConnectionFailures(t *testing.T) {
 		"a stream that ended":        io.EOF,
 		"a stream that ended early":  io.ErrUnexpectedEOF,
 		"an early end, wrapped":      fmt.Errorf("receive message: %w", io.ErrUnexpectedEOF),
+		"a closed connection":        fmt.Errorf("rollback: %w", pgconn.ErrConnClosed),
 	} {
 		got := classify("lease", err)
 		if !errors.Is(got, store.ErrUnavailable) {
