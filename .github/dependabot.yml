@@ -1,8 +1,14 @@
 version: 2
 
 updates:
+  # One entry for both modules. bench replaces the root module with ../, so a
+  # dependency the root raises has to move in bench/go.mod in the same change;
+  # as two entries, a root update left bench failing to load until someone ran
+  # go mod tidy there.
   - package-ecosystem: gomod
-    directory: /
+    directories:
+      - /
+      - /bench
     schedule:
       interval: monthly
     groups:
@@ -15,14 +21,6 @@ updates:
       # of CI builds with. Lift this when the module's go floor reaches 1.27.
       - dependency-name: github.com/Shopify/toxiproxy/v2
         versions: [">=2.13.0"]
-
-  - package-ecosystem: gomod
-    directory: /bench
-    schedule:
-      interval: monthly
-    groups:
-      bench-go-minor-and-patch:
-        update-types: [minor, patch]
 
   - package-ecosystem: github-actions
     directories:
